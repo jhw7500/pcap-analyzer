@@ -207,7 +207,12 @@ tests/        pytest (fixtures/ 포함)
 
 ## 기여
 
-커밋 메시지는 Conventional Commits 규약을 따른다 (`.github/commitlint.config.mjs` 참조).
+커밋 메시지는 [Change Evidence Contract v1](https://github.com/jhw7500/automation/blob/0d97a63891ba4473a3a189eae643f8059b76eb56/docs/change-evidence-contract-v1.md)을
+따른다. 결과 중심 제목은 72자 이하로 쓰고, 관례적인 영문 `type(scope): ` 접두어 뒤의 결과와
+본문 필드는 한국어로 작성한다. 본문은 `Contract version`(`v1`)·`Why`·`Changes`·`Validation`·
+`References` 순서를 지킨다. 필드 제목의 선행 공백을 보존하도록 0600 임시 메시지 파일을 만들고
+`git commit --cleanup=verbatim --file <msg-file>`로 커밋한다. `.github/workflows/commit-evidence-audit.yml`이
+automation 커밋에 고정된 중앙 validator로 CEC v1 구조를 감사한다.
 
 ### PR 리뷰
 
