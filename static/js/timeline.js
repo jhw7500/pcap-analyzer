@@ -67,7 +67,7 @@
             name: 'Retry/sec',
             line: { color: '#ef4444', width: 1 },
             fill: 'tozeroy', fillcolor: 'rgba(239,68,68,0.1)',
-            xaxis: 'x', yaxis: 'y2',
+            xaxis: 'x2', yaxis: 'y2',
         });
     }
 
@@ -80,7 +80,7 @@
             type: 'scattergl', mode: 'markers',
             name: 'Ping RTT',
             marker: { color: '#10b981', size: 3 },
-            xaxis: 'x', yaxis: 'y3',
+            xaxis: 'x3', yaxis: 'y3',
         });
     }
     // Ping loss 마커
@@ -92,7 +92,7 @@
             type: 'scattergl', mode: 'markers',
             name: 'Ping Loss',
             marker: { color: '#ef4444', symbol: 'x', size: 6 },
-            xaxis: 'x', yaxis: 'y3',
+            xaxis: 'x3', yaxis: 'y3',
         });
     }
 
@@ -108,7 +108,7 @@
             name: 'Frames/sec',
             line: { color: '#6b7280', width: 1 },
             fill: 'tozeroy', fillcolor: 'rgba(107,114,128,0.1)',
-            xaxis: 'x', yaxis: 'y4',
+            xaxis: 'x4', yaxis: 'y4',
         });
     }
 
@@ -129,15 +129,14 @@
         font: { color: '#9ca3af', size: 10 },
         showlegend: true,
         legend: { orientation: 'h', y: 1.02, x: 0 },
-        grid: { rows: 4, columns: 1, subplots: [['xy'], ['xy2'], ['xy3'], ['xy4']], roworder: 'top to bottom' },
-        xaxis: { matches: 'x', showticklabels: false },
-        xaxis2: { matches: 'x', showticklabels: false },
-        xaxis3: { matches: 'x', showticklabels: false },
-        xaxis4: { matches: 'x' },
-        yaxis: { title: 'RSSI (dBm)', domain: [0.78, 1.0] },
-        yaxis2: { title: 'Retry/s', domain: [0.53, 0.75] },
-        yaxis3: { title: 'RTT (ms)', domain: [0.28, 0.50] },
-        yaxis4: { title: 'Frames/s', domain: [0.0, 0.25] },
+        xaxis:  { anchor: 'y',  domain: [0, 1], showticklabels: false },
+        xaxis2: { anchor: 'y2', domain: [0, 1], showticklabels: false, matches: 'x' },
+        xaxis3: { anchor: 'y3', domain: [0, 1], showticklabels: false, matches: 'x' },
+        xaxis4: { anchor: 'y4', domain: [0, 1], matches: 'x' },
+        yaxis:  { title: 'RSSI (dBm)', domain: [0.78, 1.0] },
+        yaxis2: { title: 'Retry/s',    domain: [0.53, 0.75] },
+        yaxis3: { title: 'RTT (ms)',    domain: [0.28, 0.50] },
+        yaxis4: { title: 'Frames/s',   domain: [0.0, 0.25] },
         shapes,
         margin: { t: 30, r: 20, b: 40, l: 60 },
     };
