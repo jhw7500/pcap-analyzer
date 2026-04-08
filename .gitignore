@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+data/analyses/
+config.local.json
+.env
+*.pcap
+*.pcapng

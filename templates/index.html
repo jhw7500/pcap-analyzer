@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}WLAN Pcap Analyzer - 대시보드{% endblock %}
+
+{% block content %}
+{% if not tshark %}
+<div class="bg-red-900/50 border border-red-700 rounded-lg p-4 mb-6">
+    <p class="text-red-300 font-semibold">tshark가 설치되어 있지 않습니다.</p>
+    <p class="text-red-400 text-sm mt-1">
+        <a href="/settings" class="underline">설정 페이지</a>에서 tshark 경로를 지정하거나,
+        <code class="bg-red-800 px-1 rounded">apt install tshark</code>로 설치하세요.
+    </p>
+</div>
+{% endif %}
+
+<!-- 업로드 영역 -->
+<div class="bg-gray-800 rounded-lg p-6 mb-6 border border-gray-700">
+    <h2 class="text-lg font-semibold mb-4">pcap 파일 분석</h2>
+    <form id="upload-form" enctype="multipart/form-data">
+        <div id="drop-zone"
+             class="border-2 border-dashed border-gray-600 rounded-lg p-8 text-center cursor-pointer hover:border-blue-500 transition-colors mb-4">
+            <p class="text-gray-400 text-lg mb-2">pcap 파일을 드래그하거나 클릭하여 선택</p>
+            <p class="text-gray-500 text-sm">.pcap, .pcapng, .cap (최대 200MB)</p>
+            <input type="file" id="pcap-file" name="file" accept=".pcap,.pcapng,.cap" class="hidden">
+            <p id="file-name" class="text-blue-400 mt-2 hidden"></p>
+        </div>
+
+        <!-- 옵션 (접이식) -->
+        <details class="mb-4">
+            <summary class="text-gray-400 text-sm cursor-pointer hover:text-gray-300">분석 옵션 (WPA 복호화, 필터)</summary>
+            <div class="grid grid-cols-2 gap-4 mt-3">
+                <div>
+                    <label class="block text-xs text-gray-500 mb-1">SSID (WPA 복호화)</label>
+                    <input type="text" name="ssid" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-500 mb-1">Passphrase</label>
+                    <input type="password" name="passphrase" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-500 mb-1">MAC 필터 (콤마 구분)</label>
+                    <input type="text" name="mac_filter" placeholder="aa:bb:cc:dd:ee:ff" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-500 mb-1">IP 필터 (콤마 구분)</label>
+                    <input type="text" name="ip_filter" placeholder="192.168.1.1" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-500 mb-1">시작 시간</label>
+                    <input type="text" name="time_start" placeholder="YYYY-MM-DD HH:MM:SS" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-500 mb-1">종료 시간</label>
+                    <input type="text" name="time_end" placeholder="YYYY-MM-DD HH:MM:SS" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
+                </div>
+            </div>
+        </details>
+
+        <div id="progress-area" class="hidden mb-4">
+            <div class="flex items-center gap-3">
+                <div class="flex-1 bg-gray-700 rounded-full h-3">
+                    <div id="progress-bar" class="bg-blue-500 h-3 rounded-full transition-all" style="width: 0%"></div>
+                </div>
+                <span id="progress-text" class="text-sm text-gray-400">0%</span>
+            </div>
+            <p id="progress-msg" class="text-xs text-gray-500 mt-1"></p>
+        </div>
+
+        <button type="submit" id="upload-btn"
+                class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                {% if not tshark %}disabled{% endif %}>
+            분석 시작
+        </button>
+    </form>
+</div>
+
+<!-- 분석 결과 목록 -->
+{% if analyses %}
+<div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+    <h2 class="text-lg font-semibold mb-4">분석 결과 목록</h2>
+    <table class="w-full text-sm">
+        <thead class="text-gray-400 border-b border-gray-700">
+            <tr>
+                <th class="text-left py-2">파일명</th>
+                <th class="text-right py-2">프레임 수</th>
+                <th class="text-right py-2">분석 시간</th>
+                <th class="text-right py-2"></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for a in analyses %}
+            <tr class="border-b border-gray-700/50 hover:bg-gray-700/30">
+                <td class="py-2">{{ a.pcap_name }}</td>
+                <td class="text-right py-2">{{ "{:,}".format(a.frame_count) }}</td>
+                <td class="text-right py-2 text-gray-400">{{ a.analyzed_at }}</td>
+                <td class="text-right py-2">
+                    <a href="/analysis/{{ a.id }}" class="text-blue-400 hover:underline">보기</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/upload.js"></script>
+{% endblock %}
