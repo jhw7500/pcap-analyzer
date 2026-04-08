@@ -164,26 +164,28 @@
     const ping = DATA.ping || {};
     const pairs = ping.pairs || [];
     const losses = ping.losses || [];
+    const fullList = ping.full_list || [];
+    const pingStatsData = ping.stats || {};
 
     // Ping KPI
     const pingKpi = document.getElementById('ping-kpi');
-    if (pingKpi) {
-        const totalPing = pairs.length + losses.length;
-        const lossPct = totalPing > 0 ? (losses.length * 100 / totalPing).toFixed(1) : '0';
-        const avgRtt = pairs.length > 0 ? (pairs.reduce((s, p) => s + p.rtt_ms, 0) / pairs.length).toFixed(1) : '-';
+    if (pingKpi && pingStatsData.count !== undefined) {
+        const s = pingStatsData;
         pingKpi.innerHTML = [
-            { label: 'Ping 응답', value: pairs.length + '건' },
-            { label: 'Ping Loss', value: losses.length + '건 (' + lossPct + '%)' },
-            { label: '평균 RTT', value: avgRtt + 'ms' },
+            { label: 'Ping 응답', value: s.count + '건', color: '' },
+            { label: 'Ping Loss', value: s.loss_count + '건 (' + s.loss_pct + '%)',
+              color: s.loss_count > 0 ? 'text-red-400' : '' },
+            { label: '평균 RTT', value: s.avg + 'ms', color: '' },
+            { label: 'P95 RTT', value: s.p95 + 'ms', color: s.p95 > 10 ? 'text-yellow-400' : '' },
         ].map(k =>
             `<div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
                 <p class="text-xs text-gray-500">${k.label}</p>
-                <p class="text-xl font-bold">${k.value}</p>
+                <p class="text-xl font-bold ${k.color}">${k.value}</p>
             </div>`
         ).join('');
     }
 
-    // Ping RTT 시계열
+    // Ping RTT 시계열 (큰 차트)
     if (pairs.length > 0 && document.getElementById('chart-ping-rtt')) {
         const normalPairs = pairs.filter(p => !p.has_retry);
         const retryPairs = pairs.filter(p => p.has_retry);
@@ -192,11 +194,12 @@
             traces_ping.push({
                 x: normalPairs.map(p => new Date(p.epoch * 1000)),
                 y: normalPairs.map(p => p.rtt_ms),
-                type: 'scattergl', mode: 'markers',
+                type: 'scattergl', mode: 'markers+lines',
                 name: 'RTT (정상)',
-                marker: { color: '#10b981', size: 4 },
-                text: normalPairs.map(p => '#' + p.req_num + ' → #' + p.reply_num),
-                hovertemplate: '%{text}<br>%{y:.2f}ms<extra></extra>',
+                line: { color: '#10b981', width: 1 },
+                marker: { color: '#10b981', size: 5 },
+                text: normalPairs.map(p => 'Seq ' + p.seq + '  #' + p.req_num + '\u2192#' + p.reply_num),
+                hovertemplate: '%{text}<br>RTT: %{y:.2f}ms<br>%{x}<extra></extra>',
             });
         }
         if (retryPairs.length > 0) {
@@ -204,24 +207,31 @@
                 x: retryPairs.map(p => new Date(p.epoch * 1000)),
                 y: retryPairs.map(p => p.rtt_ms),
                 type: 'scattergl', mode: 'markers',
-                name: 'RTT (Retry 포함)',
-                marker: { color: '#f59e0b', size: 4, symbol: 'diamond' },
+                name: 'RTT (Retry)',
+                marker: { color: '#f59e0b', size: 7, symbol: 'diamond' },
+                text: retryPairs.map(p => 'Seq ' + p.seq + ' RETRY  #' + p.req_num + '\u2192#' + p.reply_num),
+                hovertemplate: '%{text}<br>RTT: %{y:.2f}ms<extra></extra>',
             });
         }
         if (losses.length > 0) {
+            const maxRtt = pairs.length > 0 ? Math.max(...pairs.map(p => p.rtt_ms)) : 10;
             traces_ping.push({
                 x: losses.map(p => new Date(p.epoch * 1000)),
-                y: losses.map(() => 0),
+                y: losses.map(() => maxRtt * 1.1),
                 type: 'scattergl', mode: 'markers',
-                name: 'Loss (미응답)',
-                marker: { color: '#ef4444', size: 7, symbol: 'x' },
-                text: losses.map(p => '#' + p.req_num + ' ' + p.src + ' → ' + p.dst),
-                hovertemplate: '%{text}<extra>미응답</extra>',
+                name: 'LOSS (미응답)',
+                marker: { color: '#ef4444', size: 10, symbol: 'x', line: { width: 2 } },
+                text: losses.map(p => 'Seq ' + p.seq + ' LOSS  #' + p.req_num + '  ' + p.src + '\u2192' + p.dst),
+                hovertemplate: '%{text}<extra></extra>',
             });
         }
         Plotly.newPlot('chart-ping-rtt', traces_ping, {
-            ...DARK, xaxis: { title: '시간' }, yaxis: { title: 'RTT (ms)' },
-        }, { responsive: true, displayModeBar: false });
+            ...DARK,
+            xaxis: { title: { text: '시간', font: { size: 12 } }, gridcolor: '#374151' },
+            yaxis: { title: { text: 'RTT (ms)', font: { size: 12 } }, gridcolor: '#374151' },
+            legend: { font: { size: 12 } },
+            margin: { t: 10, r: 20, b: 50, l: 60 },
+        }, { responsive: true, displayModeBar: true });
     }
 
     // RTT 히스토그램
@@ -229,49 +239,60 @@
         Plotly.newPlot('chart-ping-hist', [{
             x: pairs.map(p => p.rtt_ms), type: 'histogram',
             marker: { color: '#3b82f6' },
-            nbinsx: 30,
-        }], { ...DARK, xaxis: { title: 'RTT (ms)' }, yaxis: { title: '빈도' } },
-        { responsive: true, displayModeBar: false });
+            nbinsx: 40,
+        }], {
+            ...DARK,
+            xaxis: { title: { text: 'RTT (ms)', font: { size: 12 } }, gridcolor: '#374151' },
+            yaxis: { title: { text: '빈도', font: { size: 12 } }, gridcolor: '#374151' },
+            margin: { t: 10, r: 10, b: 50, l: 50 },
+        }, { responsive: true, displayModeBar: false });
     }
 
-    // Ping 통계
+    // Ping 통계 (서버에서 계산된 값 사용)
     const pingStats = document.getElementById('ping-stats');
-    if (pingStats && pairs.length > 0) {
-        const rtts = pairs.map(p => p.rtt_ms).sort((a, b) => a - b);
-        const min = rtts[0].toFixed(2);
-        const max = rtts[rtts.length - 1].toFixed(2);
-        const avg = (rtts.reduce((s, v) => s + v, 0) / rtts.length).toFixed(2);
-        const p50 = rtts[Math.floor(rtts.length * 0.5)].toFixed(2);
-        const p95 = rtts[Math.floor(rtts.length * 0.95)].toFixed(2);
-        const p99 = rtts[Math.floor(rtts.length * 0.99)].toFixed(2);
+    if (pingStats && pingStatsData.count) {
+        const s = pingStatsData;
         pingStats.innerHTML = `
-            <div class="grid grid-cols-2 gap-2">
-                <div>Min: <span class="text-white">${min}ms</span></div>
-                <div>Max: <span class="text-white">${max}ms</span></div>
-                <div>Avg: <span class="text-white">${avg}ms</span></div>
-                <div>P50: <span class="text-white">${p50}ms</span></div>
-                <div>P95: <span class="text-white">${p95}ms</span></div>
-                <div>P99: <span class="text-white">${p99}ms</span></div>
-            </div>
-            <div class="mt-3 text-gray-500">
-                총 ${pairs.length + losses.length}건 중 ${losses.length}건 미응답
-                (${((losses.length / (pairs.length + losses.length)) * 100).toFixed(1)}% loss)
-            </div>`;
+            <table class="w-full text-sm">
+                <tr><td class="text-gray-400 py-1">총 Ping</td><td class="text-right text-white font-bold">${s.count + s.loss_count}건</td></tr>
+                <tr><td class="text-gray-400 py-1">응답</td><td class="text-right text-green-400">${s.count}건</td></tr>
+                <tr><td class="text-gray-400 py-1">미응답 (Loss)</td><td class="text-right text-red-400">${s.loss_count}건 (${s.loss_pct}%)</td></tr>
+                <tr class="border-t border-gray-700"><td class="text-gray-400 py-1">Min RTT</td><td class="text-right text-white">${s.min}ms</td></tr>
+                <tr><td class="text-gray-400 py-1">Max RTT</td><td class="text-right text-white">${s.max}ms</td></tr>
+                <tr><td class="text-gray-400 py-1">Avg RTT</td><td class="text-right text-white font-bold">${s.avg}ms</td></tr>
+                <tr class="border-t border-gray-700"><td class="text-gray-400 py-1">P50 (중앙값)</td><td class="text-right text-white">${s.p50}ms</td></tr>
+                <tr><td class="text-gray-400 py-1">P95</td><td class="text-right ${s.p95 > 10 ? 'text-yellow-400' : 'text-white'}">${s.p95}ms</td></tr>
+                <tr><td class="text-gray-400 py-1">P99</td><td class="text-right ${s.p99 > 20 ? 'text-red-400' : 'text-white'}">${s.p99}ms</td></tr>
+            </table>`;
     }
 
-    // Ping Loss 테이블
-    const pingLossTable = document.querySelector('#ping-loss-table tbody');
-    if (pingLossTable && losses.length > 0) {
-        pingLossTable.innerHTML = losses.map((l, i) =>
-            `<tr class="border-b border-gray-700/50 text-red-400">
-                <td class="py-1">${i + 1}</td>
-                <td class="py-1 font-mono text-xs">#${l.req_num}</td>
-                <td class="py-1 text-xs">${new Date(l.epoch * 1000).toLocaleTimeString()}</td>
-                <td class="py-1 font-mono text-xs">${l.src} → ${l.dst}</td>
-            </tr>`
-        ).join('');
-    } else if (pingLossTable) {
-        pingLossTable.innerHTML = '<tr><td colspan="4" class="py-4 text-center text-gray-500">Ping Loss 없음</td></tr>';
+    // Ping 전수검사 테이블
+    const pingFullTable = document.querySelector('#ping-full-table tbody');
+    if (pingFullTable && fullList.length > 0) {
+        pingFullTable.innerHTML = fullList.map((p, i) => {
+            const isLoss = p.status === 'loss';
+            const rowClass = isLoss ? 'text-red-400 bg-red-900/20' : (p.has_retry ? 'text-yellow-400' : '');
+            const statusBadge = isLoss
+                ? '<span class="bg-red-900 text-red-300 px-1.5 py-0.5 rounded text-xs font-bold">LOSS</span>'
+                : (p.has_retry
+                    ? '<span class="bg-yellow-900 text-yellow-300 px-1.5 py-0.5 rounded text-xs">RETRY</span>'
+                    : '<span class="bg-green-900 text-green-300 px-1.5 py-0.5 rounded text-xs">OK</span>');
+            const rttStr = p.rtt_ms !== null ? p.rtt_ms.toFixed(2) : '-';
+            const replyStr = p.reply_num !== null ? '#' + p.reply_num : '-';
+            const replyTime = p.reply_time || '-';
+            return `<tr class="border-b border-gray-700/30 ${rowClass} hover:bg-gray-700/30">
+                <td class="py-1 px-1">${i + 1}</td>
+                <td class="py-1 px-1">${p.seq || '-'}</td>
+                <td class="py-1 px-1">${statusBadge}</td>
+                <td class="py-1 px-1">#${p.req_num}</td>
+                <td class="py-1 px-1">${p.req_time || ''}</td>
+                <td class="py-1 px-1">${replyStr}</td>
+                <td class="py-1 px-1">${replyTime}</td>
+                <td class="py-1 px-1 text-right ${isLoss ? '' : (p.rtt_ms > 10 ? 'text-yellow-400 font-bold' : '')}">${rttStr}</td>
+                <td class="py-1 px-1">${p.src} \u2192 ${p.dst}</td>
+                <td class="py-1 px-1">${p.has_retry ? 'R' : ''}</td>
+            </tr>`;
+        }).join('');
     }
 
     /* ── 종합 진단 — 구조화된 카드 ── */

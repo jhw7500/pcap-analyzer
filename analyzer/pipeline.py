@@ -89,33 +89,106 @@ def _structured_signal(frames: List[Frame], roles: Dict, index) -> Dict[str, Any
 
 
 def _structured_ping(frames: List[Frame], roles: Dict) -> Dict[str, Any]:
-    """ping RTT 데이터를 시계열용으로 구조화."""
-    requests = {}
-    pairs = []
+    """ping 전수검사 — 모든 ICMP Request/Reply를 seq 기준으로 매칭, timestamp 정렬."""
+    from .core.detector import mac_name
+
+    # 1단계: 모든 ICMP 프레임 수집
+    all_requests = []  # (key, frame) 순서 보존
+    requests_map = {}  # key → frame (매칭용)
+    replies_map = {}   # key → frame
+    matched = {}       # key → (req, reply)
+
     for f in frames:
         if f.is_icmp_request and not f.retry:
-            key = (f.ip_src, f.ip_dst, f.icmp_seq) if f.icmp_seq else (f.ip_src, f.ip_dst)
-            requests[key] = f
+            key = (f.ip_src, f.ip_dst, f.icmp_seq) if f.icmp_seq else (f.ip_src, f.ip_dst, str(f.number))
+            all_requests.append((key, f))
+            requests_map[key] = f
         elif f.is_icmp_reply:
-            key = (f.ip_dst, f.ip_src, f.icmp_seq) if f.icmp_seq else (f.ip_dst, f.ip_src)
-            if key in requests:
-                req = requests.pop(key)
-                rtt = (f.epoch - req.epoch) * 1000
-                pairs.append({
-                    "epoch": req.epoch,
-                    "rtt_ms": round(rtt, 2),
-                    "req_num": req.number,
-                    "reply_num": f.number,
-                    "src": req.ip_src,
-                    "dst": req.ip_dst,
-                    "has_retry": req.retry or f.retry,
-                })
-    # 미응답 request
-    losses = [
-        {"epoch": f.epoch, "req_num": f.number, "src": f.ip_src, "dst": f.ip_dst}
-        for f in requests.values()
-    ]
-    return {"pairs": pairs, "losses": losses}
+            key = (f.ip_dst, f.ip_src, f.icmp_seq) if f.icmp_seq else (f.ip_dst, f.ip_src, "")
+            replies_map[key] = f
+
+    # 2단계: Request→Reply 매칭
+    for key, req in all_requests:
+        reply = replies_map.pop(key, None)
+        if reply:
+            matched[key] = (req, reply)
+
+    # 3단계: 전수 목록 생성 (timestamp 정렬)
+    full_list = []
+    pairs = []
+    losses = []
+
+    for key, req in all_requests:
+        seq_str = key[2] if len(key) > 2 else ""
+        if key in matched:
+            req_f, reply_f = matched[key]
+            rtt = (reply_f.epoch - req_f.epoch) * 1000
+            entry = {
+                "seq": seq_str,
+                "status": "matched",
+                "epoch": req_f.epoch,
+                "rtt_ms": round(rtt, 2),
+                "req_num": req_f.number,
+                "req_time": req_f.time_short,
+                "reply_num": reply_f.number,
+                "reply_time": reply_f.time_short,
+                "src": req_f.ip_src,
+                "dst": req_f.ip_dst,
+                "src_mac": mac_name(req_f.ta, roles) if req_f.ta else "",
+                "dst_mac": mac_name(req_f.ra, roles) if req_f.ra else "",
+                "has_retry": req_f.retry or reply_f.retry,
+                "req_rssi": req_f.rssi_first,
+            }
+            full_list.append(entry)
+            pairs.append(entry)
+        else:
+            entry = {
+                "seq": seq_str,
+                "status": "loss",
+                "epoch": req.epoch,
+                "rtt_ms": None,
+                "req_num": req.number,
+                "req_time": req.time_short,
+                "reply_num": None,
+                "reply_time": None,
+                "src": req.ip_src,
+                "dst": req.ip_dst,
+                "src_mac": mac_name(req.ta, roles) if req.ta else "",
+                "dst_mac": mac_name(req.ra, roles) if req.ra else "",
+                "has_retry": req.retry,
+                "req_rssi": req.rssi_first,
+            }
+            full_list.append(entry)
+            losses.append(entry)
+
+    # timestamp 정렬
+    full_list.sort(key=lambda x: x["epoch"])
+    pairs.sort(key=lambda x: x["epoch"])
+    losses.sort(key=lambda x: x["epoch"])
+
+    # 통계
+    rtt_values = [p["rtt_ms"] for p in pairs]
+    rtt_sorted = sorted(rtt_values) if rtt_values else []
+    stats = {}
+    if rtt_sorted:
+        stats = {
+            "count": len(rtt_sorted),
+            "min": round(rtt_sorted[0], 2),
+            "max": round(rtt_sorted[-1], 2),
+            "avg": round(sum(rtt_sorted) / len(rtt_sorted), 2),
+            "p50": round(rtt_sorted[len(rtt_sorted) // 2], 2),
+            "p95": round(rtt_sorted[int(len(rtt_sorted) * 0.95)], 2),
+            "p99": round(rtt_sorted[int(len(rtt_sorted) * 0.99)], 2),
+            "loss_count": len(losses),
+            "loss_pct": round(len(losses) * 100 / (len(pairs) + len(losses)), 1) if (pairs or losses) else 0,
+        }
+
+    return {
+        "full_list": full_list,
+        "pairs": pairs,
+        "losses": losses,
+        "stats": stats,
+    }
 
 
 def _structured_roaming(frames: List[Frame], roles: Dict) -> Dict[str, Any]:

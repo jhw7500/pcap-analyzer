@@ -85,30 +85,44 @@
 
 <!-- Ping 분석 탭 -->
 <div class="tab-content hidden" id="tab-ping">
-    <div class="grid grid-cols-3 gap-4 mb-4" id="ping-kpi"></div>
+    <div class="grid grid-cols-4 gap-4 mb-4" id="ping-kpi"></div>
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4">
-        <h3 class="text-sm font-semibold text-gray-400 mb-2">Ping RTT 시계열</h3>
-        <div id="chart-ping-rtt" style="height:300px"></div>
+        <h3 class="text-sm font-semibold text-gray-400 mb-2">Ping RTT 시계열 (초록=정상, 노랑=Retry, 빨강X=Loss)</h3>
+        <div id="chart-ping-rtt" style="height:400px"></div>
     </div>
     <div class="grid grid-cols-2 gap-4 mb-4">
         <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-            <h3 class="text-sm font-semibold text-gray-400 mb-2">RTT 히스토그램</h3>
-            <div id="chart-ping-hist" style="height:250px"></div>
+            <h3 class="text-sm font-semibold text-gray-400 mb-2">RTT 분포 히스토그램</h3>
+            <div id="chart-ping-hist" style="height:300px"></div>
         </div>
         <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
             <h3 class="text-sm font-semibold text-gray-400 mb-2">Ping 통계</h3>
-            <div id="ping-stats" class="text-sm space-y-1"></div>
+            <div id="ping-stats" class="text-sm space-y-2"></div>
         </div>
     </div>
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-        <h3 class="text-sm font-semibold text-gray-400 mb-2">Ping Loss 목록 (미응답 Request)</h3>
-        <table class="w-full text-sm" id="ping-loss-table">
-            <thead class="text-gray-400 border-b border-gray-700">
-                <tr><th class="text-left py-2">#</th><th class="text-left py-2">Frame</th>
-                    <th class="text-left py-2">시간</th><th class="text-left py-2">Src → Dst</th></tr>
-            </thead>
-            <tbody></tbody>
-        </table>
+        <h3 class="text-sm font-semibold text-gray-400 mb-2">
+            Ping 전수검사 (ICMP Seq 기준 Request↔Reply 매칭, Timestamp 정렬)
+        </h3>
+        <div class="overflow-x-auto max-h-[600px] overflow-y-auto">
+            <table class="w-full text-xs font-mono" id="ping-full-table">
+                <thead class="text-gray-400 border-b border-gray-700 sticky top-0 bg-gray-800">
+                    <tr>
+                        <th class="text-left py-2 px-1">#</th>
+                        <th class="text-left py-2 px-1">Seq</th>
+                        <th class="text-left py-2 px-1">상태</th>
+                        <th class="text-left py-2 px-1">Req Frame</th>
+                        <th class="text-left py-2 px-1">Req 시간</th>
+                        <th class="text-left py-2 px-1">Reply Frame</th>
+                        <th class="text-left py-2 px-1">Reply 시간</th>
+                        <th class="text-right py-2 px-1">RTT(ms)</th>
+                        <th class="text-left py-2 px-1">Src → Dst</th>
+                        <th class="text-left py-2 px-1">Retry</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
     </div>
 </div>
 
