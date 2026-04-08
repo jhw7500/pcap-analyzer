@@ -52,6 +52,7 @@
         uploadBtn.disabled = true;
         uploadBtn.textContent = '분석 중...';
         progressArea.classList.remove('hidden');
+        document.getElementById('cancel-btn').classList.remove('hidden');
 
         try {
             const resp = await fetch('/api/upload', { method: 'POST', body: formData });
@@ -82,5 +83,17 @@
         progressArea.classList.add('hidden');
         progressBar.style.width = '0%';
         progressText.textContent = '0%';
+        document.getElementById('cancel-btn').classList.add('hidden');
     }
 })();
+
+async function cancelAnalysis() {
+    const btn = document.getElementById('cancel-btn');
+    btn.disabled = true;
+    btn.textContent = '중지 중...';
+    try {
+        await fetch('/api/cancel', { method: 'POST' });
+    } catch (e) {
+        /* ignore */
+    }
+}

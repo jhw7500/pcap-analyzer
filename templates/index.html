@@ -65,11 +65,18 @@
             <p id="progress-msg" class="text-xs text-gray-500 mt-1"></p>
         </div>
 
-        <button type="submit" id="upload-btn"
-                class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                {% if not tshark %}disabled{% endif %}>
-            분석 시작
-        </button>
+        <div class="flex gap-3">
+            <button type="submit" id="upload-btn"
+                    class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    {% if not tshark %}disabled{% endif %}>
+                분석 시작
+            </button>
+            <button type="button" id="cancel-btn"
+                    class="bg-red-600 hover:bg-red-700 px-6 py-2 rounded font-semibold transition-colors hidden"
+                    onclick="cancelAnalysis()">
+                분석 중지
+            </button>
+        </div>
     </form>
 </div>
 

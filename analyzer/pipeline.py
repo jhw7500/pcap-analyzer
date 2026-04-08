@@ -211,12 +211,19 @@ def run_analysis(
     mac_filter: str = "",
     ip_filter: str = "",
     progress_cb: Optional[Callable[[str, int], None]] = None,
+    cancel_event: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """전체 분석 파이프라인 실행. 구조화된 결과를 반환."""
+
+    def _cancelled() -> bool:
+        return cancel_event is not None and cancel_event.is_set()
 
     def _progress(msg: str, pct: int = 0):
         if progress_cb:
             progress_cb(msg, pct)
+
+    if _cancelled():
+        return {"cancelled": True}
 
     _progress("tshark로 프레임 추출 중...", 10)
     frames = extract_frames(
@@ -231,8 +238,14 @@ def run_analysis(
     if not frames:
         return {"error": "프레임을 추출하지 못했습니다. tshark 경로 또는 pcap 파일을 확인하세요."}
 
+    if _cancelled():
+        return {"cancelled": True}
+
     _progress(f"{len(frames):,}프레임 추출 완료. 역할 감지 중...", 30)
     roles = detect_roles(frames)
+
+    if _cancelled():
+        return {"cancelled": True}
 
     _progress("프레임 인덱싱 중...", 40)
     index = FrameIndex(frames, roles)
@@ -255,6 +268,8 @@ def run_analysis(
     ]
     text_sections = []
     for i, (name, mod) in enumerate(analyzer_list):
+        if _cancelled():
+            return {"cancelled": True}
         _progress(f"{name} 분석...", 50 + int(40 * i / len(analyzer_list)))
         text_sections.append(mod.analyze(frames, roles, index))
 

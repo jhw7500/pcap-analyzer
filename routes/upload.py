@@ -1,14 +1,13 @@
-"""pcap 업로드 + 분석 실행."""
+"""pcap 업로드 + 분석 실행 + 취소."""
 import asyncio
 import json
 import tempfile
-import shutil
+import threading
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
-from sse_starlette.sse import EventSourceResponse
 
 import config
 from analyzer.pipeline import run_analysis
@@ -16,14 +15,14 @@ from analyzer.pipeline import run_analysis
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 
-# 진행 중인 분석 상태
-_analysis_status: dict = {}
+# 진행 중인 분석 추적: {key: {"cancel": threading.Event, "tmp": str}}
+_running: dict = {}
+_running_lock = threading.Lock()
 
 
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     tshark = config.detect_tshark()
-    # 기존 분석 결과 목록
     data_dir = config.ensure_data_dir()
     analyses = []
     for f in sorted(data_dir.glob("*.json"), reverse=True):
@@ -53,7 +52,6 @@ async def upload_pcap(
     time_start: str = Form(""),
     time_end: str = Form(""),
 ):
-    # tshark 확인
     tshark = config.detect_tshark()
     if not tshark:
         return JSONResponse(
@@ -61,7 +59,6 @@ async def upload_pcap(
             status_code=500,
         )
 
-    # 파일 크기 확인
     content = await file.read()
     if len(content) > config.MAX_UPLOAD_SIZE:
         return JSONResponse(
@@ -69,7 +66,6 @@ async def upload_pcap(
             status_code=413,
         )
 
-    # 확장자 확인
     name = file.filename or "unknown.pcap"
     if not name.endswith((".pcap", ".pcapng", ".cap")):
         return JSONResponse(
@@ -77,12 +73,16 @@ async def upload_pcap(
             status_code=400,
         )
 
-    # 임시 파일에 저장
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=Path(name).suffix)
     tmp.write(content)
     tmp.close()
 
-    # 백그라운드 분석 실행 (동기 스레드에서 실행)
+    cancel_event = threading.Event()
+    run_key = tmp.name
+
+    with _running_lock:
+        _running[run_key] = {"cancel": cancel_event, "tmp": tmp.name}
+
     def _run():
         return run_analysis(
             tmp.name,
@@ -92,21 +92,36 @@ async def upload_pcap(
             time_end=time_end,
             mac_filter=mac_filter,
             ip_filter=ip_filter,
+            cancel_event=cancel_event,
         )
 
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, _run)
-
-    # 임시 파일 삭제
-    Path(tmp.name).unlink(missing_ok=True)
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _run)
+    finally:
+        with _running_lock:
+            _running.pop(run_key, None)
+        Path(tmp.name).unlink(missing_ok=True)
 
     if "error" in result:
         return JSONResponse({"error": result["error"]}, status_code=500)
+    if result.get("cancelled"):
+        return JSONResponse({"error": "분석이 취소되었습니다."}, status_code=499)
 
-    # 결과 저장
     analysis_id = result["id"]
     data_dir = config.ensure_data_dir()
     result_path = data_dir / f"{analysis_id}.json"
     result_path.write_text(json.dumps(result, ensure_ascii=False, default=str))
 
     return JSONResponse({"id": analysis_id, "redirect": f"/analysis/{analysis_id}"})
+
+
+@router.post("/api/cancel")
+async def cancel_analysis():
+    """진행 중인 분석을 취소한다."""
+    with _running_lock:
+        if not _running:
+            return JSONResponse({"status": "no_running_analysis"})
+        for key, info in _running.items():
+            info["cancel"].set()
+        return JSONResponse({"status": "cancelled"})
