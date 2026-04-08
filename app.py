@@ -8,6 +8,7 @@ import config
 from routes.upload import router as upload_router
 from routes.analysis import router as analysis_router
 from routes.settings import router as settings_router
+from routes.ai_review import router as ai_review_router
 
 app = FastAPI(title="WLAN Pcap Analyzer")
 
@@ -17,6 +18,7 @@ templates = Jinja2Templates(directory="templates")
 app.include_router(upload_router)
 app.include_router(analysis_router)
 app.include_router(settings_router)
+app.include_router(ai_review_router)
 
 
 @app.on_event("startup")

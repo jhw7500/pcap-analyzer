@@ -91,6 +91,7 @@
                 <th class="text-right py-2">프레임 수</th>
                 <th class="text-right py-2">분석 시간</th>
                 <th class="text-right py-2"></th>
+                <th class="text-right py-2"></th>
             </tr>
         </thead>
         <tbody>
@@ -102,6 +103,9 @@
                 <td class="text-right py-2">
                     <a href="/analysis/{{ a.id }}" class="text-blue-400 hover:underline">보기</a>
                 </td>
+                <td class="text-right py-2">
+                    <button onclick="deleteAnalysis('{{ a.id }}')" class="text-red-400 hover:text-red-300 text-sm">삭제</button>
+                </td>
             </tr>
             {% endfor %}
         </tbody>
@@ -111,5 +115,12 @@
 {% endblock %}
 
 {% block scripts %}
+<script>
+async function deleteAnalysis(id) {
+    if (!confirm('이 분석 결과를 삭제하시겠습니까?')) return;
+    await fetch('/api/analysis/' + id, { method: 'DELETE' });
+    location.reload();
+}
+</script>
 <script src="/static/js/upload.js"></script>
 {% endblock %}

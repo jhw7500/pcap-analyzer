@@ -15,6 +15,9 @@ from .core.modules import (
     control_traffic, signal_quality, per_second,
     roaming_impact, ping_loss, diagnosis,
 )
+from .web.delay_analysis import analyze_delays
+from .web.anomaly_frames import detect_anomalies
+from .web.signal_cliff import analyze_signal_cliffs
 
 
 def _make_id(pcap_path: str) -> str:
@@ -284,6 +287,9 @@ def run_analysis(
         "per_second": _structured_per_second(frames),
         "device_stats": _structured_device_stats(frames, roles, index),
     }
+    structured["delay_zones"] = analyze_delays(structured["ping"], structured["roaming"], structured["per_second"])
+    structured["anomaly_frames"] = detect_anomalies(structured["overview"])
+    structured["signal_cliffs"] = analyze_signal_cliffs(structured["signal"])
 
     # 텍스트 리포트 (호환용)
     text_report = []

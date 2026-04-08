@@ -12,6 +12,10 @@
            class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm">JSON 내보내기</a>
         <a href="/api/analysis/{{ result.id }}/text" target="_blank"
            class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm">텍스트 리포트</a>
+        <button id="ai-review-btn" onclick="requestAiReview('{{ result.id }}')"
+                class="bg-purple-600 hover:bg-purple-700 px-3 py-1.5 rounded text-sm">
+            AI 리뷰 요청
+        </button>
     </div>
 </div>
 
@@ -142,4 +146,48 @@
 </script>
 <script src="/static/js/charts.js"></script>
 <script src="/static/js/timeline.js"></script>
+<script>
+    if ({{ result.get('ai_review', '') | tojson }} && {{ result.get('ai_review', '') | tojson }}.length > 0) {
+        document.addEventListener('DOMContentLoaded', () => showAiReview({{ result.get('ai_review', '') | tojson }}));
+    }
+</script>
+<script>
+async function requestAiReview(id) {
+    const btn = document.getElementById('ai-review-btn');
+    btn.disabled = true;
+    btn.textContent = 'AI 분석 중...';
+    try {
+        const resp = await fetch('/api/ai/review/' + id, { method: 'POST' });
+        const data = await resp.json();
+        if (data.error) {
+            alert(data.error);
+        } else {
+            showAiReview(data.review);
+        }
+    } catch (e) {
+        alert('AI 리뷰 실패: ' + e.message);
+    }
+    btn.disabled = false;
+    btn.textContent = 'AI 리뷰 요청';
+}
+
+function showAiReview(markdown) {
+    let panel = document.getElementById('ai-review-panel');
+    if (!panel) {
+        panel = document.createElement('div');
+        panel.id = 'ai-review-panel';
+        panel.className = 'fixed inset-0 bg-black/70 flex items-center justify-center z-50';
+        document.body.appendChild(panel);
+    }
+    panel.innerHTML = `
+        <div class="bg-gray-800 rounded-lg p-6 max-w-3xl max-h-[80vh] overflow-y-auto border border-gray-600 m-4">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-lg font-bold text-purple-400">AI 리뷰 결과</h2>
+                <button onclick="document.getElementById('ai-review-panel').remove()"
+                        class="text-gray-400 hover:text-white text-xl">&times;</button>
+            </div>
+            <div class="prose prose-invert prose-sm max-w-none whitespace-pre-wrap">${markdown}</div>
+        </div>`;
+}
+</script>
 {% endblock %}

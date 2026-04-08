@@ -41,6 +41,15 @@ async def analysis_data(analysis_id: str):
     return JSONResponse(result)
 
 
+@router.delete("/api/analysis/{analysis_id}")
+async def delete_analysis(analysis_id: str):
+    path = config.ensure_data_dir() / f"{analysis_id}.json"
+    if not path.exists():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    path.unlink()
+    return JSONResponse({"status": "deleted"})
+
+
 @router.get("/api/analysis/{analysis_id}/text")
 async def analysis_text(analysis_id: str):
     """기존 텍스트 리포트 형식으로 내보내기."""

@@ -123,6 +123,41 @@
         });
     });
 
+    /* ── 이상 구간 하이라이트 (빨간 배경) ── */
+    const delays = DATA.delay_zones || {};
+    const zones = delays.zones || [];
+    zones.forEach(z => {
+        shapes.push({
+            type: 'rect',
+            x0: epochToDate(z.start_epoch), x1: epochToDate(z.end_epoch),
+            y0: 0, y1: 1, yref: 'paper',
+            fillcolor: 'rgba(239,68,68,0.1)',
+            line: { width: 0 },
+            layer: 'below',
+        });
+    });
+
+    /* ── RSSI cliff 마커 ── */
+    const cliffs = DATA.signal_cliffs || {};
+    const cliffColors = ['#f97316', '#ec4899', '#8b5cf6'];
+    let ci = 0;
+    for (const [staName, cliffData] of Object.entries(cliffs)) {
+        const events = cliffData.cliffs || [];
+        if (events.length > 0) {
+            traces.push({
+                x: events.map(e => epochToDate(e.epoch)),
+                y: events.map(e => e.rssi_before),
+                type: 'scattergl', mode: 'markers',
+                name: staName + ' RSSI Cliff',
+                marker: { color: cliffColors[ci % cliffColors.length], size: 10, symbol: 'triangle-down' },
+                xaxis: 'x', yaxis: 'y',
+                text: events.map(e => `${e.drop_db}dB drop in ${e.duration_sec}s`),
+                hovertemplate: '%{text}<extra></extra>',
+            });
+            ci++;
+        }
+    }
+
     const layout = {
         paper_bgcolor: 'rgba(0,0,0,0)',
         plot_bgcolor: 'rgba(0,0,0,0)',

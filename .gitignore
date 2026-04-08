@@ -5,3 +5,6 @@ config.local.json
 .env
 *.pcap
 *.pcapng
+tmp/
+.omc/
+test_*.py

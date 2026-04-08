@@ -128,6 +128,9 @@ async def upload_pcap(
     if result.get("cancelled"):
         return JSONResponse({"error": "분석이 취소되었습니다."}, status_code=499)
 
+    # 원본 파일명으로 덮어쓰기 (tmp 파일명 대신)
+    result["pcap_name"] = name
+
     analysis_id = result["id"]
     data_dir = config.ensure_data_dir()
     result_path = data_dir / f"{analysis_id}.json"
