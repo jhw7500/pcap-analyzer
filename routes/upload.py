@@ -1,4 +1,4 @@
-"""pcap 업로드 + 분석 실행 + 취소."""
+"""pcap 업로드 + 분석 실행 + 취소 + 진행률 polling."""
 import asyncio
 import json
 import tempfile
@@ -15,9 +15,11 @@ from analyzer.pipeline import run_analysis
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 
-# 진행 중인 분석 추적: {key: {"cancel": threading.Event, "tmp": str}}
+# 진행 중인 분석 추적
 _running: dict = {}
 _running_lock = threading.Lock()
+# 진행률 공유 상태 (thread-safe dict)
+_progress: dict = {"msg": "", "pct": 0, "active": False}
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -40,6 +42,12 @@ async def index(request: Request):
         "tshark": tshark,
         "analyses": analyses,
     })
+
+
+@router.get("/api/progress")
+async def get_progress():
+    """분석 진행률 polling 엔드포인트."""
+    return JSONResponse(_progress)
 
 
 @router.post("/api/upload")
@@ -83,6 +91,11 @@ async def upload_pcap(
     with _running_lock:
         _running[run_key] = {"cancel": cancel_event, "tmp": tmp.name}
 
+    def progress_cb(msg, pct):
+        _progress["msg"] = msg
+        _progress["pct"] = pct
+        _progress["active"] = True
+
     def _run():
         return run_analysis(
             tmp.name,
@@ -93,12 +106,19 @@ async def upload_pcap(
             mac_filter=mac_filter,
             ip_filter=ip_filter,
             cancel_event=cancel_event,
+            progress_cb=progress_cb,
         )
+
+    _progress["msg"] = "분석 준비 중..."
+    _progress["pct"] = 0
+    _progress["active"] = True
 
     try:
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, _run)
     finally:
+        _progress["active"] = False
+        _progress["pct"] = 100
         with _running_lock:
             _running.pop(run_key, None)
         Path(tmp.name).unlink(missing_ok=True)

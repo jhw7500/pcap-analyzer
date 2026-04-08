@@ -21,6 +21,7 @@
         <button class="tab-btn active" data-tab="overview">Overview</button>
         <button class="tab-btn" data-tab="timeline">통합 타임라인</button>
         <button class="tab-btn" data-tab="roaming">로밍</button>
+        <button class="tab-btn" data-tab="ping">Ping 분석</button>
         <button class="tab-btn" data-tab="devices">장치별</button>
         <button class="tab-btn" data-tab="diagnosis">종합 진단</button>
     </nav>
@@ -78,6 +79,35 @@
     </div>
 </div>
 
+<!-- Ping 분석 탭 -->
+<div class="tab-content hidden" id="tab-ping">
+    <div class="grid grid-cols-3 gap-4 mb-4" id="ping-kpi"></div>
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4">
+        <h3 class="text-sm font-semibold text-gray-400 mb-2">Ping RTT 시계열</h3>
+        <div id="chart-ping-rtt" style="height:300px"></div>
+    </div>
+    <div class="grid grid-cols-2 gap-4 mb-4">
+        <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+            <h3 class="text-sm font-semibold text-gray-400 mb-2">RTT 히스토그램</h3>
+            <div id="chart-ping-hist" style="height:250px"></div>
+        </div>
+        <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+            <h3 class="text-sm font-semibold text-gray-400 mb-2">Ping 통계</h3>
+            <div id="ping-stats" class="text-sm space-y-1"></div>
+        </div>
+    </div>
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        <h3 class="text-sm font-semibold text-gray-400 mb-2">Ping Loss 목록 (미응답 Request)</h3>
+        <table class="w-full text-sm" id="ping-loss-table">
+            <thead class="text-gray-400 border-b border-gray-700">
+                <tr><th class="text-left py-2">#</th><th class="text-left py-2">Frame</th>
+                    <th class="text-left py-2">시간</th><th class="text-left py-2">Src → Dst</th></tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+</div>
+
 <!-- 장치별 탭 -->
 <div class="tab-content hidden" id="tab-devices">
     <div class="mb-4">
@@ -97,9 +127,10 @@
 
 <!-- 종합 진단 탭 -->
 <div class="tab-content hidden" id="tab-diagnosis">
+    <div id="diagnosis-cards" class="space-y-4 mb-4"></div>
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-        <h3 class="text-sm font-semibold text-gray-400 mb-2">종합 진단 리포트</h3>
-        <pre id="diagnosis-text" class="text-sm text-gray-300 whitespace-pre-wrap font-mono leading-relaxed"></pre>
+        <h3 class="text-sm font-semibold text-gray-400 mb-2">원본 리포트</h3>
+        <pre id="diagnosis-text" class="text-xs text-gray-400 whitespace-pre-wrap font-mono leading-relaxed max-h-96 overflow-y-auto"></pre>
     </div>
 </div>
 {% endblock %}

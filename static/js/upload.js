@@ -1,4 +1,4 @@
-/* pcap 파일 업로드 + 드래그앤드롭 */
+/* pcap 파일 업로드 + 드래그앤드롭 + 진행률 polling */
 (function () {
     const form = document.getElementById('upload-form');
     const dropZone = document.getElementById('drop-zone');
@@ -9,6 +9,9 @@
     const progressText = document.getElementById('progress-text');
     const progressMsg = document.getElementById('progress-msg');
     const uploadBtn = document.getElementById('upload-btn');
+    const cancelBtn = document.getElementById('cancel-btn');
+
+    let pollTimer = null;
 
     dropZone.addEventListener('click', () => fileInput.click());
 
@@ -39,6 +42,29 @@
         fileName.classList.remove('hidden');
     }
 
+    function startPolling() {
+        pollTimer = setInterval(async () => {
+            try {
+                const resp = await fetch('/api/progress');
+                const data = await resp.json();
+                if (data.pct !== undefined) {
+                    progressBar.style.width = data.pct + '%';
+                    progressText.textContent = data.pct + '%';
+                }
+                if (data.msg) {
+                    progressMsg.textContent = data.msg;
+                }
+            } catch (e) { /* ignore */ }
+        }, 500);
+    }
+
+    function stopPolling() {
+        if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+        }
+    }
+
     form.addEventListener('submit', async (e) => {
         e.preventDefault();
         if (!fileInput.files.length) {
@@ -52,11 +78,15 @@
         uploadBtn.disabled = true;
         uploadBtn.textContent = '분석 중...';
         progressArea.classList.remove('hidden');
-        document.getElementById('cancel-btn').classList.remove('hidden');
+        cancelBtn.classList.remove('hidden');
+
+        startPolling();
 
         try {
             const resp = await fetch('/api/upload', { method: 'POST', body: formData });
             const data = await resp.json();
+
+            stopPolling();
 
             if (!resp.ok) {
                 alert(data.error || '분석 실패');
@@ -72,6 +102,7 @@
                 window.location.href = data.redirect;
             }, 500);
         } catch (err) {
+            stopPolling();
             alert('업로드 실패: ' + err.message);
             resetForm();
         }
@@ -83,7 +114,8 @@
         progressArea.classList.add('hidden');
         progressBar.style.width = '0%';
         progressText.textContent = '0%';
-        document.getElementById('cancel-btn').classList.add('hidden');
+        progressMsg.textContent = '';
+        cancelBtn.classList.add('hidden');
     }
 })();
 

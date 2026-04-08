@@ -160,12 +160,160 @@
         }], { ...DARK, yaxis: { autorange: 'reversed' } }, { responsive: true, displayModeBar: false });
     }
 
-    /* ── 종합 진단 텍스트 ── */
+    /* ── Ping 분석 탭 ── */
+    const ping = DATA.ping || {};
+    const pairs = ping.pairs || [];
+    const losses = ping.losses || [];
+
+    // Ping KPI
+    const pingKpi = document.getElementById('ping-kpi');
+    if (pingKpi) {
+        const totalPing = pairs.length + losses.length;
+        const lossPct = totalPing > 0 ? (losses.length * 100 / totalPing).toFixed(1) : '0';
+        const avgRtt = pairs.length > 0 ? (pairs.reduce((s, p) => s + p.rtt_ms, 0) / pairs.length).toFixed(1) : '-';
+        pingKpi.innerHTML = [
+            { label: 'Ping 응답', value: pairs.length + '건' },
+            { label: 'Ping Loss', value: losses.length + '건 (' + lossPct + '%)' },
+            { label: '평균 RTT', value: avgRtt + 'ms' },
+        ].map(k =>
+            `<div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+                <p class="text-xs text-gray-500">${k.label}</p>
+                <p class="text-xl font-bold">${k.value}</p>
+            </div>`
+        ).join('');
+    }
+
+    // Ping RTT 시계열
+    if (pairs.length > 0 && document.getElementById('chart-ping-rtt')) {
+        const normalPairs = pairs.filter(p => !p.has_retry);
+        const retryPairs = pairs.filter(p => p.has_retry);
+        const traces_ping = [];
+        if (normalPairs.length > 0) {
+            traces_ping.push({
+                x: normalPairs.map(p => new Date(p.epoch * 1000)),
+                y: normalPairs.map(p => p.rtt_ms),
+                type: 'scattergl', mode: 'markers',
+                name: 'RTT (정상)',
+                marker: { color: '#10b981', size: 4 },
+                text: normalPairs.map(p => '#' + p.req_num + ' → #' + p.reply_num),
+                hovertemplate: '%{text}<br>%{y:.2f}ms<extra></extra>',
+            });
+        }
+        if (retryPairs.length > 0) {
+            traces_ping.push({
+                x: retryPairs.map(p => new Date(p.epoch * 1000)),
+                y: retryPairs.map(p => p.rtt_ms),
+                type: 'scattergl', mode: 'markers',
+                name: 'RTT (Retry 포함)',
+                marker: { color: '#f59e0b', size: 4, symbol: 'diamond' },
+            });
+        }
+        if (losses.length > 0) {
+            traces_ping.push({
+                x: losses.map(p => new Date(p.epoch * 1000)),
+                y: losses.map(() => 0),
+                type: 'scattergl', mode: 'markers',
+                name: 'Loss (미응답)',
+                marker: { color: '#ef4444', size: 7, symbol: 'x' },
+                text: losses.map(p => '#' + p.req_num + ' ' + p.src + ' → ' + p.dst),
+                hovertemplate: '%{text}<extra>미응답</extra>',
+            });
+        }
+        Plotly.newPlot('chart-ping-rtt', traces_ping, {
+            ...DARK, xaxis: { title: '시간' }, yaxis: { title: 'RTT (ms)' },
+        }, { responsive: true, displayModeBar: false });
+    }
+
+    // RTT 히스토그램
+    if (pairs.length > 0 && document.getElementById('chart-ping-hist')) {
+        Plotly.newPlot('chart-ping-hist', [{
+            x: pairs.map(p => p.rtt_ms), type: 'histogram',
+            marker: { color: '#3b82f6' },
+            nbinsx: 30,
+        }], { ...DARK, xaxis: { title: 'RTT (ms)' }, yaxis: { title: '빈도' } },
+        { responsive: true, displayModeBar: false });
+    }
+
+    // Ping 통계
+    const pingStats = document.getElementById('ping-stats');
+    if (pingStats && pairs.length > 0) {
+        const rtts = pairs.map(p => p.rtt_ms).sort((a, b) => a - b);
+        const min = rtts[0].toFixed(2);
+        const max = rtts[rtts.length - 1].toFixed(2);
+        const avg = (rtts.reduce((s, v) => s + v, 0) / rtts.length).toFixed(2);
+        const p50 = rtts[Math.floor(rtts.length * 0.5)].toFixed(2);
+        const p95 = rtts[Math.floor(rtts.length * 0.95)].toFixed(2);
+        const p99 = rtts[Math.floor(rtts.length * 0.99)].toFixed(2);
+        pingStats.innerHTML = `
+            <div class="grid grid-cols-2 gap-2">
+                <div>Min: <span class="text-white">${min}ms</span></div>
+                <div>Max: <span class="text-white">${max}ms</span></div>
+                <div>Avg: <span class="text-white">${avg}ms</span></div>
+                <div>P50: <span class="text-white">${p50}ms</span></div>
+                <div>P95: <span class="text-white">${p95}ms</span></div>
+                <div>P99: <span class="text-white">${p99}ms</span></div>
+            </div>
+            <div class="mt-3 text-gray-500">
+                총 ${pairs.length + losses.length}건 중 ${losses.length}건 미응답
+                (${((losses.length / (pairs.length + losses.length)) * 100).toFixed(1)}% loss)
+            </div>`;
+    }
+
+    // Ping Loss 테이블
+    const pingLossTable = document.querySelector('#ping-loss-table tbody');
+    if (pingLossTable && losses.length > 0) {
+        pingLossTable.innerHTML = losses.map((l, i) =>
+            `<tr class="border-b border-gray-700/50 text-red-400">
+                <td class="py-1">${i + 1}</td>
+                <td class="py-1 font-mono text-xs">#${l.req_num}</td>
+                <td class="py-1 text-xs">${new Date(l.epoch * 1000).toLocaleTimeString()}</td>
+                <td class="py-1 font-mono text-xs">${l.src} → ${l.dst}</td>
+            </tr>`
+        ).join('');
+    } else if (pingLossTable) {
+        pingLossTable.innerHTML = '<tr><td colspan="4" class="py-4 text-center text-gray-500">Ping Loss 없음</td></tr>';
+    }
+
+    /* ── 종합 진단 — 구조화된 카드 ── */
+    const diagCards = document.getElementById('diagnosis-cards');
     const diagEl = document.getElementById('diagnosis-text');
-    if (diagEl && window.TEXT_SECTIONS) {
+    if (window.TEXT_SECTIONS) {
         const diagSection = window.TEXT_SECTIONS.find(s => s.title.includes('진단'));
         if (diagSection) {
-            diagEl.textContent = diagSection.lines.join('\n');
+            // 원본 텍스트
+            if (diagEl) diagEl.textContent = diagSection.lines.join('\n');
+
+            // 구조화된 카드 파싱
+            if (diagCards) {
+                const lines = diagSection.lines;
+                let cards = [];
+                let current = null;
+                for (const line of lines) {
+                    if (line.startsWith('--- ')) {
+                        if (current) cards.push(current);
+                        current = { name: line.replace(/---/g, '').trim(), lines: [], warnings: [] };
+                    } else if (current) {
+                        current.lines.push(line);
+                        if (line.includes('[WARNING]')) current.warnings.push(line.trim());
+                    }
+                }
+                if (current) cards.push(current);
+
+                diagCards.innerHTML = cards.map(c => {
+                    const isOk = c.warnings.length === 0;
+                    const border = isOk ? 'border-green-700' : 'border-red-700';
+                    const badge = isOk
+                        ? '<span class="bg-green-900 text-green-300 px-2 py-0.5 rounded text-xs">OK</span>'
+                        : '<span class="bg-red-900 text-red-300 px-2 py-0.5 rounded text-xs">WARNING ' + c.warnings.length + '</span>';
+                    const detail = c.lines.filter(l => l.trim() && !l.startsWith('='))
+                        .map(l => `<div class="text-xs text-gray-400">${l}</div>`).join('');
+                    return `<div class="bg-gray-800 rounded-lg p-4 border ${border}">
+                        <div class="flex justify-between items-center mb-2">
+                            <span class="font-semibold text-sm">${c.name}</span>${badge}
+                        </div>${detail}</div>`;
+                }).join('');
+            }
         }
     }
 })();
+
