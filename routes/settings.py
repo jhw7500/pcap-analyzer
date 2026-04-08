@@ -12,8 +12,7 @@ templates = Jinja2Templates(directory="templates")
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
     tshark = config.detect_tshark()
-    return templates.TemplateResponse("settings.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "settings.html", {
         "tshark": tshark,
         "config": config.get_all(),
     })

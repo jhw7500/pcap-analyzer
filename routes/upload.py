@@ -37,8 +37,7 @@ async def index(request: Request):
             })
         except (json.JSONDecodeError, OSError):
             continue
-    return templates.TemplateResponse("index.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "index.html", {
         "tshark": tshark,
         "analyses": analyses,
     })

@@ -27,8 +27,7 @@ async def analysis_page(request: Request, analysis_id: str):
     result = _load_result(analysis_id)
     if not result:
         return HTMLResponse("<h1>분석 결과를 찾을 수 없습니다.</h1>", status_code=404)
-    return templates.TemplateResponse("analysis.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "analysis.html", {
         "result": result,
         "result_json": json.dumps(result.get("structured", {}), ensure_ascii=False, default=str),
     })
