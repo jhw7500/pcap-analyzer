@@ -126,38 +126,174 @@
 
     /* ── 장치별 탭 ── */
     const deviceStats = DATA.device_stats || {};
-    const deviceSelect = document.getElementById('device-select');
-    if (deviceSelect) {
-        const names = Object.keys(deviceStats);
-        deviceSelect.innerHTML = names.map(n =>
-            `<option value="${n}">${n} (${deviceStats[n].role}) - ${deviceStats[n].total_frames.toLocaleString()} frames</option>`
-        ).join('');
-        deviceSelect.addEventListener('change', renderDeviceCharts);
-        if (names.length > 0) renderDeviceCharts();
+    const allDevNames = Object.keys(deviceStats);
+    const apNames = allDevNames.filter(n => deviceStats[n].role === 'AP');
+    const staNames_dev = allDevNames.filter(n => deviceStats[n].role === 'STA');
+
+    // AP별 프레임 비교 (스택 바)
+    if (apNames.length > 0 && document.getElementById('chart-ap-compare')) {
+        const types = ['Management', 'Control', 'Data'];
+        const typeColors = { Management: '#3b82f6', Control: '#f59e0b', Data: '#10b981' };
+        const traces_ap = types.map(t => ({
+            name: t, type: 'bar',
+            x: apNames,
+            y: apNames.map(n => (deviceStats[n].type_dist || {})[t] || 0),
+            marker: { color: typeColors[t] },
+            text: apNames.map(n => ((deviceStats[n].type_dist || {})[t] || 0).toLocaleString()),
+            textposition: 'inside',
+        }));
+        Plotly.newPlot('chart-ap-compare', traces_ap, {
+            ...DARK, barmode: 'stack',
+            xaxis: { tickfont: { size: 12 } },
+            yaxis: { title: '프레임 수' },
+            legend: { font: { size: 11 } },
+        }, { responsive: true, displayModeBar: false });
     }
 
-    function renderDeviceCharts() {
+    // STA별 프레임 비교 (스택 바)
+    if (staNames_dev.length > 0 && document.getElementById('chart-sta-compare')) {
+        const types = ['Management', 'Control', 'Data'];
+        const typeColors = { Management: '#3b82f6', Control: '#f59e0b', Data: '#10b981' };
+        const traces_sta = types.map(t => ({
+            name: t, type: 'bar',
+            x: staNames_dev,
+            y: staNames_dev.map(n => (deviceStats[n].type_dist || {})[t] || 0),
+            marker: { color: typeColors[t] },
+            text: staNames_dev.map(n => ((deviceStats[n].type_dist || {})[t] || 0).toLocaleString()),
+            textposition: 'inside',
+        }));
+        Plotly.newPlot('chart-sta-compare', traces_sta, {
+            ...DARK, barmode: 'stack',
+            xaxis: { tickfont: { size: 12 } },
+            yaxis: { title: '프레임 수' },
+            legend: { font: { size: 11 } },
+        }, { responsive: true, displayModeBar: false });
+    }
+
+    // 장치별 Retry율 + RSSI 비교 (그룹 바)
+    if (allDevNames.length > 0 && document.getElementById('chart-device-retry-compare')) {
+        Plotly.newPlot('chart-device-retry-compare', [
+            {
+                name: 'Retry율 (%)', type: 'bar',
+                x: allDevNames,
+                y: allDevNames.map(n => deviceStats[n].retry_pct),
+                marker: { color: allDevNames.map(n => deviceStats[n].retry_pct > 20 ? '#ef4444' : deviceStats[n].retry_pct > 10 ? '#f59e0b' : '#3b82f6') },
+                text: allDevNames.map(n => deviceStats[n].retry_pct + '%'),
+                textposition: 'outside',
+                yaxis: 'y',
+            },
+            {
+                name: 'RSSI avg (dBm)', type: 'scatter', mode: 'markers+text',
+                x: allDevNames.filter(n => deviceStats[n].rssi_stats && deviceStats[n].rssi_stats.avg),
+                y: allDevNames.filter(n => deviceStats[n].rssi_stats && deviceStats[n].rssi_stats.avg)
+                    .map(n => deviceStats[n].rssi_stats.avg),
+                text: allDevNames.filter(n => deviceStats[n].rssi_stats && deviceStats[n].rssi_stats.avg)
+                    .map(n => deviceStats[n].rssi_stats.avg + 'dBm'),
+                textposition: 'top center',
+                marker: { color: '#ec4899', size: 12 },
+                yaxis: 'y2',
+            },
+        ], {
+            ...DARK,
+            yaxis: { title: 'Retry율 (%)', side: 'left' },
+            yaxis2: { title: 'RSSI (dBm)', side: 'right', overlaying: 'y', showgrid: false },
+            xaxis: { tickfont: { size: 12 } },
+            legend: { font: { size: 11 } },
+        }, { responsive: true, displayModeBar: false });
+    }
+
+    // 개별 장치 상세
+    const deviceSelect = document.getElementById('device-select');
+    if (deviceSelect) {
+        deviceSelect.innerHTML = allDevNames.map(n => {
+            const s = deviceStats[n];
+            return `<option value="${n}">${n} (${s.role}) - ${s.total_frames.toLocaleString()} frames, Retry ${s.retry_pct}%</option>`;
+        }).join('');
+        deviceSelect.addEventListener('change', renderDeviceDetail);
+        if (allDevNames.length > 0) renderDeviceDetail();
+    }
+
+    function renderDeviceDetail() {
         const name = deviceSelect.value;
-        const stats = deviceStats[name];
-        if (!stats) return;
+        const s = deviceStats[name];
+        if (!s) return;
+
+        // 요약 KPI
+        const detailEl = document.getElementById('device-detail-stats');
+        if (detailEl) {
+            const rssi = s.rssi_stats || {};
+            detailEl.innerHTML = `
+                <div class="grid grid-cols-5 gap-3 text-sm">
+                    <div class="bg-gray-700/50 rounded p-2"><span class="text-xs text-gray-500">총 프레임</span><br><span class="font-bold">${s.total_frames.toLocaleString()}</span></div>
+                    <div class="bg-gray-700/50 rounded p-2"><span class="text-xs text-gray-500">TX 프레임</span><br><span class="font-bold">${(s.tx_frames || 0).toLocaleString()}</span></div>
+                    <div class="bg-gray-700/50 rounded p-2"><span class="text-xs text-gray-500">Retry</span><br><span class="font-bold ${s.retry_pct > 15 ? 'text-red-400' : ''}">${s.retry_count.toLocaleString()} (${s.retry_pct}%)</span></div>
+                    <div class="bg-gray-700/50 rounded p-2"><span class="text-xs text-gray-500">RSSI avg</span><br><span class="font-bold">${rssi.avg || '-'} dBm</span></div>
+                    <div class="bg-gray-700/50 rounded p-2"><span class="text-xs text-gray-500">RSSI range</span><br><span class="font-bold">${rssi.min || '-'} ~ ${rssi.max || '-'}</span></div>
+                </div>`;
+        }
 
         // 프레임 타입 파이
         Plotly.newPlot('chart-device-type', [{
-            type: 'pie', labels: Object.keys(stats.type_dist), values: Object.values(stats.type_dist),
+            type: 'pie', labels: Object.keys(s.type_dist), values: Object.values(s.type_dist),
             marker: { colors: ['#3b82f6', '#10b981', '#f59e0b', '#6b7280'] },
-            textinfo: 'label+percent',
-        }], { ...DARK, title: { text: `${name} - Retry ${stats.retry_pct}%`, font: { size: 12, color: '#9ca3af' } } },
-        { responsive: true, displayModeBar: false });
+            textinfo: 'label+percent', textposition: 'inside',
+        }], { ...DARK }, { responsive: true, displayModeBar: false });
 
-        // 서브타입 바
-        const entries = Object.entries(stats.subtype_dist).sort((a, b) => b[1] - a[1]).slice(0, 10);
+        // MCS 분포
+        const mcs = s.mcs_dist || {};
+        if (Object.keys(mcs).length > 0) {
+            Plotly.newPlot('chart-device-mcs', [{
+                type: 'bar', x: Object.keys(mcs), y: Object.values(mcs),
+                marker: { color: '#8b5cf6' },
+                text: Object.values(mcs).map(v => v.toLocaleString()),
+                textposition: 'outside',
+            }], { ...DARK, xaxis: { title: 'MCS Index', dtick: 1 }, yaxis: { title: '프레임 수' } },
+            { responsive: true, displayModeBar: false });
+        } else {
+            document.getElementById('chart-device-mcs').innerHTML = '<p class="text-gray-500 text-center py-10">MCS 데이터 없음</p>';
+        }
+
+        // 서브타입 Top 10
+        const subEntries = Object.entries(s.subtype_dist).sort((a, b) => b[1] - a[1]).slice(0, 10);
         Plotly.newPlot('chart-device-subtype', [{
             type: 'bar', orientation: 'h',
-            x: entries.map(e => e[1]), y: entries.map(e => e[0]),
+            x: subEntries.map(e => e[1]), y: subEntries.map(e => e[0]),
             marker: { color: '#3b82f6' },
-            text: entries.map(e => e[1].toLocaleString()),
-            textposition: 'outside',
-        }], { ...DARK, yaxis: { autorange: 'reversed' } }, { responsive: true, displayModeBar: false });
+            text: subEntries.map(e => e[1].toLocaleString()), textposition: 'outside',
+        }], { ...DARK, yaxis: { autorange: 'reversed' }, margin: { l: 80 } },
+        { responsive: true, displayModeBar: false });
+
+        // 구간별 프레임/Retry 시계열
+        const buckets = s.per_bucket || [];
+        if (buckets.length > 0) {
+            Plotly.newPlot('chart-device-timeline', [
+                {
+                    x: buckets.map(b => new Date(b.epoch * 1000)),
+                    y: buckets.map(b => b.total),
+                    type: 'bar', name: '총 프레임/10s',
+                    marker: { color: 'rgba(59,130,246,0.5)' },
+                },
+                {
+                    x: buckets.map(b => new Date(b.epoch * 1000)),
+                    y: buckets.map(b => b.retry),
+                    type: 'bar', name: 'Retry/10s',
+                    marker: { color: 'rgba(239,68,68,0.7)' },
+                },
+                {
+                    x: buckets.map(b => new Date(b.epoch * 1000)),
+                    y: buckets.map(b => b.retry_pct),
+                    type: 'scatter', mode: 'lines', name: 'Retry율 (%)',
+                    line: { color: '#f59e0b', width: 2 },
+                    yaxis: 'y2',
+                },
+            ], {
+                ...DARK, barmode: 'overlay',
+                xaxis: { title: '시간' },
+                yaxis: { title: '프레임 수' },
+                yaxis2: { title: 'Retry율 (%)', side: 'right', overlaying: 'y', showgrid: false, range: [0, 100] },
+                legend: { font: { size: 11 } },
+            }, { responsive: true, displayModeBar: true });
+        }
     }
 
     /* ── Ping 분석 탭 ── */

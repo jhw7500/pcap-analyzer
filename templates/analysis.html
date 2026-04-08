@@ -128,18 +128,46 @@
 
 <!-- 장치별 탭 -->
 <div class="tab-content hidden" id="tab-devices">
-    <div class="mb-4">
-        <select id="device-select" class="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm"></select>
+    <!-- AP vs STA 프레임 비교 -->
+    <div class="grid grid-cols-2 gap-4 mb-4">
+        <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+            <h3 class="text-sm font-semibold text-gray-400 mb-2">AP별 총 프레임 비교</h3>
+            <div id="chart-ap-compare" style="height:250px"></div>
+        </div>
+        <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+            <h3 class="text-sm font-semibold text-gray-400 mb-2">STA별 총 프레임 비교</h3>
+            <div id="chart-sta-compare" style="height:250px"></div>
+        </div>
     </div>
-    <div class="grid grid-cols-2 gap-4">
-        <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-            <h3 class="text-sm font-semibold text-gray-400 mb-2">프레임 타입 분포</h3>
-            <div id="chart-device-type" style="height:300px"></div>
+    <!-- 장치별 Retry/MCS 비교 -->
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4">
+        <h3 class="text-sm font-semibold text-gray-400 mb-2">장치별 Retry율 + RSSI 비교</h3>
+        <div id="chart-device-retry-compare" style="height:300px"></div>
+    </div>
+    <!-- 개별 장치 상세 -->
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4">
+        <h3 class="text-sm font-semibold text-gray-400 mb-2">장치 상세 분석</h3>
+        <select id="device-select" class="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm mb-4"></select>
+        <div id="device-detail-stats" class="mb-4"></div>
+        <div class="grid grid-cols-3 gap-4">
+            <div>
+                <h4 class="text-xs text-gray-500 mb-1">프레임 타입</h4>
+                <div id="chart-device-type" style="height:250px"></div>
+            </div>
+            <div>
+                <h4 class="text-xs text-gray-500 mb-1">MCS 분포</h4>
+                <div id="chart-device-mcs" style="height:250px"></div>
+            </div>
+            <div>
+                <h4 class="text-xs text-gray-500 mb-1">서브타입 Top 10</h4>
+                <div id="chart-device-subtype" style="height:250px"></div>
+            </div>
         </div>
-        <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-            <h3 class="text-sm font-semibold text-gray-400 mb-2">서브타입 상세</h3>
-            <div id="chart-device-subtype" style="height:300px"></div>
-        </div>
+    </div>
+    <!-- 구간별 Retry 시계열 -->
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        <h3 class="text-sm font-semibold text-gray-400 mb-2">구간별 프레임/Retry 추이 (10초 단위)</h3>
+        <div id="chart-device-timeline" style="height:300px"></div>
     </div>
 </div>
 

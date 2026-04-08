@@ -247,7 +247,7 @@ def _structured_per_second(frames: List[Frame]) -> Dict[str, Any]:
 
 
 def _structured_device_stats(frames: List[Frame], roles: Dict, index) -> Dict[str, Any]:
-    """장치별 프레임 타입/서브타입 통계."""
+    """장치별 프레임 타입/서브타입/MCS/RSSI/시간대별 통계."""
     from collections import Counter
     from .core.models import SUBTYPE_NAMES
     result = {}
@@ -256,6 +256,9 @@ def _structured_device_stats(frames: List[Frame], roles: Dict, index) -> Dict[st
             dev_frames = index.by_ta.get(mac, []) + index.by_ra.get(mac, [])
         else:
             dev_frames = [f for f in frames if f.ta == mac or f.ra == mac]
+
+        if not dev_frames:
+            continue
 
         type_dist = Counter(f.frame_type for f in dev_frames)
         subtype_dist = Counter(f.subtype for f in dev_frames)
@@ -266,14 +269,54 @@ def _structured_device_stats(frames: List[Frame], roles: Dict, index) -> Dict[st
             name = SUBTYPE_NAMES.get(st, f"type={st}")
             subtype_named[name] = cnt
 
+        # MCS 분포 (TA 프레임만 — 해당 장치가 송신한 프레임)
+        tx_frames = [f for f in dev_frames if f.ta == mac]
+        mcs_dist = Counter(f.mcs_int for f in tx_frames if f.mcs_int is not None)
+        mcs_named = {str(k): v for k, v in sorted(mcs_dist.items())}
+
+        # RSSI 통계 (TA 프레임의 RSSI)
+        rssis = [f.rssi_first for f in tx_frames if f.rssi_first is not None]
+        rssi_stats = {}
+        if rssis:
+            rssi_sorted = sorted(rssis)
+            rssi_stats = {
+                "min": rssi_sorted[0],
+                "max": rssi_sorted[-1],
+                "avg": round(sum(rssis) / len(rssis), 1),
+                "count": len(rssis),
+            }
+
+        # 시간대별 통계 (10초 구간)
+        per_bucket = []
+        if dev_frames:
+            start_epoch = int(dev_frames[0].epoch)
+            end_epoch = int(dev_frames[-1].epoch)
+            bucket_size = 10  # 10초 구간
+            per_bucket = []
+            for bucket_start in range(start_epoch, end_epoch + 1, bucket_size):
+                bucket_end = bucket_start + bucket_size
+                bucket_frames = [f for f in dev_frames if bucket_start <= f.epoch < bucket_end]
+                total = len(bucket_frames)
+                retries = sum(1 for f in bucket_frames if f.retry)
+                per_bucket.append({
+                    "epoch": bucket_start,
+                    "total": total,
+                    "retry": retries,
+                    "retry_pct": round(retries * 100 / total, 1) if total else 0,
+                })
+
         result[info["name"]] = {
             "mac": mac,
             "role": info["role"],
             "total_frames": len(dev_frames),
+            "tx_frames": len(tx_frames),
             "type_dist": dict(type_dist),
             "subtype_dist": subtype_named,
             "retry_count": retry_count,
             "retry_pct": round(retry_count * 100 / len(dev_frames), 1) if dev_frames else 0,
+            "mcs_dist": mcs_named,
+            "rssi_stats": rssi_stats,
+            "per_bucket": per_bucket if dev_frames else [],
         }
     return result
 
