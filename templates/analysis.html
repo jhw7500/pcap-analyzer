@@ -173,11 +173,26 @@
 
 <!-- 종합 진단 탭 -->
 <div class="tab-content hidden" id="tab-diagnosis">
-    <div id="diagnosis-cards" class="space-y-4 mb-4"></div>
-    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-        <h3 class="text-sm font-semibold text-gray-400 mb-2">원본 리포트</h3>
-        <pre id="diagnosis-text" class="text-xs text-gray-400 whitespace-pre-wrap font-mono leading-relaxed max-h-96 overflow-y-auto"></pre>
+    <!-- 네트워크 건강도 -->
+    <div class="grid grid-cols-4 gap-4 mb-4">
+        <div class="bg-gray-800 rounded-lg p-5 border border-gray-700 col-span-1 flex flex-col items-center justify-center" id="health-gauge"></div>
+        <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 col-span-3">
+            <h3 class="text-sm font-semibold text-gray-400 mb-3">지표별 점수</h3>
+            <div id="health-bars" class="space-y-3"></div>
+        </div>
     </div>
+    <!-- 문제점 우선순위 -->
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4">
+        <h3 class="text-sm font-semibold text-gray-400 mb-3">문제점 및 조치 방안 (우선순위 순)</h3>
+        <div id="issues-list" class="space-y-2"></div>
+    </div>
+    <!-- STA별 진단 카드 -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4" id="sta-diag-cards"></div>
+    <!-- 원본 리포트 -->
+    <details class="bg-gray-800 rounded-lg border border-gray-700">
+        <summary class="p-4 text-sm text-gray-500 cursor-pointer hover:text-gray-300">원본 텍스트 리포트 보기</summary>
+        <pre id="diagnosis-text" class="text-xs text-gray-400 whitespace-pre-wrap font-mono leading-relaxed p-4 pt-0 max-h-96 overflow-y-auto"></pre>
+    </details>
 </div>
 {% endblock %}
 

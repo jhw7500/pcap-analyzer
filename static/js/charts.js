@@ -431,46 +431,136 @@
         }).join('');
     }
 
-    /* ── 종합 진단 — 구조화된 카드 ── */
-    const diagCards = document.getElementById('diagnosis-cards');
+    /* ── 종합 진단 — 고급 UI ── */
+    const diag = DATA.diagnosis || {};
+    const health = diag.health || {};
+    const compScores = diag.component_scores || {};
+    const stadiags = diag.sta_diags || [];
+    const issues = diag.issues || [];
+
+    // 원본 텍스트 (접이식)
     const diagEl = document.getElementById('diagnosis-text');
-    if (window.TEXT_SECTIONS) {
+    if (diagEl && window.TEXT_SECTIONS) {
         const diagSection = window.TEXT_SECTIONS.find(s => s.title.includes('진단'));
-        if (diagSection) {
-            // 원본 텍스트
-            if (diagEl) diagEl.textContent = diagSection.lines.join('\n');
+        if (diagSection) diagEl.textContent = diagSection.lines.join('\n');
+    }
 
-            // 구조화된 카드 파싱
-            if (diagCards) {
-                const lines = diagSection.lines;
-                let cards = [];
-                let current = null;
-                for (const line of lines) {
-                    if (line.startsWith('--- ')) {
-                        if (current) cards.push(current);
-                        current = { name: line.replace(/---/g, '').trim(), lines: [], warnings: [] };
-                    } else if (current) {
-                        current.lines.push(line);
-                        if (line.includes('[WARNING]')) current.warnings.push(line.trim());
-                    }
-                }
-                if (current) cards.push(current);
+    // 건강도 게이지
+    const gaugeEl = document.getElementById('health-gauge');
+    if (gaugeEl && health.score !== undefined) {
+        const colorMap = { green: '#10b981', yellow: '#f59e0b', red: '#ef4444' };
+        const c = colorMap[health.color] || '#6b7280';
+        gaugeEl.innerHTML = `
+            <div class="relative w-28 h-28">
+                <svg viewBox="0 0 120 120" class="w-full h-full">
+                    <circle cx="60" cy="60" r="50" fill="none" stroke="#374151" stroke-width="10"/>
+                    <circle cx="60" cy="60" r="50" fill="none" stroke="${c}" stroke-width="10"
+                        stroke-dasharray="${Math.PI * 100}" stroke-dashoffset="${Math.PI * 100 * (1 - health.score / 100)}"
+                        transform="rotate(-90 60 60)" stroke-linecap="round"/>
+                    <text x="60" y="55" text-anchor="middle" fill="${c}" font-size="28" font-weight="bold">${health.score}</text>
+                    <text x="60" y="75" text-anchor="middle" fill="#9ca3af" font-size="13">${health.grade}</text>
+                </svg>
+            </div>
+            <p class="text-xs text-gray-500 mt-1">네트워크 건강도</p>`;
+    }
 
-                diagCards.innerHTML = cards.map(c => {
-                    const isOk = c.warnings.length === 0;
-                    const border = isOk ? 'border-green-700' : 'border-red-700';
-                    const badge = isOk
-                        ? '<span class="bg-green-900 text-green-300 px-2 py-0.5 rounded text-xs">OK</span>'
-                        : '<span class="bg-red-900 text-red-300 px-2 py-0.5 rounded text-xs">WARNING ' + c.warnings.length + '</span>';
-                    const detail = c.lines.filter(l => l.trim() && !l.startsWith('='))
-                        .map(l => `<div class="text-xs text-gray-400">${l}</div>`).join('');
-                    return `<div class="bg-gray-800 rounded-lg p-4 border ${border}">
-                        <div class="flex justify-between items-center mb-2">
-                            <span class="font-semibold text-sm">${c.name}</span>${badge}
-                        </div>${detail}</div>`;
-                }).join('');
-            }
+    // 지표별 점수 바
+    function scoreBar(label, score, icon) {
+        const c = score >= 80 ? '#10b981' : score >= 60 ? '#f59e0b' : '#ef4444';
+        return `<div class="flex items-center gap-3">
+            <span class="text-xs text-gray-400 w-20">${icon} ${label}</span>
+            <div class="flex-1 bg-gray-700 rounded-full h-4 relative">
+                <div class="h-4 rounded-full transition-all" style="width:${score}%; background:${c}"></div>
+                <span class="absolute inset-0 flex items-center justify-center text-xs font-bold text-white">${score}/100</span>
+            </div>
+        </div>`;
+    }
+    const barsEl = document.getElementById('health-bars');
+    if (barsEl) {
+        const sm = diag.summary || {};
+        barsEl.innerHTML = [
+            scoreBar('Retry', compScores.retry || 0, '\u{1F504}') + `<p class="text-xs text-gray-500 ml-24">전체 ${sm.retry_pct || 0}%</p>`,
+            scoreBar('Ping Loss', compScores.loss || 0, '\u{1F4E1}') + `<p class="text-xs text-gray-500 ml-24">Loss ${sm.loss_pct || 0}%</p>`,
+            scoreBar('로밍', compScores.roaming || 0, '\u{1F6DC}') + `<p class="text-xs text-gray-500 ml-24">총 ${sm.roaming_total || 0}회, 느린 ${sm.roaming_slow || 0}회</p>`,
+        ].join('');
+    }
+
+    // 문제점 목록
+    const issuesEl = document.getElementById('issues-list');
+    if (issuesEl) {
+        if (issues.length === 0) {
+            issuesEl.innerHTML = '<div class="text-green-400 text-sm py-4 text-center">특별한 문제가 발견되지 않았습니다.</div>';
+        } else {
+            issuesEl.innerHTML = issues.map((iss, i) => {
+                const sevStyle = {
+                    high: 'bg-red-900/50 border-red-700 text-red-300',
+                    medium: 'bg-yellow-900/50 border-yellow-700 text-yellow-300',
+                    low: 'bg-blue-900/50 border-blue-700 text-blue-300',
+                };
+                const sevBadge = {
+                    high: '<span class="bg-red-700 text-white px-2 py-0.5 rounded text-xs font-bold">HIGH</span>',
+                    medium: '<span class="bg-yellow-700 text-white px-2 py-0.5 rounded text-xs font-bold">MED</span>',
+                    low: '<span class="bg-blue-700 text-white px-2 py-0.5 rounded text-xs font-bold">LOW</span>',
+                };
+                const style = sevStyle[iss.severity] || sevStyle.low;
+                const badge = sevBadge[iss.severity] || sevBadge.low;
+                return `<div class="rounded-lg p-3 border ${style}">
+                    <div class="flex items-center gap-2 mb-1">
+                        ${badge}
+                        <span class="text-xs text-gray-400">${iss.category}</span>
+                        <span class="text-sm font-medium">${iss.msg}</span>
+                    </div>
+                    <div class="text-xs text-gray-400 ml-16">\u{1F527} 조치: ${iss.action}</div>
+                </div>`;
+            }).join('');
         }
+    }
+
+    // STA별 진단 카드
+    const staCardsEl = document.getElementById('sta-diag-cards');
+    if (staCardsEl && stadiags.length > 0) {
+        staCardsEl.innerHTML = stadiags.map(sd => {
+            const c = sd.score >= 80 ? 'green' : sd.score >= 60 ? 'yellow' : 'red';
+            const borderC = { green: 'border-green-700', yellow: 'border-yellow-700', red: 'border-red-700' }[c];
+            const textC = { green: 'text-green-400', yellow: 'text-yellow-400', red: 'text-red-400' }[c];
+            const m = sd.metrics || {};
+            const scores = sd.scores || {};
+
+            function miniBar(label, val) {
+                const barC = val >= 80 ? '#10b981' : val >= 60 ? '#f59e0b' : '#ef4444';
+                return `<div class="flex items-center gap-1 text-xs">
+                    <span class="w-12 text-gray-500">${label}</span>
+                    <div class="flex-1 bg-gray-700 rounded-full h-2">
+                        <div class="h-2 rounded-full" style="width:${val}%;background:${barC}"></div>
+                    </div>
+                    <span class="w-8 text-right">${val}</span>
+                </div>`;
+            }
+
+            const issueHtml = (sd.issues || []).map(iss => {
+                const ic = iss.severity === 'high' ? 'text-red-400' : 'text-yellow-400';
+                return `<div class="${ic} text-xs">\u26A0 ${iss.msg}</div>`;
+            }).join('') || '<div class="text-green-400 text-xs">\u2713 정상</div>';
+
+            return `<div class="bg-gray-800 rounded-lg p-4 border ${borderC}">
+                <div class="flex justify-between items-center mb-3">
+                    <span class="font-semibold">${sd.name}</span>
+                    <span class="text-2xl font-bold ${textC}">${sd.score}</span>
+                </div>
+                <div class="space-y-1.5 mb-3">
+                    ${miniBar('Retry', scores.retry || 0)}
+                    ${miniBar('RSSI', scores.rssi || 0)}
+                    ${miniBar('\ub85c\ubc0d', scores.roaming || 0)}
+                </div>
+                <div class="grid grid-cols-2 gap-1 text-xs text-gray-400 mb-3">
+                    <div>Retry: ${m.retry_pct || 0}%</div>
+                    <div>RSSI: ${m.rssi_avg || '-'}dBm</div>
+                    <div>\ub85c\ubc0d: ${m.roaming_count || 0}\ud68c</div>
+                    <div>\ub290\ub9b0: ${m.slow_roaming || 0}\ud68c</div>
+                </div>
+                <div class="border-t border-gray-700 pt-2">${issueHtml}</div>
+            </div>`;
+        }).join('');
     }
 })();
 

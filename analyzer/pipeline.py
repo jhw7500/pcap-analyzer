@@ -321,6 +321,139 @@ def _structured_device_stats(frames: List[Frame], roles: Dict, index) -> Dict[st
     return result
 
 
+def _structured_diagnosis(structured: Dict[str, Any]) -> Dict[str, Any]:
+    """구조화된 종합 진단 — 네트워크 건강도 + STA별 상세 + 문제점 목록."""
+    ov = structured.get("overview", {})
+    ping = structured.get("ping", {})
+    roaming = structured.get("roaming", {})
+    signal = structured.get("signal", {})
+    device_stats = structured.get("device_stats", {})
+    delays = structured.get("delay_zones", {})
+    anomalies = structured.get("anomaly_frames", {})
+
+    total_frames = ov.get("total_frames", 0)
+    retry_pct = ov.get("retry_pct", 0)
+    ping_stats = ping.get("stats", {})
+    loss_pct = ping_stats.get("loss_pct", 0)
+    roam_seqs = roaming.get("sequences", [])
+    slow_roams = [s for s in roam_seqs if s.get("is_slow")]
+
+    # 개별 지표 점수 (0-100, 높을수록 좋음)
+    retry_score = max(0, 100 - retry_pct * 5)  # 20%이면 0점
+    loss_score = max(0, 100 - loss_pct * 10)  # 10%이면 0점
+    roam_score = 100
+    if len(roam_seqs) > 0:
+        slow_ratio = len(slow_roams) / len(roam_seqs) * 100
+        roam_score = max(0, 100 - slow_ratio * 2)
+
+    # 전체 건강도 (가중 평균)
+    health_score = round(retry_score * 0.3 + loss_score * 0.4 + roam_score * 0.3)
+    if health_score >= 80:
+        health_grade = "양호"
+        health_color = "green"
+    elif health_score >= 60:
+        health_grade = "주의"
+        health_color = "yellow"
+    else:
+        health_grade = "위험"
+        health_color = "red"
+
+    # STA별 상세 진단
+    sta_diags = []
+    stas = signal.get("stas", {})
+    for sta_name, sta_info in stas.items():
+        mac = sta_info.get("mac", "")
+        ds = device_stats.get(sta_name, {})
+        sta_retry = ds.get("retry_pct", 0)
+        rssi_avg = sta_info.get("rssi_avg")
+        rssi_min = sta_info.get("rssi_min")
+
+        # STA별 로밍 횟수
+        sta_roams = [s for s in roam_seqs if s.get("sta") == mac]
+        sta_slow_roams = [s for s in sta_roams if s.get("is_slow")]
+
+        # STA별 점수
+        s_retry = max(0, 100 - sta_retry * 5)
+        s_rssi = 100
+        if rssi_avg is not None:
+            s_rssi = max(0, min(100, (rssi_avg + 90) * 2.5))  # -90dBm=0, -50dBm=100
+        s_roam = 100 if not sta_roams else max(0, 100 - len(sta_slow_roams) / max(len(sta_roams), 1) * 200)
+        s_overall = round(s_retry * 0.35 + s_rssi * 0.35 + s_roam * 0.3)
+
+        # 문제점
+        issues = []
+        if sta_retry > 25:
+            issues.append({"severity": "high", "msg": f"Retry율 {sta_retry}% (임계치 25% 초과)", "action": "TX power 또는 안테나 확인, 로밍 임계값 조정"})
+        elif sta_retry > 15:
+            issues.append({"severity": "medium", "msg": f"Retry율 {sta_retry}%", "action": "채널 혼잡도 확인"})
+        if rssi_avg is not None and rssi_avg < -70:
+            issues.append({"severity": "high", "msg": f"RSSI 평균 {rssi_avg}dBm (약함)", "action": "AP 위치 조정 또는 TX power 증가"})
+        elif rssi_avg is not None and rssi_avg < -60:
+            issues.append({"severity": "medium", "msg": f"RSSI 평균 {rssi_avg}dBm", "action": "AP 커버리지 확인"})
+        if len(sta_slow_roams) > 2:
+            issues.append({"severity": "high", "msg": f"느린 로밍 {len(sta_slow_roams)}회 (>100ms)", "action": "802.11r/k/v 설정 확인, 로밍 히스테리시스 조정"})
+        elif len(sta_roams) > 10:
+            issues.append({"severity": "medium", "msg": f"잦은 로밍 {len(sta_roams)}회", "action": "로밍 트리거 RSSI 임계값 재설정"})
+
+        sta_diags.append({
+            "name": sta_name,
+            "mac": mac,
+            "score": s_overall,
+            "scores": {"retry": round(s_retry), "rssi": round(s_rssi), "roaming": round(s_roam)},
+            "metrics": {
+                "retry_pct": sta_retry,
+                "rssi_avg": rssi_avg,
+                "rssi_min": rssi_min,
+                "roaming_count": len(sta_roams),
+                "slow_roaming": len(sta_slow_roams),
+                "total_frames": ds.get("total_frames", 0),
+            },
+            "issues": issues,
+        })
+
+    # 전체 문제점 우선순위 목록
+    all_issues = []
+    # 네트워크 레벨
+    if retry_pct > 15:
+        all_issues.append({"severity": "high", "category": "Retry", "msg": f"네트워크 전체 Retry율 {retry_pct}%", "action": "채널 간섭 또는 AP 과부하 확인"})
+    if loss_pct > 5:
+        all_issues.append({"severity": "high", "category": "Ping", "msg": f"Ping Loss {loss_pct}%", "action": "네트워크 안정성 점검, 로밍 구간 확인"})
+    if len(slow_roams) > 5:
+        all_issues.append({"severity": "high", "category": "로밍", "msg": f"느린 로밍 {len(slow_roams)}회", "action": "802.11r Fast BSS Transition 활성화"})
+    # anomaly
+    anom_events = anomalies.get("anomalies", [])
+    for a in anom_events:
+        all_issues.append({"severity": a.get("severity", "medium"), "category": a.get("type", ""), "msg": a.get("description", ""), "action": a.get("recommendation", "")})
+    # delay zones
+    delay_zones = delays.get("delay_zones", [])
+    if len(delay_zones) > 3:
+        all_issues.append({"severity": "medium", "category": "지연", "msg": f"지연 구간 {len(delay_zones)}건 탐지", "action": "로밍/retry 상관관계 확인"})
+    # STA별 이슈 통합
+    for sd in sta_diags:
+        for issue in sd["issues"]:
+            all_issues.append({"severity": issue["severity"], "category": sd["name"], "msg": issue["msg"], "action": issue["action"]})
+
+    # 심각도 정렬
+    severity_order = {"high": 0, "medium": 1, "low": 2}
+    all_issues.sort(key=lambda x: severity_order.get(x["severity"], 3))
+
+    return {
+        "health": {"score": health_score, "grade": health_grade, "color": health_color},
+        "component_scores": {"retry": round(retry_score), "loss": round(loss_score), "roaming": round(roam_score)},
+        "summary": {
+            "total_frames": total_frames,
+            "retry_pct": retry_pct,
+            "loss_pct": loss_pct,
+            "roaming_total": len(roam_seqs),
+            "roaming_slow": len(slow_roams),
+            "delay_zones": len(delay_zones),
+            "anomaly_count": len(anom_events),
+        },
+        "sta_diags": sta_diags,
+        "issues": all_issues,
+    }
+
+
 def run_analysis(
     pcap_path: str,
     ssid: str = "",
@@ -406,6 +539,7 @@ def run_analysis(
     structured["delay_zones"] = analyze_delays(structured["ping"], structured["roaming"], structured["per_second"])
     structured["anomaly_frames"] = detect_anomalies(structured["overview"])
     structured["signal_cliffs"] = analyze_signal_cliffs(structured["signal"])
+    structured["diagnosis"] = _structured_diagnosis(structured)
 
     # 텍스트 리포트 (호환용)
     text_report = []
