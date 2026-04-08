@@ -9,12 +9,16 @@
         margin: { t: 10, r: 10, b: 30, l: 40 },
     };
 
+    const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6',
+                    '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1'];
+
     const SUBTYPE_NAMES = {
         '0': 'AssocReq', '1': 'AssocResp', '2': 'ReassocReq', '3': 'ReassocResp',
         '4': 'ProbeReq', '5': 'ProbeResp', '8': 'Beacon', '10': 'DisAssoc',
-        '11': 'Auth', '12': 'DeAuth', '13': 'Action', '24': 'BAR', '25': 'BA',
-        '27': 'RTS', '28': 'CTS', '29': 'ACK', '32': 'Data', '40': 'QoS Data',
-        '44': 'QoS Null',
+        '11': 'Auth', '12': 'DeAuth', '13': 'Action', '14': 'ActionNoAck',
+        '18': 'Trigger', '24': 'BAR', '25': 'BA',
+        '27': 'RTS', '28': 'CTS', '29': 'ACK', '30': 'CF-End',
+        '32': 'Data', '40': 'QoS Data', '44': 'QoS Null',
     };
 
     /* ── 탭 전환 ── */
@@ -24,6 +28,8 @@
             document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
             btn.classList.add('active');
             document.getElementById('tab-' + btn.dataset.tab).classList.remove('hidden');
+            /* Plotly 차트가 hidden→visible 될 때 리사이즈 필요 */
+            setTimeout(() => window.dispatchEvent(new Event('resize')), 50);
         });
     });
 
@@ -46,20 +52,20 @@
     }
 
     /* ── 프로토콜 분포 (도넛) ── */
-    if (ov.protocol_dist) {
+    if (ov.protocol_dist && Object.keys(ov.protocol_dist).length > 0) {
         const labels = Object.keys(ov.protocol_dist);
         const values = Object.values(ov.protocol_dist);
         Plotly.newPlot('chart-protocol', [{
             type: 'pie', hole: 0.5, labels, values,
             textinfo: 'label+percent', textposition: 'outside',
-            marker: { colors: Plotly.d3.scale.category10().range() },
+            marker: { colors: COLORS },
         }], { ...DARK }, { responsive: true, displayModeBar: false });
     }
 
     /* ── 서브타입 분포 (수평 바) ── */
-    if (ov.subtype_dist) {
+    if (ov.subtype_dist && Object.keys(ov.subtype_dist).length > 0) {
         const entries = Object.entries(ov.subtype_dist).sort((a, b) => b[1] - a[1]).slice(0, 15);
-        const labels = entries.map(e => SUBTYPE_NAMES[e[0]] || e[0]);
+        const labels = entries.map(e => SUBTYPE_NAMES[e[0]] || ('type=' + e[0]));
         const values = entries.map(e => e[1]);
         Plotly.newPlot('chart-subtype', [{
             type: 'bar', orientation: 'h', x: values, y: labels,
@@ -69,7 +75,7 @@
 
     /* ── 디바이스 테이블 ── */
     const devTable = document.querySelector('#device-table tbody');
-    if (devTable && ov.devices) {
+    if (devTable && ov.devices && ov.devices.length > 0) {
         devTable.innerHTML = ov.devices.map(d =>
             `<tr class="border-b border-gray-700/50">
                 <td class="py-2 font-mono">${d.name}</td>
@@ -91,12 +97,12 @@
             marker: {
                 color: seqs.map(s => s.is_slow ? '#ef4444' : '#3b82f6'),
             },
-            text: seqs.map(s => s.sta_name + ' → ' + s.ap_name),
+            text: seqs.map(s => s.sta_name + ' \u2192 ' + s.ap_name),
             hovertemplate: '%{text}<br>%{y:.1f}ms<extra></extra>',
         }], {
             ...DARK,
-            xaxis: { title: '로밍 시퀀스 #' },
-            yaxis: { title: 'Auth→Assoc Gap (ms)' },
+            xaxis: { title: '\ub85c\ubc0d \uc2dc\ud000\uc2a4 #' },
+            yaxis: { title: 'Auth\u2192Assoc Gap (ms)' },
             shapes: [{
                 type: 'line', x0: 0, x1: seqs.length + 1, y0: 100, y1: 100,
                 line: { color: '#ef4444', dash: 'dash', width: 1 },
@@ -123,7 +129,9 @@
     const deviceSelect = document.getElementById('device-select');
     if (deviceSelect) {
         const names = Object.keys(deviceStats);
-        deviceSelect.innerHTML = names.map(n => `<option value="${n}">${n} (${deviceStats[n].role})</option>`).join('');
+        deviceSelect.innerHTML = names.map(n =>
+            `<option value="${n}">${n} (${deviceStats[n].role}) - ${deviceStats[n].total_frames.toLocaleString()} frames</option>`
+        ).join('');
         deviceSelect.addEventListener('change', renderDeviceCharts);
         if (names.length > 0) renderDeviceCharts();
     }
@@ -137,7 +145,9 @@
         Plotly.newPlot('chart-device-type', [{
             type: 'pie', labels: Object.keys(stats.type_dist), values: Object.values(stats.type_dist),
             marker: { colors: ['#3b82f6', '#10b981', '#f59e0b', '#6b7280'] },
-        }], { ...DARK }, { responsive: true, displayModeBar: false });
+            textinfo: 'label+percent',
+        }], { ...DARK, title: { text: `${name} - Retry ${stats.retry_pct}%`, font: { size: 12, color: '#9ca3af' } } },
+        { responsive: true, displayModeBar: false });
 
         // 서브타입 바
         const entries = Object.entries(stats.subtype_dist).sort((a, b) => b[1] - a[1]).slice(0, 10);
@@ -145,6 +155,8 @@
             type: 'bar', orientation: 'h',
             x: entries.map(e => e[1]), y: entries.map(e => e[0]),
             marker: { color: '#3b82f6' },
+            text: entries.map(e => e[1].toLocaleString()),
+            textposition: 'outside',
         }], { ...DARK, yaxis: { autorange: 'reversed' } }, { responsive: true, displayModeBar: false });
     }
 
