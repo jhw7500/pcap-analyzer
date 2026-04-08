@@ -45,14 +45,14 @@ def build_review_prompt(structured: dict) -> str:
             summary.append(f"- {name}: RSSI avg={sta.get('rssi_avg')}dBm, {sta.get('frame_count')} frames")
 
     # 지연 구간
-    zones = delays.get("zones", []) if isinstance(delays, dict) else []
+    zones = delays.get("delay_zones", []) if isinstance(delays, dict) else []
     if zones:
         summary.append(f"\n## 지연 구간: {len(zones)}건")
         for z in zones[:5]:
             summary.append(f"- {z.get('duration_sec', 0):.1f}초, 원인: {z.get('cause', '불명')}, 영향 ping: {z.get('affected_pings', 0)}건")
 
     # 이상 프레임
-    events = anomalies.get("events", []) if isinstance(anomalies, dict) else []
+    events = anomalies.get("anomalies", []) if isinstance(anomalies, dict) else []
     if events:
         summary.append(f"\n## 이상 프레임: {len(events)}건")
         for e in events[:5]:

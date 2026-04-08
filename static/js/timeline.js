@@ -125,7 +125,7 @@
 
     /* ── 이상 구간 하이라이트 (빨간 배경) ── */
     const delays = DATA.delay_zones || {};
-    const zones = delays.zones || [];
+    const zones = delays.delay_zones || [];
     zones.forEach(z => {
         shapes.push({
             type: 'rect',
