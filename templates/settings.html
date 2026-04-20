@@ -43,9 +43,10 @@
                        class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
             </div>
             <div class="col-span-2">
-                <label class="block text-xs text-gray-500 mb-1">API 키 (환경변수 PCAP_AI_API_KEY로도 설정 가능)</label>
-                <input type="password" name="ai_api_key" value="{{ config.get('ai_api_key', '') }}"
-                       placeholder="sk-..."
+                <label class="block text-xs text-gray-500 mb-1">API 키 (환경변수 PCAP_AI_API_KEY로도 설정 가능, 비워두면 기존 값 유지)</label>
+                <input type="password" name="ai_api_key" value=""
+                       placeholder="{{ ai_api_key_hint or 'sk-...' }}"
+                       autocomplete="off"
                        class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
             </div>
             <div class="col-span-2">

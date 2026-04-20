@@ -12,9 +12,11 @@ templates = Jinja2Templates(directory="templates")
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
     tshark = config.detect_tshark()
+    cfg = config.get_all()
     return templates.TemplateResponse(request, "settings.html", {
         "tshark": tshark,
-        "config": config.get_all(),
+        "config": cfg,
+        "ai_api_key_hint": config.mask_secret(cfg.get("ai_api_key", "")),
     })
 
 

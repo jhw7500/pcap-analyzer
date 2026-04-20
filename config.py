@@ -70,6 +70,15 @@ def ensure_data_dir() -> Path:
     return DATA_DIR
 
 
+def mask_secret(value: str) -> str:
+    """민감값을 UI 노출용으로 마스킹. 빈 값이면 빈 문자열, 짧으면 '저장됨'만."""
+    if not value:
+        return ""
+    if len(value) < 8:
+        return "저장됨"
+    return f"저장됨 (****{value[-5:]})"
+
+
 def safe_analysis_path(analysis_id: str) -> Optional[Path]:
     """analysis_id에 대한 안전한 JSON 경로 반환. 유효하지 않으면 None.
 

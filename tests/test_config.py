@@ -30,6 +30,26 @@ class TestConfig:
         assert config.MAX_UPLOAD_SIZE == 200 * 1024 * 1024
 
 
+class TestMaskSecret:
+    def test_empty(self):
+        assert config.mask_secret("") == ""
+
+    def test_short(self):
+        assert config.mask_secret("abc") == "저장됨"
+
+    def test_normal(self):
+        result = config.mask_secret("sk-abc123def456xyz")
+        # 마지막 5자만 노출 (56xyz)
+        assert result.endswith("56xyz)")
+        assert "sk-abc" not in result
+        assert "456xyz" not in result  # 6자 tail 노출 금지
+        assert result.startswith("저장됨")
+
+    def test_exactly_8_chars(self):
+        result = config.mask_secret("12345678")
+        assert result == "저장됨 (****45678)"
+
+
 class TestSafeAnalysisPath:
     def test_valid_id(self):
         path = config.safe_analysis_path("1234567890_sample_abcd1234")
