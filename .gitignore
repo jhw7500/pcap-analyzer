@@ -5,6 +5,11 @@ config.local.json
 .env
 *.pcap
 *.pcapng
+!tests/fixtures/*.pcap
+!tests/fixtures/*.pcapng
 tmp/
 .omc/
-test_*.py
+htmlcov/
+.coverage
+.pytest_cache/
+/test_*.py
