@@ -88,40 +88,48 @@ def _structured_signal(frames: List[Frame], roles: Dict, index) -> Dict[str, Any
     return result
 
 
+PING_MATCH_WINDOW_SEC = 30.0
+
+
 def _structured_ping(frames: List[Frame], roles: Dict) -> Dict[str, Any]:
-    """ping 전수검사 — 모든 ICMP Request/Reply를 seq 기준으로 매칭, timestamp 정렬."""
+    """ping 전수검사 — 모든 ICMP Request/Reply를 seq 기준으로 매칭, timestamp 정렬.
+
+    같은 (src,dst,seq) 키가 재사용되는 경우를 위해 FIFO 큐로 매칭하고,
+    PING_MATCH_WINDOW_SEC를 초과한 짝은 매치로 인정하지 않는다.
+    """
     from .core.detector import mac_name
 
-    # 1단계: 모든 ICMP 프레임 수집
-    all_requests = []  # (key, frame) 순서 보존
-    requests_map = {}  # key → frame (매칭용)
-    replies_map = {}   # key → frame
-    matched = {}       # key → (req, reply)
+    all_requests = []           # (key, frame) 순서 보존
+    requests_queue: Dict = {}   # key → list of pending req frames (FIFO)
+    matched_by_req: Dict = {}   # id(req) → reply frame
 
     for f in frames:
         if f.is_icmp_request and not f.retry:
             key = (f.ip_src, f.ip_dst, f.icmp_seq) if f.icmp_seq else (f.ip_src, f.ip_dst, str(f.number))
             all_requests.append((key, f))
-            requests_map[key] = f
+            requests_queue.setdefault(key, []).append(f)
         elif f.is_icmp_reply:
             key = (f.ip_dst, f.ip_src, f.icmp_seq) if f.icmp_seq else (f.ip_dst, f.ip_src, "")
-            replies_map[key] = f
+            q = requests_queue.get(key)
+            if not q:
+                continue
+            # 시간 윈도우 벗어난 오래된 요청은 큐에서 폐기
+            while q and (f.epoch - q[0].epoch) > PING_MATCH_WINDOW_SEC:
+                q.pop(0)
+            if q:
+                req = q.pop(0)
+                matched_by_req[id(req)] = f
 
-    # 2단계: Request→Reply 매칭
-    for key, req in all_requests:
-        reply = replies_map.pop(key, None)
-        if reply:
-            matched[key] = (req, reply)
-
-    # 3단계: 전수 목록 생성 (timestamp 정렬)
+    # 3단계: 전수 목록 생성
     full_list = []
     pairs = []
     losses = []
 
     for key, req in all_requests:
         seq_str = key[2] if len(key) > 2 else ""
-        if key in matched:
-            req_f, reply_f = matched[key]
+        reply_f = matched_by_req.get(id(req))
+        if reply_f is not None:
+            req_f = req
             rtt = (reply_f.epoch - req_f.epoch) * 1000
             entry = {
                 "seq": seq_str,
