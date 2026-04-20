@@ -3,6 +3,8 @@
 import re
 import subprocess
 import sys
+import threading
+import time
 import importlib
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -170,6 +172,7 @@ def extract_frames(
     mac_filter: str = "",
     ip_filter: str = "",
     tshark_path: Optional[str] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> List[FrameType]:
     resolved_path = tshark_path or "tshark"
     cmd = build_tshark_cmd(
@@ -188,6 +191,26 @@ def extract_frames(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1
     )
 
+    # 취소 신호가 들어오면 tshark 프로세스를 즉시 종료하는 watcher 스레드
+    cancelled = [False]
+
+    def _cancel_watcher():
+        while proc.poll() is None:
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled[0] = True
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                return
+            time.sleep(0.1)
+
+    watcher: Optional[threading.Thread] = None
+    if cancel_event is not None:
+        watcher = threading.Thread(target=_cancel_watcher, daemon=True)
+        watcher.start()
+
     frames: List[FrameType] = []
     count = 0
     progress_interval = 500000
@@ -197,6 +220,8 @@ def extract_frames(
         return []
 
     for line in stdout:
+        if cancel_event is not None and cancel_event.is_set():
+            break
         frame = parse_tsv_line(line)
         if frame is not None:
             frames.append(frame)
@@ -205,6 +230,12 @@ def extract_frames(
                 print(f"  -> {count:,}프레임 처리 중...", file=sys.stderr)
 
     _ = proc.wait()
+    if watcher is not None:
+        watcher.join(timeout=1)
+
+    if cancelled[0]:
+        return []
+
     if proc.returncode != 0:
         print(f"[ERROR] tshark 실행 실패 (exit code: {proc.returncode})", file=sys.stderr)
         return []

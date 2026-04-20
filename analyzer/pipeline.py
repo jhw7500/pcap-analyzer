@@ -498,6 +498,7 @@ def run_analysis(
         mac_filter=mac_filter,
         ip_filter=ip_filter,
         tshark_path=_tshark_path,
+        cancel_event=cancel_event,
     )
     if not frames:
         return {"error": "프레임을 추출하지 못했습니다. tshark 경로 또는 pcap 파일을 확인하세요."}
