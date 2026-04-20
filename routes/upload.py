@@ -10,7 +10,10 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 import config
+from analyzer.core.pcap_magic import has_valid_pcap_magic
 from analyzer.pipeline import run_analysis
+
+_UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
@@ -67,13 +70,6 @@ async def upload_pcap(
             status_code=500,
         )
 
-    content = await file.read()
-    if len(content) > config.MAX_UPLOAD_SIZE:
-        return JSONResponse(
-            {"error": f"파일 크기가 {config.MAX_UPLOAD_SIZE // (1024*1024)}MB를 초과합니다."},
-            status_code=413,
-        )
-
     name = file.filename or "unknown.pcap"
     if not name.endswith((".pcap", ".pcapng", ".cap")):
         return JSONResponse(
@@ -82,8 +78,43 @@ async def upload_pcap(
         )
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=Path(name).suffix)
-    tmp.write(content)
+    total = 0
+    first_chunk = True
+    try:
+        while True:
+            chunk = await file.read(_UPLOAD_CHUNK_SIZE)
+            if not chunk:
+                break
+            if first_chunk:
+                if not has_valid_pcap_magic(chunk):
+                    tmp.close()
+                    Path(tmp.name).unlink(missing_ok=True)
+                    return JSONResponse(
+                        {"error": "유효한 pcap/pcapng 포맷이 아닙니다."},
+                        status_code=400,
+                    )
+                first_chunk = False
+            total += len(chunk)
+            if total > config.MAX_UPLOAD_SIZE:
+                tmp.close()
+                Path(tmp.name).unlink(missing_ok=True)
+                return JSONResponse(
+                    {"error": f"파일 크기가 {config.MAX_UPLOAD_SIZE // (1024*1024)}MB를 초과합니다."},
+                    status_code=413,
+                )
+            tmp.write(chunk)
+    except Exception:
+        tmp.close()
+        Path(tmp.name).unlink(missing_ok=True)
+        raise
     tmp.close()
+    if first_chunk:
+        # 아무 데이터도 읽지 못함
+        Path(tmp.name).unlink(missing_ok=True)
+        return JSONResponse(
+            {"error": "빈 파일입니다."},
+            status_code=400,
+        )
 
     cancel_event = threading.Event()
     run_key = tmp.name
