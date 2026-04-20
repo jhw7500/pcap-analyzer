@@ -13,8 +13,8 @@ templates = Jinja2Templates(directory="templates")
 
 
 def _load_result(analysis_id: str) -> Optional[dict]:
-    path = config.ensure_data_dir() / f"{analysis_id}.json"
-    if not path.exists():
+    path = config.safe_analysis_path(analysis_id)
+    if path is None or not path.exists():
         return None
     try:
         return json.loads(path.read_text())
@@ -43,7 +43,9 @@ async def analysis_data(analysis_id: str):
 
 @router.delete("/api/analysis/{analysis_id}")
 async def delete_analysis(analysis_id: str):
-    path = config.ensure_data_dir() / f"{analysis_id}.json"
+    path = config.safe_analysis_path(analysis_id)
+    if path is None:
+        return JSONResponse({"error": "invalid analysis id"}, status_code=400)
     if not path.exists():
         return JSONResponse({"error": "not found"}, status_code=404)
     path.unlink()

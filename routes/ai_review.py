@@ -12,7 +12,9 @@ router = APIRouter()
 @router.post("/api/ai/review/{analysis_id}")
 async def ai_review(analysis_id: str):
     """분석 결과에 대해 AI 리뷰를 실행한다."""
-    path = config.ensure_data_dir() / f"{analysis_id}.json"
+    path = config.safe_analysis_path(analysis_id)
+    if path is None:
+        return JSONResponse({"error": "invalid analysis id"}, status_code=400)
     if not path.exists():
         return JSONResponse({"error": "분석 결과를 찾을 수 없습니다."}, status_code=404)
 

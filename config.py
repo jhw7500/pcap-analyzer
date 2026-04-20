@@ -68,3 +68,24 @@ def detect_tshark() -> Optional[str]:
 def ensure_data_dir() -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     return DATA_DIR
+
+
+def safe_analysis_path(analysis_id: str) -> Optional[Path]:
+    """analysis_id에 대한 안전한 JSON 경로 반환. 유효하지 않으면 None.
+
+    data/analyses 디렉토리 밖으로 탈출하는 id, 경로 구분자/상위 참조/널바이트
+    포함 id는 모두 거부한다.
+    """
+    if not analysis_id:
+        return None
+    if any(ch in analysis_id for ch in ("/", "\\", "\0")):
+        return None
+    if ".." in analysis_id:
+        return None
+    data_dir = ensure_data_dir().resolve()
+    candidate = (data_dir / f"{analysis_id}.json").resolve()
+    try:
+        candidate.relative_to(data_dir)
+    except ValueError:
+        return None
+    return candidate
