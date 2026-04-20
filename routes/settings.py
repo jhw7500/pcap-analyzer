@@ -17,6 +17,7 @@ async def settings_page(request: Request):
         "tshark": tshark,
         "config": cfg,
         "ai_api_key_hint": config.mask_secret(cfg.get("ai_api_key", "")),
+        "offline_assets": config.is_offline_assets(),
     })
 
 
@@ -27,6 +28,7 @@ async def save_settings(
     ai_api_key: str = Form(""),
     ai_model: str = Form(""),
     ai_auto_review: str = Form(""),
+    ui_offline_assets: str = Form(""),
 ):
     if tshark_path:
         config.set_value("tshark_path", tshark_path)
@@ -37,4 +39,5 @@ async def save_settings(
     if ai_model:
         config.set_value("ai_model", ai_model)
     config.set_value("ai_auto_review", ai_auto_review)
+    config.set_value("ui_offline_assets", ui_offline_assets)
     return RedirectResponse("/settings", status_code=303)

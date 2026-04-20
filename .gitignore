@@ -9,6 +9,7 @@ config.local.json
 !tests/fixtures/*.pcapng
 tmp/
 .omc/
+static/vendor/
 htmlcov/
 .coverage
 .pytest_cache/

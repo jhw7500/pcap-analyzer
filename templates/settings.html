@@ -60,6 +60,21 @@
         </div>
     </div>
 
+    <!-- UI 에셋 -->
+    <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+        <h2 class="text-lg font-semibold mb-4">UI 에셋</h2>
+        <label class="flex items-center gap-2 text-sm">
+            <input type="checkbox" name="ui_offline_assets" value="true"
+                   {% if config.get('ui_offline_assets') == 'true' %}checked{% endif %}
+                   class="rounded bg-gray-700 border-gray-600">
+            오프라인 에셋 사용 (static/vendor/tailwind.js, plotly.min.js)
+        </label>
+        <p class="text-xs text-gray-500 mt-2">
+            폐쇄망 환경에서 CDN 대신 로컬 에셋을 사용합니다.
+            <code class="bg-gray-700 px-1 rounded">make fetch-vendor</code>로 에셋을 먼저 받아두세요.
+        </p>
+    </div>
+
     <button type="submit" class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded font-semibold transition-colors">
         저장
     </button>

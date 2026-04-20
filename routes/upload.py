@@ -68,6 +68,7 @@ async def index(request: Request):
     return templates.TemplateResponse(request, "index.html", {
         "tshark": tshark,
         "analyses": analyses,
+        "offline_assets": config.is_offline_assets(),
     })
 
 

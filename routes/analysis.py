@@ -30,6 +30,7 @@ async def analysis_page(request: Request, analysis_id: str):
     return templates.TemplateResponse(request, "analysis.html", {
         "result": result,
         "result_json": json.dumps(result.get("structured", {}), ensure_ascii=False, default=str),
+        "offline_assets": config.is_offline_assets(),
     })
 
 

@@ -70,6 +70,11 @@ def ensure_data_dir() -> Path:
     return DATA_DIR
 
 
+def is_offline_assets() -> bool:
+    """CDN 대신 static/vendor/의 로컬 에셋을 사용할지 여부."""
+    return get("ui_offline_assets", "").lower() == "true"
+
+
 def mask_secret(value: str) -> str:
     """민감값을 UI 노출용으로 마스킹. 빈 값이면 빈 문자열, 짧으면 '저장됨'만."""
     if not value:
