@@ -13,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 
 import config
 from analyzer.core.pcap_magic import has_valid_pcap_magic
+from analyzer.errors import ErrorCode, error_payload
 from analyzer.pipeline import run_analysis
 
 _UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB
@@ -114,17 +115,11 @@ async def upload_pcap(
 ):
     tshark = config.detect_tshark()
     if not tshark:
-        return JSONResponse(
-            {"error": "tshark가 설치되어 있지 않습니다. 설정 페이지에서 경로를 지정하세요."},
-            status_code=500,
-        )
+        return JSONResponse(error_payload(ErrorCode.TSHARK_MISSING), status_code=500)
 
     name = file.filename or "unknown.pcap"
     if not name.endswith((".pcap", ".pcapng", ".cap")):
-        return JSONResponse(
-            {"error": "지원하지 않는 파일 형식입니다. .pcap, .pcapng, .cap만 가능합니다."},
-            status_code=400,
-        )
+        return JSONResponse(error_payload(ErrorCode.INVALID_EXT), status_code=400)
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=Path(name).suffix)
     total = 0
@@ -138,17 +133,15 @@ async def upload_pcap(
                 if not has_valid_pcap_magic(chunk):
                     tmp.close()
                     Path(tmp.name).unlink(missing_ok=True)
-                    return JSONResponse(
-                        {"error": "유효한 pcap/pcapng 포맷이 아닙니다."},
-                        status_code=400,
-                    )
+                    return JSONResponse(error_payload(ErrorCode.INVALID_MAGIC), status_code=400)
                 first_chunk = False
             total += len(chunk)
             if total > config.MAX_UPLOAD_SIZE:
                 tmp.close()
                 Path(tmp.name).unlink(missing_ok=True)
+                limit_mb = config.MAX_UPLOAD_SIZE // (1024 * 1024)
                 return JSONResponse(
-                    {"error": f"파일 크기가 {config.MAX_UPLOAD_SIZE // (1024*1024)}MB를 초과합니다."},
+                    error_payload(ErrorCode.FILE_TOO_LARGE, f"(상한 {limit_mb}MB)"),
                     status_code=413,
                 )
             tmp.write(chunk)
@@ -159,10 +152,7 @@ async def upload_pcap(
     tmp.close()
     if first_chunk:
         Path(tmp.name).unlink(missing_ok=True)
-        return JSONResponse(
-            {"error": "빈 파일입니다."},
-            status_code=400,
-        )
+        return JSONResponse(error_payload(ErrorCode.EMPTY_FILE), status_code=400)
 
     job_id = str(uuid.uuid4())
     cancel_event = threading.Event()
@@ -202,9 +192,13 @@ async def upload_pcap(
         _set_progress(job_id, "완료", 100, active=False)
 
     if "error" in result:
-        return JSONResponse({"error": result["error"], "job_id": job_id}, status_code=500)
+        payload = error_payload(ErrorCode.NO_FRAMES)
+        payload["job_id"] = job_id
+        return JSONResponse(payload, status_code=500)
     if result.get("cancelled"):
-        return JSONResponse({"error": "분석이 취소되었습니다.", "job_id": job_id}, status_code=499)
+        payload = error_payload(ErrorCode.CANCELLED)
+        payload["job_id"] = job_id
+        return JSONResponse(payload, status_code=499)
 
     result["pcap_name"] = name
     analysis_id = result["id"]

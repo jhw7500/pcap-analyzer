@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 import config
+from analyzer.errors import ErrorCode, error_payload
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
@@ -26,7 +27,8 @@ def _load_result(analysis_id: str) -> Optional[dict]:
 async def analysis_page(request: Request, analysis_id: str):
     result = _load_result(analysis_id)
     if not result:
-        return HTMLResponse("<h1>분석 결과를 찾을 수 없습니다.</h1>", status_code=404)
+        msg = error_payload(ErrorCode.ANALYSIS_NOT_FOUND)["error"]
+        return HTMLResponse(f"<h1>{msg}</h1>", status_code=404)
     return templates.TemplateResponse(request, "analysis.html", {
         "result": result,
         "result_json": json.dumps(result.get("structured", {}), ensure_ascii=False, default=str),
@@ -38,7 +40,7 @@ async def analysis_page(request: Request, analysis_id: str):
 async def analysis_data(analysis_id: str):
     result = _load_result(analysis_id)
     if not result:
-        return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(error_payload(ErrorCode.ANALYSIS_NOT_FOUND), status_code=404)
     return JSONResponse(result)
 
 
@@ -46,9 +48,9 @@ async def analysis_data(analysis_id: str):
 async def delete_analysis(analysis_id: str):
     path = config.safe_analysis_path(analysis_id)
     if path is None:
-        return JSONResponse({"error": "invalid analysis id"}, status_code=400)
+        return JSONResponse(error_payload(ErrorCode.INVALID_ANALYSIS_ID), status_code=400)
     if not path.exists():
-        return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(error_payload(ErrorCode.ANALYSIS_NOT_FOUND), status_code=404)
     path.unlink()
     return JSONResponse({"status": "deleted"})
 
@@ -58,7 +60,7 @@ async def analysis_text(analysis_id: str):
     """기존 텍스트 리포트 형식으로 내보내기."""
     result = _load_result(analysis_id)
     if not result:
-        return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(error_payload(ErrorCode.ANALYSIS_NOT_FOUND), status_code=404)
     sections = result.get("text_sections", [])
     lines = [f"WLAN Pcap 종합 분석 리포트", f"파일: {result.get('pcap_name', '?')}", ""]
     for sec in sections:

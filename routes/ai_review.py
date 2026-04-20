@@ -4,6 +4,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 import config
+from analyzer.errors import ErrorCode, error_payload
 from ai.reviewer import run_review
 
 router = APIRouter()
@@ -14,9 +15,9 @@ async def ai_review(analysis_id: str):
     """분석 결과에 대해 AI 리뷰를 실행한다."""
     path = config.safe_analysis_path(analysis_id)
     if path is None:
-        return JSONResponse({"error": "invalid analysis id"}, status_code=400)
+        return JSONResponse(error_payload(ErrorCode.INVALID_ANALYSIS_ID), status_code=400)
     if not path.exists():
-        return JSONResponse({"error": "분석 결과를 찾을 수 없습니다."}, status_code=404)
+        return JSONResponse(error_payload(ErrorCode.ANALYSIS_NOT_FOUND), status_code=404)
 
     result = json.loads(path.read_text())
     structured = result.get("structured", {})
@@ -24,7 +25,8 @@ async def ai_review(analysis_id: str):
     review_result = await run_review(structured)
 
     if "error" in review_result:
-        return JSONResponse(review_result, status_code=400)
+        payload = error_payload(ErrorCode.AI_REVIEW_FAILED, str(review_result.get("error", "")))
+        return JSONResponse(payload, status_code=400)
 
     # 리뷰 결과를 분석 파일에 저장
     result["ai_review"] = review_result.get("review", "")
