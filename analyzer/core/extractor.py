@@ -1,9 +1,10 @@
 """tshark를 실행하여 pcap에서 프레임 데이터를 추출한다."""
 
+import re
 import subprocess
 import sys
 import importlib
-from typing import Any, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .models import Frame as FrameType
@@ -37,6 +38,32 @@ TSHARK_FIELDS = [
     "wlan.seq",
     "icmp.seq",
 ]
+
+
+_VERSION_RE = re.compile(r"(\d+\.\d+\.\d+)")
+
+
+def detect_tshark_version(tshark_path: str = "tshark") -> Dict[str, str]:
+    """tshark --version 출력에서 버전 정보를 추출.
+
+    감지 실패 시 version="unknown"으로 반환. 예외를 던지지 않는다.
+    """
+    try:
+        result = subprocess.run(
+            [tshark_path or "tshark", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        first_line = (result.stdout or "").split("\n", 1)[0].strip()
+        match = _VERSION_RE.search(first_line)
+        return {
+            "path": tshark_path or "",
+            "version": match.group(1) if match else "unknown",
+            "raw": first_line,
+        }
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError, ValueError):
+        return {"path": tshark_path or "", "version": "unknown", "raw": ""}
 
 
 def _normalize_retry(value: str) -> bool:

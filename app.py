@@ -5,6 +5,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 import config
+from analyzer.core.extractor import detect_tshark_version
 from routes.upload import router as upload_router
 from routes.analysis import router as analysis_router
 from routes.settings import router as settings_router
@@ -26,7 +27,8 @@ async def startup():
     config.ensure_data_dir()
     tshark = config.detect_tshark()
     if tshark:
-        print(f"tshark 감지됨: {tshark}")
+        info = detect_tshark_version(tshark)
+        print(f"tshark 감지됨: {tshark} (버전: {info['version']})")
     else:
         print("WARNING: tshark를 찾을 수 없습니다. 설정 페이지에서 경로를 지정하세요.")
 

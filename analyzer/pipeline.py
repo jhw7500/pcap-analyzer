@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from .core.extractor import extract_frames
+from .core.extractor import extract_frames, detect_tshark_version
 from .core.detector import detect_roles
 from .core.indexer import FrameIndex
 from .core.models import Frame
@@ -479,6 +479,8 @@ def run_analysis(
 
     _progress("tshark로 프레임 추출 중...", 10)
     import config as _config
+    _tshark_path = _config.detect_tshark()
+    _tshark_info = detect_tshark_version(_tshark_path or "tshark")
     frames = extract_frames(
         pcap_path,
         wpa_passphrase=passphrase,
@@ -487,7 +489,7 @@ def run_analysis(
         time_end=time_end,
         mac_filter=mac_filter,
         ip_filter=ip_filter,
-        tshark_path=_config.detect_tshark(),
+        tshark_path=_tshark_path,
     )
     if not frames:
         return {"error": "프레임을 추출하지 못했습니다. tshark 경로 또는 pcap 파일을 확인하세요."}
@@ -555,6 +557,8 @@ def run_analysis(
         "pcap_size": os.path.getsize(pcap_path),
         "frame_count": len(frames),
         "analyzed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "tshark_version": _tshark_info["version"],
+        "tshark_path": _tshark_info["path"],
         "structured": structured,
         "text_sections": text_report,
     }

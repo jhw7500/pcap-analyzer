@@ -1,5 +1,5 @@
 """tshark 명령어 생성 + TSV 파싱 테스트."""
-from analyzer.core.extractor import build_tshark_cmd, parse_tsv_line
+from analyzer.core.extractor import build_tshark_cmd, parse_tsv_line, detect_tshark_version
 
 
 class TestBuildTsharkCmd:
@@ -54,6 +54,28 @@ class TestBuildTsharkCmd:
     def test_default_tshark_path(self):
         cmd = build_tshark_cmd("/tmp/t.pcap")
         assert cmd[0] == "tshark"
+
+
+class TestDetectTsharkVersion:
+    def test_real_tshark_returns_version(self):
+        # tshark가 시스템에 있으면 실제 버전 추출, 없으면 unknown
+        import shutil
+        info = detect_tshark_version(shutil.which("tshark") or "tshark")
+        assert "version" in info
+        assert "path" in info
+        assert "raw" in info
+
+    def test_nonexistent_path_returns_unknown(self):
+        info = detect_tshark_version("/nonexistent/tshark/bin")
+        assert info["version"] == "unknown"
+        assert info["raw"] == ""
+
+    def test_empty_path_fallback(self):
+        # 빈 문자열이면 "tshark"로 fallback
+        info = detect_tshark_version("")
+        # 시스템에 tshark가 있으면 감지 성공, 없으면 unknown
+        assert isinstance(info["version"], str)
+        assert info["path"] == ""
 
 
 class TestParseTsvLine:
