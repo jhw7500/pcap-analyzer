@@ -64,8 +64,9 @@ def build_tshark_cmd(
     time_end: str = "",
     mac_filter: str = "",
     ip_filter: str = "",
+    tshark_path: str = "tshark",
 ) -> List[str]:
-    cmd = ["tshark", "-r", pcap_path, "-T", "fields"]
+    cmd = [tshark_path or "tshark", "-r", pcap_path, "-T", "fields"]
     for field in TSHARK_FIELDS:
         cmd.extend(["-e", field])
 
@@ -141,9 +142,18 @@ def extract_frames(
     time_end: str = "",
     mac_filter: str = "",
     ip_filter: str = "",
+    tshark_path: Optional[str] = None,
 ) -> List[FrameType]:
+    resolved_path = tshark_path or "tshark"
     cmd = build_tshark_cmd(
-        pcap_path, wpa_passphrase, ssid, time_start, time_end, mac_filter, ip_filter
+        pcap_path,
+        wpa_passphrase,
+        ssid,
+        time_start,
+        time_end,
+        mac_filter,
+        ip_filter,
+        tshark_path=resolved_path,
     )
 
     # 스트리밍 방식: stdout을 한 줄씩 읽어 메모리 사용량을 최소화한다.

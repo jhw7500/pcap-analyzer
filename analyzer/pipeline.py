@@ -478,6 +478,7 @@ def run_analysis(
         return {"cancelled": True}
 
     _progress("tshark로 프레임 추출 중...", 10)
+    import config as _config
     frames = extract_frames(
         pcap_path,
         wpa_passphrase=passphrase,
@@ -486,6 +487,7 @@ def run_analysis(
         time_end=time_end,
         mac_filter=mac_filter,
         ip_filter=ip_filter,
+        tshark_path=_config.detect_tshark(),
     )
     if not frames:
         return {"error": "프레임을 추출하지 못했습니다. tshark 경로 또는 pcap 파일을 확인하세요."}
