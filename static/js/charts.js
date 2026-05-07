@@ -60,7 +60,7 @@
         if (n >= 32 && n <= 47) return 'data';
         return 'other';
     }
-    const CAT_LABELS = { mgmt: '관리 (Mgmt)', ctrl: '제어 (Ctrl)', data: '데이터 (Data)', other: '기타' };
+    const CAT_LABELS = { mgmt: '관리 프레임', ctrl: '제어 프레임', data: '데이터 프레임', other: '기타' };
     const CAT_COLORS = { mgmt: '#3b82f6', ctrl: '#f59e0b', data: '#10b981', other: '#6b7280' };
 
     /* ── 트래픽 종류 도넛 (Mgmt/Ctrl/Data/기타) ── */
@@ -89,10 +89,10 @@
     /* ── 페이로드 프로토콜 카테고리 분류 ── (Wireshark 표시명 기준)  */
     function categorizeProto(p) {
         const u = (p || '').toUpperCase();
-        // Wi-Fi 인증 (802.1X 프레임워크 — EAPOL/EAP/RSN/WPS)
+        // 페이로드 없는 헤더(802.11/WLAN). 페이로드 도넛/탭에서는 제외.
+        if (/^(802\.11|WLAN|MNGT|CTRL)$/.test(u)) return 'header_only';
+        // 연결 인증 (EAPOL/EAP/RSN/WPS — 802.1X 프레임워크)
         if (/^(EAPOL|EAP|RSN|WPS|EAP-TLS|EAP-PEAP|EAP-TTLS|EAP-MD5|EAP-MSCHAPV2)$/.test(u)) return 'auth';
-        // Wi-Fi 프레임 (802.11 자체 — Mgmt/Ctrl/Data 헤더)
-        if (/^(802\.11|WLAN|MNGT|CTRL)$/.test(u)) return 'wlan';
         // L2/L3 제어 (ARP, ICMP, 라우팅/스위칭/터널 제어)
         if (/^(ARP|RARP|LLC|ICMP|ICMPV6|IGMP|IGMPV3|STP|RSTP|MSTP|LLDP|CDP|VTP|DTP|OAM|GRE|ESP|AH|PIM|OSPF|EIGRP|ISIS|BGP|RIP|HSRP|VRRP|MPLS|VXLAN|GENEVE)$/.test(u)) return 'l2l3';
         // TCP 기반 응용 (NetBIOS Session, Web, DB, Messaging 등)
@@ -102,23 +102,28 @@
         return 'other';
     }
     const PROTO_CAT_LABELS = {
-        wlan: 'Wi-Fi 프레임 (802.11)',
-        auth: 'Wi-Fi 인증 (802.1X)',
-        l2l3: 'L2/L3 제어',
-        tcp: 'TCP 응용', udp: 'UDP 응용', other: '기타',
+        auth: '연결 인증',
+        l2l3: '네트워크 제어',
+        tcp: 'TCP 통신',
+        udp: 'UDP 통신',
+        other: '기타',
     };
     const PROTO_CAT_COLORS = {
-        wlan: '#06b6d4', auth: '#fbbf24',
+        auth: '#fbbf24',
         l2l3: '#ec4899',
-        tcp: '#84cc16', udp: '#a855f7', other: '#6b7280',
+        tcp: '#84cc16',
+        udp: '#a855f7',
+        other: '#6b7280',
     };
-    const PROTO_CAT_ORDER = ['wlan', 'auth', 'l2l3', 'tcp', 'udp', 'other'];
+    const PROTO_CAT_ORDER = ['auth', 'l2l3', 'tcp', 'udp', 'other'];
 
-    /* ── 데이터 페이로드 카테고리 도넛 ── */
+    /* ── 데이터 페이로드 카테고리 도넛 ── (802.11 헤더 자체는 제외 — 위 트래픽 종류 도넛에 표시) */
     if (ov.protocol_dist && Object.keys(ov.protocol_dist).length > 0) {
-        const totals = { wlan: 0, auth: 0, l2l3: 0, tcp: 0, udp: 0, other: 0 };
+        const totals = { auth: 0, l2l3: 0, tcp: 0, udp: 0, other: 0 };
         Object.entries(ov.protocol_dist).forEach(([p, c]) => {
-            totals[categorizeProto(p)] += c;
+            const cat = categorizeProto(p);
+            if (cat === 'header_only') return;
+            totals[cat] += c;
         });
         const order = PROTO_CAT_ORDER.filter(k => totals[k] > 0);
         Plotly.newPlot('chart-protocol-category', [{
@@ -166,7 +171,7 @@
         }, { responsive: true, displayModeBar: false });
     }
     if (ov.protocol_dist && Object.keys(ov.protocol_dist).length > 0) {
-        renderProtoDetail('wlan');
+        renderProtoDetail('auth');
         document.querySelectorAll('.proto-tab').forEach(btn => {
             btn.addEventListener('click', () => {
                 document.querySelectorAll('.proto-tab').forEach(b => {

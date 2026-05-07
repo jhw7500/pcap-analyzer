@@ -38,21 +38,21 @@
     <div class="grid grid-cols-4 gap-4 mb-6" id="kpi-cards"></div>
     <div class="grid grid-cols-2 gap-4 mb-4">
         <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-            <h3 class="text-sm font-semibold text-gray-400 mb-2">802.11 트래픽 종류 <span class="text-xs text-gray-500 font-normal">(요약)</span></h3>
+            <h3 class="text-sm font-semibold text-gray-400 mb-2">프레임 종류 <span class="text-xs text-gray-500 font-normal">(관리 / 제어 / 데이터)</span></h3>
             <div id="chart-frame-category" style="height:280px"></div>
         </div>
         <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-            <h3 class="text-sm font-semibold text-gray-400 mb-2">데이터 페이로드 <span class="text-xs text-gray-500 font-normal">(상위 프로토콜 요약)</span></h3>
+            <h3 class="text-sm font-semibold text-gray-400 mb-2">데이터 프레임 페이로드 <span class="text-xs text-gray-500 font-normal">(헤더 제외, 안에 들어 있는 통신만)</span></h3>
             <div id="chart-protocol-category" style="height:280px"></div>
         </div>
     </div>
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4">
         <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
-            <h3 class="text-sm font-semibold text-gray-400">802.11 서브타입 세부</h3>
+            <h3 class="text-sm font-semibold text-gray-400">프레임 서브타입 세부</h3>
             <div class="flex gap-1 text-xs">
-                <button type="button" class="subtype-tab px-3 py-1 rounded bg-blue-600 text-white" data-cat="mgmt">관리 (Mgmt)</button>
-                <button type="button" class="subtype-tab px-3 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600" data-cat="ctrl">제어 (Ctrl)</button>
-                <button type="button" class="subtype-tab px-3 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600" data-cat="data">데이터 (Data)</button>
+                <button type="button" class="subtype-tab px-3 py-1 rounded bg-blue-600 text-white" data-cat="mgmt">관리 프레임</button>
+                <button type="button" class="subtype-tab px-3 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600" data-cat="ctrl">제어 프레임</button>
+                <button type="button" class="subtype-tab px-3 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600" data-cat="data">데이터 프레임</button>
                 <button type="button" class="subtype-tab px-3 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600" data-cat="other">기타</button>
             </div>
         </div>
@@ -60,13 +60,12 @@
     </div>
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-6">
         <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
-            <h3 class="text-sm font-semibold text-gray-400">데이터 페이로드 세부</h3>
+            <h3 class="text-sm font-semibold text-gray-400">페이로드 세부</h3>
             <div class="flex gap-1 text-xs flex-wrap">
-                <button type="button" class="proto-tab px-3 py-1 rounded bg-blue-600 text-white" data-cat="wlan">Wi-Fi 프레임</button>
-                <button type="button" class="proto-tab px-3 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600" data-cat="auth">Wi-Fi 인증 (802.1X)</button>
-                <button type="button" class="proto-tab px-3 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600" data-cat="l2l3">L2/L3 제어</button>
-                <button type="button" class="proto-tab px-3 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600" data-cat="tcp">TCP 응용</button>
-                <button type="button" class="proto-tab px-3 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600" data-cat="udp">UDP 응용</button>
+                <button type="button" class="proto-tab px-3 py-1 rounded bg-blue-600 text-white" data-cat="auth">연결 인증</button>
+                <button type="button" class="proto-tab px-3 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600" data-cat="l2l3">네트워크 제어</button>
+                <button type="button" class="proto-tab px-3 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600" data-cat="tcp">TCP 통신</button>
+                <button type="button" class="proto-tab px-3 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600" data-cat="udp">UDP 통신</button>
                 <button type="button" class="proto-tab px-3 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600" data-cat="other">기타</button>
             </div>
         </div>
