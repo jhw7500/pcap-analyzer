@@ -86,22 +86,88 @@
         }, { responsive: true, displayModeBar: false });
     }
 
-    /* ── 데이터 페이로드 도넛 (상위 프로토콜) ── */
+    /* ── 페이로드 프로토콜 카테고리 분류 ── */
+    function categorizeProto(p) {
+        const u = (p || '').toUpperCase();
+        if (/^(802\.11|WLAN|EAPOL|EAP|MNGT|CTRL)$/.test(u)) return 'wlan';
+        if (/^(ARP|RARP|LLC|ICMP|ICMPV6|IGMP|IGMPV3|STP|LLDP|CDP)$/.test(u)) return 'l2l3';
+        if (/^(TCP|HTTP|HTTPS|SSH|SSHV2|TLS|SSL|FTP|FTP-DATA|SMTP|POP|IMAP|RDP|TELNET|HTTP\/JSON|HTTP\/XML|MSRPC|SMB|SMB2|NBSS|NBNS|BROWSER)$/.test(u)) return 'tcp';
+        if (/^(UDP|DNS|MDNS|DHCP|DHCPV6|NTP|SNMP|TFTP|RTP|RTCP|SSDP|LLMNR|WSD|RIP|NETBIOS)$/.test(u)) return 'udp';
+        return 'other';
+    }
+    const PROTO_CAT_LABELS = {
+        wlan: 'WLAN/802.11', l2l3: 'L2/L3 제어',
+        tcp: 'TCP 응용', udp: 'UDP 응용', other: '기타',
+    };
+    const PROTO_CAT_COLORS = {
+        wlan: '#06b6d4', l2l3: '#ec4899',
+        tcp: '#84cc16', udp: '#a855f7', other: '#6b7280',
+    };
+
+    /* ── 데이터 페이로드 카테고리 도넛 ── */
     if (ov.protocol_dist && Object.keys(ov.protocol_dist).length > 0) {
-        const labels = Object.keys(ov.protocol_dist);
-        const values = Object.values(ov.protocol_dist);
-        Plotly.newPlot('chart-protocol', [{
-            type: 'pie', hole: 0.5, labels, values,
+        const totals = { wlan: 0, l2l3: 0, tcp: 0, udp: 0, other: 0 };
+        Object.entries(ov.protocol_dist).forEach(([p, c]) => {
+            totals[categorizeProto(p)] += c;
+        });
+        const order = ['wlan', 'l2l3', 'tcp', 'udp', 'other'].filter(k => totals[k] > 0);
+        Plotly.newPlot('chart-protocol-category', [{
+            type: 'pie', hole: 0.5,
+            labels: order.map(k => PROTO_CAT_LABELS[k]),
+            values: order.map(k => totals[k]),
+            marker: { colors: order.map(k => PROTO_CAT_COLORS[k]) },
             textinfo: 'percent', textposition: 'inside',
             insidetextorientation: 'horizontal',
             hovertemplate: '%{label}: %{value:,} (%{percent})<extra></extra>',
-            marker: { colors: COLORS },
-            sort: true,
+            sort: false,
         }], {
             ...DARK,
             showlegend: true,
             legend: { font: { size: 11 }, x: 1, xanchor: 'right', y: 0.5 },
         }, { responsive: true, displayModeBar: false });
+    }
+
+    /* ── 페이로드 세부 (카테고리 탭별 가로 막대) ── */
+    function renderProtoDetail(cat) {
+        const el = document.getElementById('chart-protocol-detail');
+        if (!el) return;
+        const entries = Object.entries(ov.protocol_dist || {})
+            .filter(([p]) => categorizeProto(p) === cat)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 15);
+        if (entries.length === 0) {
+            el.innerHTML = '<p class="text-gray-500 text-center py-12">이 카테고리에 해당하는 프로토콜이 없습니다.</p>';
+            return;
+        }
+        const labels = entries.map(e => e[0]);
+        const values = entries.map(e => e[1]);
+        const total = values.reduce((a, b) => a + b, 0);
+        Plotly.newPlot(el, [{
+            type: 'bar', orientation: 'h', x: values, y: labels,
+            marker: { color: PROTO_CAT_COLORS[cat] },
+            text: values.map(v => `${v.toLocaleString()} (${(v / total * 100).toFixed(1)}%)`),
+            textposition: 'outside',
+            hovertemplate: '%{y}: %{x:,}<extra></extra>',
+        }], {
+            ...DARK,
+            margin: { t: 10, r: 80, b: 30, l: 10 },
+            yaxis: { autorange: 'reversed', automargin: true },
+            xaxis: { automargin: true },
+        }, { responsive: true, displayModeBar: false });
+    }
+    if (ov.protocol_dist && Object.keys(ov.protocol_dist).length > 0) {
+        renderProtoDetail('wlan');
+        document.querySelectorAll('.proto-tab').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.proto-tab').forEach(b => {
+                    b.classList.remove('bg-blue-600', 'text-white');
+                    b.classList.add('bg-gray-700', 'text-gray-300');
+                });
+                btn.classList.remove('bg-gray-700', 'text-gray-300');
+                btn.classList.add('bg-blue-600', 'text-white');
+                renderProtoDetail(btn.dataset.cat);
+            });
+        });
     }
 
     /* ── 서브타입 세부 (카테고리 탭별 가로 막대) ── */
