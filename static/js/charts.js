@@ -51,7 +51,42 @@
         ).join('');
     }
 
-    /* ── 프로토콜 분포 (도넛) ── */
+    /* ── 802.11 카테고리 분류 ── 표준 type_subtype 기반 ── */
+    function categorizeSubtype(sub) {
+        const n = parseInt(sub, 10);
+        if (isNaN(n)) return 'other';
+        if (n >= 0 && n <= 15)  return 'mgmt';
+        if (n >= 16 && n <= 31) return 'ctrl';
+        if (n >= 32 && n <= 47) return 'data';
+        return 'other';
+    }
+    const CAT_LABELS = { mgmt: '관리 (Mgmt)', ctrl: '제어 (Ctrl)', data: '데이터 (Data)', other: '기타' };
+    const CAT_COLORS = { mgmt: '#3b82f6', ctrl: '#f59e0b', data: '#10b981', other: '#6b7280' };
+
+    /* ── 트래픽 종류 도넛 (Mgmt/Ctrl/Data/기타) ── */
+    if (ov.subtype_dist && Object.keys(ov.subtype_dist).length > 0) {
+        const totals = { mgmt: 0, ctrl: 0, data: 0, other: 0 };
+        Object.entries(ov.subtype_dist).forEach(([sub, count]) => {
+            totals[categorizeSubtype(sub)] += count;
+        });
+        const order = ['mgmt', 'ctrl', 'data', 'other'].filter(k => totals[k] > 0);
+        Plotly.newPlot('chart-frame-category', [{
+            type: 'pie', hole: 0.5,
+            labels: order.map(k => CAT_LABELS[k]),
+            values: order.map(k => totals[k]),
+            marker: { colors: order.map(k => CAT_COLORS[k]) },
+            textinfo: 'percent', textposition: 'inside',
+            insidetextorientation: 'horizontal',
+            hovertemplate: '%{label}: %{value:,} (%{percent})<extra></extra>',
+            sort: false,
+        }], {
+            ...DARK,
+            showlegend: true,
+            legend: { font: { size: 11 }, x: 1, xanchor: 'right', y: 0.5 },
+        }, { responsive: true, displayModeBar: false });
+    }
+
+    /* ── 데이터 페이로드 도넛 (상위 프로토콜) ── */
     if (ov.protocol_dist && Object.keys(ov.protocol_dist).length > 0) {
         const labels = Object.keys(ov.protocol_dist);
         const values = Object.values(ov.protocol_dist);
@@ -69,21 +104,47 @@
         }, { responsive: true, displayModeBar: false });
     }
 
-    /* ── 서브타입 분포 (수평 바) ── */
-    if (ov.subtype_dist && Object.keys(ov.subtype_dist).length > 0) {
-        const entries = Object.entries(ov.subtype_dist).sort((a, b) => b[1] - a[1]).slice(0, 15);
+    /* ── 서브타입 세부 (카테고리 탭별 가로 막대) ── */
+    function renderSubtypeDetail(cat) {
+        const subtypeEl = document.getElementById('chart-subtype');
+        if (!subtypeEl) return;
+        const entries = Object.entries(ov.subtype_dist || {})
+            .filter(([sub]) => categorizeSubtype(sub) === cat)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 15);
+        if (entries.length === 0) {
+            subtypeEl.innerHTML = '<p class="text-gray-500 text-center py-12">이 카테고리에 해당하는 서브타입이 없습니다.</p>';
+            return;
+        }
         const labels = entries.map(e => SUBTYPE_NAMES[e[0]] || ('type=' + e[0]));
         const values = entries.map(e => e[1]);
-        Plotly.newPlot('chart-subtype', [{
+        const total = values.reduce((a, b) => a + b, 0);
+        Plotly.newPlot(subtypeEl, [{
             type: 'bar', orientation: 'h', x: values, y: labels,
-            marker: { color: '#3b82f6' },
+            marker: { color: CAT_COLORS[cat] },
+            text: values.map(v => `${v.toLocaleString()} (${(v / total * 100).toFixed(1)}%)`),
+            textposition: 'outside',
             hovertemplate: '%{y}: %{x:,}<extra></extra>',
         }], {
             ...DARK,
-            margin: { t: 10, r: 10, b: 30, l: 10 },
+            margin: { t: 10, r: 60, b: 30, l: 10 },
             yaxis: { autorange: 'reversed', automargin: true },
             xaxis: { automargin: true },
         }, { responsive: true, displayModeBar: false });
+    }
+    if (ov.subtype_dist && Object.keys(ov.subtype_dist).length > 0) {
+        renderSubtypeDetail('mgmt');
+        document.querySelectorAll('.subtype-tab').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.subtype-tab').forEach(b => {
+                    b.classList.remove('bg-blue-600', 'text-white');
+                    b.classList.add('bg-gray-700', 'text-gray-300');
+                });
+                btn.classList.remove('bg-gray-700', 'text-gray-300');
+                btn.classList.add('bg-blue-600', 'text-white');
+                renderSubtypeDetail(btn.dataset.cat);
+            });
+        });
     }
 
     /* ── 디바이스 테이블 ── */

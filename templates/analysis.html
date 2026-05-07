@@ -36,15 +36,27 @@
 <!-- Overview 탭 -->
 <div class="tab-content" id="tab-overview">
     <div class="grid grid-cols-4 gap-4 mb-6" id="kpi-cards"></div>
-    <div class="grid grid-cols-2 gap-4 mb-6">
+    <div class="grid grid-cols-2 gap-4 mb-4">
         <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-            <h3 class="text-sm font-semibold text-gray-400 mb-2">프로토콜 분포</h3>
-            <div id="chart-protocol" style="height:300px"></div>
+            <h3 class="text-sm font-semibold text-gray-400 mb-2">802.11 트래픽 종류 <span class="text-xs text-gray-500 font-normal">(요약)</span></h3>
+            <div id="chart-frame-category" style="height:280px"></div>
         </div>
         <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-            <h3 class="text-sm font-semibold text-gray-400 mb-2">802.11 서브타입</h3>
-            <div id="chart-subtype" style="height:300px"></div>
+            <h3 class="text-sm font-semibold text-gray-400 mb-2">데이터 페이로드 <span class="text-xs text-gray-500 font-normal">(상위 프로토콜)</span></h3>
+            <div id="chart-protocol" style="height:280px"></div>
         </div>
+    </div>
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-6">
+        <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <h3 class="text-sm font-semibold text-gray-400">802.11 서브타입 세부</h3>
+            <div class="flex gap-1 text-xs">
+                <button type="button" class="subtype-tab px-3 py-1 rounded bg-blue-600 text-white" data-cat="mgmt">관리 (Mgmt)</button>
+                <button type="button" class="subtype-tab px-3 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600" data-cat="ctrl">제어 (Ctrl)</button>
+                <button type="button" class="subtype-tab px-3 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600" data-cat="data">데이터 (Data)</button>
+                <button type="button" class="subtype-tab px-3 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600" data-cat="other">기타</button>
+            </div>
+        </div>
+        <div id="chart-subtype" style="height:300px"></div>
     </div>
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
         <h3 class="text-sm font-semibold text-gray-400 mb-2">감지된 디바이스</h3>
