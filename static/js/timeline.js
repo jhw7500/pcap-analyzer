@@ -11,13 +11,12 @@
     if (!timelineEl) return;
 
     const traces = [];
-    const annotations = [];
 
     /* 패널 매핑 — checkbox dataset.panel 과 yaxis 키 연결 */
     const PANELS = ['rssi', 'retry', 'rtt', 'frames'];
     const PANEL_AXIS = { rssi: 'yaxis', retry: 'yaxis2', rtt: 'yaxis3', frames: 'yaxis4' };
 
-    /* ── LTTB 다운샘플링 ── */
+    /* ── LTTB 다운샘플링 ── (라인용, 형태 보존) */
     function downsample(data, maxPoints) {
         if (data.length <= maxPoints) return data;
         const step = Math.ceil(data.length / maxPoints);
@@ -37,6 +36,13 @@
         return result;
     }
 
+    /* 단순 step 다운샘플 (마커 점들 — 형태 의미가 없을 때) */
+    function downsampleStep(arr, maxPoints) {
+        if (arr.length <= maxPoints) return arr;
+        const step = Math.ceil(arr.length / maxPoints);
+        return arr.filter((_, i) => i % step === 0);
+    }
+
     function epochToDate(epoch) {
         return new Date(epoch * 1000);
     }
@@ -47,11 +53,11 @@
     staNames.forEach((name, i) => {
         const sta = signal.stas[name];
         const raw = (sta.rssi_timeline || []).map(p => ({ x: p.epoch, y: p.rssi }));
-        const sampled = downsample(raw, 3000);
+        const sampled = downsample(raw, 2000);
         traces.push({
             x: sampled.map(p => epochToDate(p.x)),
             y: sampled.map(p => p.y),
-            type: 'scattergl', mode: 'lines',
+            type: 'scatter', mode: 'lines',
             name: name + ' RSSI',
             line: { color: colors[i % colors.length], width: 1 },
             xaxis: 'x', yaxis: 'y',
@@ -63,12 +69,12 @@
     const timeline = perSec.timeline || [];
     if (timeline.length > 0) {
         const sampled = downsample(
-            timeline.map(p => ({ x: p.epoch, y: p.retry })), 3000
+            timeline.map(p => ({ x: p.epoch, y: p.retry })), 2000
         );
         traces.push({
             x: sampled.map(p => epochToDate(p.x)),
             y: sampled.map(p => p.y),
-            type: 'scattergl', mode: 'lines',
+            type: 'scatter', mode: 'lines',
             name: 'Retry/sec',
             line: { color: '#ef4444', width: 1 },
             fill: 'tozeroy', fillcolor: 'rgba(239,68,68,0.1)',
@@ -78,12 +84,12 @@
     }
 
     /* ── 서브플롯 3: Ping RTT ── */
-    const pairs = ping.pairs || [];
+    const pairs = downsampleStep(ping.pairs || [], 2000);
     if (pairs.length > 0) {
         traces.push({
             x: pairs.map(p => epochToDate(p.epoch)),
             y: pairs.map(p => p.rtt_ms),
-            type: 'scattergl', mode: 'markers',
+            type: 'scatter', mode: 'markers',
             name: 'Ping RTT',
             marker: { color: '#10b981', size: 3 },
             xaxis: 'x3', yaxis: 'y3',
@@ -91,12 +97,12 @@
         });
     }
     // Ping loss 마커
-    const losses = ping.losses || [];
+    const losses = downsampleStep(ping.losses || [], 1000);
     if (losses.length > 0) {
         traces.push({
             x: losses.map(p => epochToDate(p.epoch)),
             y: losses.map(() => 0),
-            type: 'scattergl', mode: 'markers',
+            type: 'scatter', mode: 'markers',
             name: 'Ping Loss',
             marker: { color: '#ef4444', symbol: 'x', size: 6 },
             xaxis: 'x3', yaxis: 'y3',
@@ -107,12 +113,12 @@
     /* ── 서브플롯 4: 프레임/sec ── */
     if (timeline.length > 0) {
         const sampled = downsample(
-            timeline.map(p => ({ x: p.epoch, y: p.total })), 3000
+            timeline.map(p => ({ x: p.epoch, y: p.total })), 2000
         );
         traces.push({
             x: sampled.map(p => epochToDate(p.x)),
             y: sampled.map(p => p.y),
-            type: 'scattergl', mode: 'lines',
+            type: 'scatter', mode: 'lines',
             name: 'Frames/sec',
             line: { color: '#6b7280', width: 1 },
             fill: 'tozeroy', fillcolor: 'rgba(107,114,128,0.1)',
@@ -156,7 +162,7 @@
             traces.push({
                 x: events.map(e => epochToDate(e.epoch)),
                 y: events.map(e => e.rssi_before),
-                type: 'scattergl', mode: 'markers',
+                type: 'scatter', mode: 'markers',
                 name: staName + ' RSSI Cliff',
                 marker: { color: cliffColors[ci % cliffColors.length], size: 10, symbol: 'triangle-down' },
                 xaxis: 'x', yaxis: 'y',
@@ -174,16 +180,10 @@
         paper_bgcolor: 'rgba(0,0,0,0)',
         plot_bgcolor: 'rgba(0,0,0,0)',
         font: { color: '#9ca3af', size: 10 },
-        showlegend: true,
-        legend: {
-            orientation: 'v',
-            x: 1.01, xanchor: 'left',
-            y: 1, yanchor: 'top',
-            font: { size: 10 },
-            bgcolor: 'rgba(0,0,0,0)',
-        },
+        showlegend: false,  // 외부 사이드바로 대체
         dragmode: 'pan',
         hovermode: 'x unified',
+        uirevision: 'keep',  // pan/zoom 후 사용자 axis 상태 유지
         xaxis:  { anchor: 'y',  domain: [0, 1], showticklabels: false, gridcolor: GRID, ...SPIKE },
         xaxis2: { anchor: 'y2', domain: [0, 1], showticklabels: false, matches: 'x', gridcolor: GRID, ...SPIKE },
         xaxis3: { anchor: 'y3', domain: [0, 1], showticklabels: false, matches: 'x', gridcolor: GRID, ...SPIKE },
@@ -193,21 +193,21 @@
         yaxis3: { title: 'RTT (ms)',   domain: [0.28, 0.50], gridcolor: GRID },
         yaxis4: { title: 'Frames/s',   domain: [0.00, 0.25], gridcolor: GRID },
         shapes,
-        margin: { t: 30, r: 160, b: 40, l: 60 },
+        margin: { t: 20, r: 20, b: 40, l: 60 },
     };
 
-    if (traces.length > 0) {
-        Plotly.newPlot(timelineEl, traces, layout, {
-            responsive: true,
-            displayModeBar: true,
-            scrollZoom: true,
-            doubleClick: 'reset+autosize',
-            modeBarButtonsToRemove: ['lasso2d', 'select2d'],
-        });
-    } else {
+    if (traces.length === 0) {
         timelineEl.innerHTML = '<p class="text-gray-500 text-center py-20">시계열 데이터가 없습니다.</p>';
         return;
     }
+
+    Plotly.newPlot(timelineEl, traces, layout, {
+        responsive: true,
+        displayModeBar: true,
+        scrollZoom: true,
+        doubleClick: 'reset+autosize',
+        modeBarButtonsToRemove: ['lasso2d', 'select2d'],
+    });
 
     /* ── 패널 토글 ── 체크박스 변경 시 도메인 재배치 + trace visible ── */
     function applyPanelLayout(enabled) {
@@ -230,22 +230,26 @@
             updates[`${axis}.domain`] = [0, 0.001];
         });
         Plotly.relayout(timelineEl, updates);
-        const visibleArr = timelineEl.data.map(t =>
-            t._panel ? enabled.includes(t._panel) : true
-        );
+        // 트레이스 visible: 비활성 패널 트레이스만 숨김. 사이드바 체크박스 상태는 보존.
+        const visibleArr = timelineEl.data.map(t => {
+            if (!t._panel) return t.visible !== false ? true : false;
+            if (!enabled.includes(t._panel)) return false;
+            // 패널은 켜져 있고 — 사이드바 상태대로
+            return t._userVisible !== false;
+        });
         Plotly.restyle(timelineEl, { visible: visibleArr });
+        renderTraceLegend();  // 사이드바 활성/비활성 갱신
     }
 
     const toggleBoxes = document.querySelectorAll('.timeline-toggle');
-    function syncFromBoxes() {
-        const enabled = Array.from(toggleBoxes).filter(x => x.checked).map(x => x.dataset.panel);
-        if (enabled.length === 0) return null;
-        applyPanelLayout(enabled);
-        return enabled;
-    }
     toggleBoxes.forEach(cb => {
         cb.addEventListener('change', () => {
-            if (syncFromBoxes() === null) cb.checked = true; // 전체 OFF 방지
+            const enabled = Array.from(toggleBoxes).filter(x => x.checked).map(x => x.dataset.panel);
+            if (enabled.length === 0) {
+                cb.checked = true;
+                return;
+            }
+            applyPanelLayout(enabled);
         });
     });
 
@@ -266,6 +270,62 @@
             e.preventDefault();
             toggleBoxes.forEach(cb => { cb.checked = true; });
             applyPanelLayout(PANELS.slice());
+        });
+    }
+
+    /* ── 외부 사이드바 범례 ── 트레이스별 체크박스 ── */
+    function traceColor(t) {
+        return (t.line && t.line.color) || (t.marker && t.marker.color) || '#888';
+    }
+    function renderTraceLegend() {
+        const lg = document.getElementById('timeline-legend');
+        if (!lg) return;
+        const groups = {};
+        timelineEl.data.forEach((t, idx) => {
+            const p = t._panel || 'misc';
+            (groups[p] = groups[p] || []).push({ t, idx });
+        });
+        const PANEL_LABELS = { rssi: 'RSSI', retry: 'Retry/s', rtt: 'Ping RTT', frames: 'Frames/s', misc: '기타' };
+        const html = PANELS.concat(['misc']).filter(p => groups[p]).map(p => {
+            const enabled = !document.querySelector(`.timeline-toggle[data-panel="${p}"]`)
+                || document.querySelector(`.timeline-toggle[data-panel="${p}"]`).checked;
+            const items = groups[p].map(({ t, idx }) => {
+                const visible = t.visible !== false && t.visible !== 'legendonly';
+                const c = traceColor(t);
+                return `<label class="flex items-center gap-2 py-0.5 px-2 hover:bg-gray-700 rounded cursor-pointer text-xs ${visible && enabled ? '' : 'opacity-40'}" data-trace-idx="${idx}">
+                    <input type="checkbox" ${visible ? 'checked' : ''} ${enabled ? '' : 'disabled'} class="trace-toggle accent-blue-500" data-trace-idx="${idx}">
+                    <span class="inline-block w-3 h-3 rounded flex-shrink-0" style="background:${c}"></span>
+                    <span class="truncate" title="${t.name}">${t.name}</span>
+                </label>`;
+            }).join('');
+            return `<div class="mb-2">
+                <div class="text-[10px] uppercase tracking-wide text-gray-500 px-2 mb-1">${PANEL_LABELS[p] || p}</div>
+                ${items}
+            </div>`;
+        }).join('');
+        lg.innerHTML = html;
+        lg.querySelectorAll('.trace-toggle').forEach(cb => {
+            cb.addEventListener('change', () => {
+                const idx = parseInt(cb.dataset.traceIdx, 10);
+                timelineEl.data[idx]._userVisible = cb.checked;
+                Plotly.restyle(timelineEl, { visible: cb.checked }, [idx]);
+                cb.closest('label').classList.toggle('opacity-40', !cb.checked);
+            });
+        });
+    }
+    renderTraceLegend();
+
+    /* ── 패널 높이 슬라이더 ── */
+    const heightSlider = document.getElementById('timeline-height');
+    const heightLabel = document.getElementById('timeline-height-label');
+    if (heightSlider) {
+        heightSlider.addEventListener('input', () => {
+            const h = heightSlider.value + 'px';
+            timelineEl.style.height = h;
+            const lg = document.getElementById('timeline-legend');
+            if (lg) lg.style.maxHeight = h;
+            if (heightLabel) heightLabel.textContent = heightSlider.value + 'px';
+            Plotly.Plots.resize(timelineEl);
         });
     }
 
