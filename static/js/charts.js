@@ -86,13 +86,17 @@
         }, { responsive: true, displayModeBar: false });
     }
 
-    /* ── 페이로드 프로토콜 카테고리 분류 ── */
+    /* ── 페이로드 프로토콜 카테고리 분류 ── (Wireshark 표시명 기준)  */
     function categorizeProto(p) {
         const u = (p || '').toUpperCase();
-        if (/^(802\.11|WLAN|EAPOL|EAP|MNGT|CTRL)$/.test(u)) return 'wlan';
-        if (/^(ARP|RARP|LLC|ICMP|ICMPV6|IGMP|IGMPV3|STP|LLDP|CDP)$/.test(u)) return 'l2l3';
-        if (/^(TCP|HTTP|HTTPS|SSH|SSHV2|TLS|SSL|FTP|FTP-DATA|SMTP|POP|IMAP|RDP|TELNET|HTTP\/JSON|HTTP\/XML|MSRPC|SMB|SMB2|NBSS|NBNS|BROWSER)$/.test(u)) return 'tcp';
-        if (/^(UDP|DNS|MDNS|DHCP|DHCPV6|NTP|SNMP|TFTP|RTP|RTCP|SSDP|LLMNR|WSD|RIP|NETBIOS)$/.test(u)) return 'udp';
+        // WLAN/802.11
+        if (/^(802\.11|WLAN|EAPOL|EAP|RSN|WPS|MNGT|CTRL)$/.test(u)) return 'wlan';
+        // L2/L3 제어 (ARP, ICMP, 라우팅/스위칭/터널 제어)
+        if (/^(ARP|RARP|LLC|ICMP|ICMPV6|IGMP|IGMPV3|STP|RSTP|MSTP|LLDP|CDP|VTP|DTP|OAM|GRE|ESP|AH|PIM|OSPF|EIGRP|ISIS|BGP|RIP|HSRP|VRRP|MPLS|VXLAN|GENEVE)$/.test(u)) return 'l2l3';
+        // TCP 기반 응용 (NetBIOS Session, Web, DB, Messaging 등)
+        if (/^(TCP|HTTP|HTTPS|HTTP2|SSH|SSHV2|TLS|SSL|FTP|FTP-DATA|SMTP|SMTPS|POP|POP3|IMAP|IMAPS|RDP|VNC|TELNET|HTTP\/JSON|HTTP\/XML|MSRPC|SMB|SMB2|SMB3|NBSS|WEBSOCKET|IRC|NNTP|MYSQL|PGSQL|POSTGRES|REDIS|MONGO|MONGODB|MSSQL|ORACLE|KAFKA|RTMP|AMQP|MQTT|XMPP|STOMP|GIT|RSYNC|SVN|GRAPHQL|GRPC|TDS)$/.test(u)) return 'tcp';
+        // UDP 기반 응용 (이름 해석/검색/시간/멀티미디어/IoT/VPN-UDP)
+        if (/^(UDP|QUIC|DNS|MDNS|NBNS|BROWSER|NETBIOS|DHCP|DHCPV6|NTP|SNTP|SNMP|TFTP|RTP|RTCP|SSDP|LLMNR|WSD|COAP|BACNET|OPENVPN|WIREGUARD|L2TP|IPSEC|RADIUS|TACACS\+?|SIP|RTSP|SRTP)$/.test(u)) return 'udp';
         return 'other';
     }
     const PROTO_CAT_LABELS = {
