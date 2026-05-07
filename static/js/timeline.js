@@ -13,6 +13,10 @@
     const traces = [];
     const annotations = [];
 
+    /* 패널 매핑 — checkbox dataset.panel 과 yaxis 키 연결 */
+    const PANELS = ['rssi', 'retry', 'rtt', 'frames'];
+    const PANEL_AXIS = { rssi: 'yaxis', retry: 'yaxis2', rtt: 'yaxis3', frames: 'yaxis4' };
+
     /* ── LTTB 다운샘플링 ── */
     function downsample(data, maxPoints) {
         if (data.length <= maxPoints) return data;
@@ -51,6 +55,7 @@
             name: name + ' RSSI',
             line: { color: colors[i % colors.length], width: 1 },
             xaxis: 'x', yaxis: 'y',
+            _panel: 'rssi',
         });
     });
 
@@ -68,6 +73,7 @@
             line: { color: '#ef4444', width: 1 },
             fill: 'tozeroy', fillcolor: 'rgba(239,68,68,0.1)',
             xaxis: 'x2', yaxis: 'y2',
+            _panel: 'retry',
         });
     }
 
@@ -81,6 +87,7 @@
             name: 'Ping RTT',
             marker: { color: '#10b981', size: 3 },
             xaxis: 'x3', yaxis: 'y3',
+            _panel: 'rtt',
         });
     }
     // Ping loss 마커
@@ -93,6 +100,7 @@
             name: 'Ping Loss',
             marker: { color: '#ef4444', symbol: 'x', size: 6 },
             xaxis: 'x3', yaxis: 'y3',
+            _panel: 'rtt',
         });
     }
 
@@ -109,6 +117,7 @@
             line: { color: '#6b7280', width: 1 },
             fill: 'tozeroy', fillcolor: 'rgba(107,114,128,0.1)',
             xaxis: 'x4', yaxis: 'y4',
+            _panel: 'frames',
         });
     }
 
@@ -153,38 +162,91 @@
                 xaxis: 'x', yaxis: 'y',
                 text: events.map(e => `${e.drop_db}dB drop in ${e.duration_sec}s`),
                 hovertemplate: '%{text}<extra></extra>',
+                _panel: 'rssi',
             });
             ci++;
         }
     }
 
+    const GRID = 'rgba(255,255,255,0.05)';
+    const SPIKE = { showspikes: true, spikemode: 'across', spikethickness: 1, spikecolor: '#9ca3af', spikedash: 'dot' };
     const layout = {
         paper_bgcolor: 'rgba(0,0,0,0)',
         plot_bgcolor: 'rgba(0,0,0,0)',
         font: { color: '#9ca3af', size: 10 },
         showlegend: true,
-        legend: { orientation: 'h', y: 1.02, x: 0 },
-        xaxis:  { anchor: 'y',  domain: [0, 1], showticklabels: false },
-        xaxis2: { anchor: 'y2', domain: [0, 1], showticklabels: false, matches: 'x' },
-        xaxis3: { anchor: 'y3', domain: [0, 1], showticklabels: false, matches: 'x' },
-        xaxis4: { anchor: 'y4', domain: [0, 1], matches: 'x' },
-        yaxis:  { title: 'RSSI (dBm)', domain: [0.78, 1.0] },
-        yaxis2: { title: 'Retry/s',    domain: [0.53, 0.75] },
-        yaxis3: { title: 'RTT (ms)',    domain: [0.28, 0.50] },
-        yaxis4: { title: 'Frames/s',   domain: [0.0, 0.25] },
+        legend: {
+            orientation: 'v',
+            x: 1.01, xanchor: 'left',
+            y: 1, yanchor: 'top',
+            font: { size: 10 },
+            bgcolor: 'rgba(0,0,0,0)',
+        },
+        dragmode: 'pan',
+        hovermode: 'x unified',
+        xaxis:  { anchor: 'y',  domain: [0, 1], showticklabels: false, gridcolor: GRID, ...SPIKE },
+        xaxis2: { anchor: 'y2', domain: [0, 1], showticklabels: false, matches: 'x', gridcolor: GRID, ...SPIKE },
+        xaxis3: { anchor: 'y3', domain: [0, 1], showticklabels: false, matches: 'x', gridcolor: GRID, ...SPIKE },
+        xaxis4: { anchor: 'y4', domain: [0, 1], matches: 'x', gridcolor: GRID, ...SPIKE },
+        yaxis:  { title: 'RSSI (dBm)', domain: [0.78, 1.0], gridcolor: GRID },
+        yaxis2: { title: 'Retry/s',    domain: [0.53, 0.75], gridcolor: GRID },
+        yaxis3: { title: 'RTT (ms)',   domain: [0.28, 0.50], gridcolor: GRID },
+        yaxis4: { title: 'Frames/s',   domain: [0.00, 0.25], gridcolor: GRID },
         shapes,
-        margin: { t: 30, r: 20, b: 40, l: 60 },
+        margin: { t: 30, r: 160, b: 40, l: 60 },
     };
 
     if (traces.length > 0) {
         Plotly.newPlot(timelineEl, traces, layout, {
             responsive: true,
             displayModeBar: true,
+            scrollZoom: true,
+            doubleClick: 'reset+autosize',
             modeBarButtonsToRemove: ['lasso2d', 'select2d'],
         });
     } else {
         timelineEl.innerHTML = '<p class="text-gray-500 text-center py-20">시계열 데이터가 없습니다.</p>';
+        return;
     }
+
+    /* ── 패널 토글 ── 체크박스 변경 시 도메인 재배치 + trace visible ── */
+    function applyPanelLayout(enabled) {
+        if (enabled.length === 0) return;
+        const order = PANELS.filter(p => enabled.includes(p));
+        const gap = 0.04;
+        const each = (1 - gap * Math.max(0, order.length - 1)) / order.length;
+        const updates = {};
+        let top = 1.0;
+        order.forEach(p => {
+            const axis = PANEL_AXIS[p];
+            const bot = top - each;
+            updates[`${axis}.domain`] = [Number(bot.toFixed(4)), Number(top.toFixed(4))];
+            updates[`${axis}.visible`] = true;
+            top = bot - gap;
+        });
+        PANELS.filter(p => !enabled.includes(p)).forEach(p => {
+            const axis = PANEL_AXIS[p];
+            updates[`${axis}.visible`] = false;
+            updates[`${axis}.domain`] = [0, 0.001];
+        });
+        Plotly.relayout(timelineEl, updates);
+        const visibleArr = timelineEl.data.map(t =>
+            t._panel ? enabled.includes(t._panel) : true
+        );
+        Plotly.restyle(timelineEl, { visible: visibleArr });
+    }
+
+    const toggleBoxes = document.querySelectorAll('.timeline-toggle');
+    toggleBoxes.forEach(cb => {
+        cb.addEventListener('change', () => {
+            const enabled = Array.from(toggleBoxes).filter(x => x.checked).map(x => x.dataset.panel);
+            if (enabled.length === 0) {
+                cb.checked = true; // 전체 OFF 방지
+                return;
+            }
+            applyPanelLayout(enabled);
+        });
+    });
 
     /* ── 종합 진단 텍스트 로드 ── */
     const diagEl = document.getElementById('diagnosis-text');

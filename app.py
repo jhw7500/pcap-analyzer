@@ -1,6 +1,6 @@
 """WLAN Pcap Analyzer 로컬 웹 대시보드."""
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -20,6 +20,14 @@ app.include_router(upload_router)
 app.include_router(analysis_router)
 app.include_router(settings_router)
 app.include_router(ai_review_router)
+
+
+@app.middleware("http")
+async def _no_cache_static(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate, max-age=0"
+    return response
 
 
 @app.on_event("startup")

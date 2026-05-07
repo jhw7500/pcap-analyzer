@@ -61,7 +61,19 @@
 <!-- 통합 타임라인 탭 -->
 <div class="tab-content hidden" id="tab-timeline">
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-        <h3 class="text-sm font-semibold text-gray-400 mb-2">RSSI + Retry + Ping RTT (X축 동기화)</h3>
+        <div class="flex items-start justify-between mb-3 flex-wrap gap-3">
+            <div>
+                <h3 class="text-sm font-semibold text-gray-400 mb-1">RSSI + Retry + Ping RTT (X축 동기화)</h3>
+                <p class="text-xs text-gray-500">드래그=이동 · 휠=확대/축소 · 더블클릭=리셋 · 우측 도구바에서 Zoom box ↔ Pan 전환 · 범례 클릭=트레이스 토글</p>
+            </div>
+            <div class="flex items-center gap-3 text-xs text-gray-300 flex-wrap">
+                <span class="text-gray-500">패널 표시:</span>
+                <label class="flex items-center gap-1 cursor-pointer hover:text-white"><input type="checkbox" data-panel="rssi"   checked class="timeline-toggle accent-blue-500"> RSSI</label>
+                <label class="flex items-center gap-1 cursor-pointer hover:text-white"><input type="checkbox" data-panel="retry"  checked class="timeline-toggle accent-red-500"> Retry/s</label>
+                <label class="flex items-center gap-1 cursor-pointer hover:text-white"><input type="checkbox" data-panel="rtt"    checked class="timeline-toggle accent-green-500"> Ping RTT</label>
+                <label class="flex items-center gap-1 cursor-pointer hover:text-white"><input type="checkbox" data-panel="frames" checked class="timeline-toggle accent-gray-400"> Frames/s</label>
+            </div>
+        </div>
         <div id="chart-timeline" style="height:700px"></div>
     </div>
 </div>
