@@ -237,16 +237,37 @@
     }
 
     const toggleBoxes = document.querySelectorAll('.timeline-toggle');
+    function syncFromBoxes() {
+        const enabled = Array.from(toggleBoxes).filter(x => x.checked).map(x => x.dataset.panel);
+        if (enabled.length === 0) return null;
+        applyPanelLayout(enabled);
+        return enabled;
+    }
     toggleBoxes.forEach(cb => {
         cb.addEventListener('change', () => {
-            const enabled = Array.from(toggleBoxes).filter(x => x.checked).map(x => x.dataset.panel);
-            if (enabled.length === 0) {
-                cb.checked = true; // 전체 OFF 방지
-                return;
-            }
-            applyPanelLayout(enabled);
+            if (syncFromBoxes() === null) cb.checked = true; // 전체 OFF 방지
         });
     });
+
+    /* ── 단독 보기 버튼 ── 그 패널만 켜고 나머지 끔 ── */
+    document.querySelectorAll('.timeline-solo').forEach(btn => {
+        btn.addEventListener('click', e => {
+            e.preventDefault();
+            const target = btn.dataset.panel;
+            toggleBoxes.forEach(cb => { cb.checked = cb.dataset.panel === target; });
+            applyPanelLayout([target]);
+        });
+    });
+
+    /* ── 전체 표시 버튼 ── */
+    const showAllBtn = document.querySelector('.timeline-show-all');
+    if (showAllBtn) {
+        showAllBtn.addEventListener('click', e => {
+            e.preventDefault();
+            toggleBoxes.forEach(cb => { cb.checked = true; });
+            applyPanelLayout(PANELS.slice());
+        });
+    }
 
     /* ── 종합 진단 텍스트 로드 ── */
     const diagEl = document.getElementById('diagnosis-text');

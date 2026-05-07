@@ -61,17 +61,27 @@
 <!-- 통합 타임라인 탭 -->
 <div class="tab-content hidden" id="tab-timeline">
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-        <div class="flex items-start justify-between mb-3 flex-wrap gap-3">
-            <div>
-                <h3 class="text-sm font-semibold text-gray-400 mb-1">RSSI + Retry + Ping RTT (X축 동기화)</h3>
-                <p class="text-xs text-gray-500">드래그=이동 · 휠=확대/축소 · 더블클릭=리셋 · 우측 도구바에서 Zoom box ↔ Pan 전환 · 범례 클릭=트레이스 토글</p>
+        <div class="mb-3">
+            <div class="flex items-start justify-between flex-wrap gap-3 mb-2">
+                <div>
+                    <h3 class="text-sm font-semibold text-gray-400 mb-1">RSSI + Retry + Ping RTT (X축 동기화)</h3>
+                    <p class="text-xs text-gray-500">드래그=이동 · 휠=확대/축소 · 더블클릭=리셋 · 범례 한번 클릭=숨김 / 더블클릭=그것만 보기</p>
+                </div>
+                <div class="flex items-center gap-3 text-xs text-gray-300 flex-wrap">
+                    <span class="text-gray-500">패널 표시:</span>
+                    <label class="flex items-center gap-1 cursor-pointer hover:text-white"><input type="checkbox" data-panel="rssi"   checked class="timeline-toggle accent-blue-500"> RSSI</label>
+                    <label class="flex items-center gap-1 cursor-pointer hover:text-white"><input type="checkbox" data-panel="retry"  checked class="timeline-toggle accent-red-500"> Retry/s</label>
+                    <label class="flex items-center gap-1 cursor-pointer hover:text-white"><input type="checkbox" data-panel="rtt"    checked class="timeline-toggle accent-green-500"> Ping RTT</label>
+                    <label class="flex items-center gap-1 cursor-pointer hover:text-white"><input type="checkbox" data-panel="frames" checked class="timeline-toggle accent-gray-400"> Frames/s</label>
+                </div>
             </div>
-            <div class="flex items-center gap-3 text-xs text-gray-300 flex-wrap">
-                <span class="text-gray-500">패널 표시:</span>
-                <label class="flex items-center gap-1 cursor-pointer hover:text-white"><input type="checkbox" data-panel="rssi"   checked class="timeline-toggle accent-blue-500"> RSSI</label>
-                <label class="flex items-center gap-1 cursor-pointer hover:text-white"><input type="checkbox" data-panel="retry"  checked class="timeline-toggle accent-red-500"> Retry/s</label>
-                <label class="flex items-center gap-1 cursor-pointer hover:text-white"><input type="checkbox" data-panel="rtt"    checked class="timeline-toggle accent-green-500"> Ping RTT</label>
-                <label class="flex items-center gap-1 cursor-pointer hover:text-white"><input type="checkbox" data-panel="frames" checked class="timeline-toggle accent-gray-400"> Frames/s</label>
+            <div class="flex items-center gap-2 text-xs flex-wrap">
+                <span class="text-gray-500">단독 보기:</span>
+                <button type="button" class="timeline-solo px-2 py-0.5 rounded bg-gray-700 hover:bg-blue-700 text-gray-200" data-panel="rssi">RSSI</button>
+                <button type="button" class="timeline-solo px-2 py-0.5 rounded bg-gray-700 hover:bg-red-700 text-gray-200" data-panel="retry">Retry/s</button>
+                <button type="button" class="timeline-solo px-2 py-0.5 rounded bg-gray-700 hover:bg-green-700 text-gray-200" data-panel="rtt">Ping RTT</button>
+                <button type="button" class="timeline-solo px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-200" data-panel="frames">Frames/s</button>
+                <button type="button" class="timeline-show-all px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-200">전체 표시</button>
             </div>
         </div>
         <div id="chart-timeline" style="height:700px"></div>
