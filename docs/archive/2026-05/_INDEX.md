@@ -3,3 +3,4 @@
 | Feature | Archived | Match Rate | Documents |
 |---------|----------|------------|-----------|
 | test-infrastructure-followup (`tests` + `e2e`) | 2026-05-07 | n/a (no design baseline) | [Report](test-infrastructure-followup/test-infrastructure-followup.report.md) |
+| casefile (retroactive) | 2026-05-07 | n/a (sub-cycle: do→check→act in single commit) | [Report](casefile/casefile.report.md) |
