@@ -89,8 +89,10 @@
     /* ── 페이로드 프로토콜 카테고리 분류 ── (Wireshark 표시명 기준)  */
     function categorizeProto(p) {
         const u = (p || '').toUpperCase();
-        // WLAN/802.11
-        if (/^(802\.11|WLAN|EAPOL|EAP|RSN|WPS|MNGT|CTRL)$/.test(u)) return 'wlan';
+        // Wi-Fi 인증 (802.1X 프레임워크 — EAPOL/EAP/RSN/WPS)
+        if (/^(EAPOL|EAP|RSN|WPS|EAP-TLS|EAP-PEAP|EAP-TTLS|EAP-MD5|EAP-MSCHAPV2)$/.test(u)) return 'auth';
+        // Wi-Fi 프레임 (802.11 자체 — Mgmt/Ctrl/Data 헤더)
+        if (/^(802\.11|WLAN|MNGT|CTRL)$/.test(u)) return 'wlan';
         // L2/L3 제어 (ARP, ICMP, 라우팅/스위칭/터널 제어)
         if (/^(ARP|RARP|LLC|ICMP|ICMPV6|IGMP|IGMPV3|STP|RSTP|MSTP|LLDP|CDP|VTP|DTP|OAM|GRE|ESP|AH|PIM|OSPF|EIGRP|ISIS|BGP|RIP|HSRP|VRRP|MPLS|VXLAN|GENEVE)$/.test(u)) return 'l2l3';
         // TCP 기반 응용 (NetBIOS Session, Web, DB, Messaging 등)
@@ -100,21 +102,25 @@
         return 'other';
     }
     const PROTO_CAT_LABELS = {
-        wlan: 'WLAN/802.11', l2l3: 'L2/L3 제어',
+        wlan: 'Wi-Fi 프레임 (802.11)',
+        auth: 'Wi-Fi 인증 (802.1X)',
+        l2l3: 'L2/L3 제어',
         tcp: 'TCP 응용', udp: 'UDP 응용', other: '기타',
     };
     const PROTO_CAT_COLORS = {
-        wlan: '#06b6d4', l2l3: '#ec4899',
+        wlan: '#06b6d4', auth: '#fbbf24',
+        l2l3: '#ec4899',
         tcp: '#84cc16', udp: '#a855f7', other: '#6b7280',
     };
+    const PROTO_CAT_ORDER = ['wlan', 'auth', 'l2l3', 'tcp', 'udp', 'other'];
 
     /* ── 데이터 페이로드 카테고리 도넛 ── */
     if (ov.protocol_dist && Object.keys(ov.protocol_dist).length > 0) {
-        const totals = { wlan: 0, l2l3: 0, tcp: 0, udp: 0, other: 0 };
+        const totals = { wlan: 0, auth: 0, l2l3: 0, tcp: 0, udp: 0, other: 0 };
         Object.entries(ov.protocol_dist).forEach(([p, c]) => {
             totals[categorizeProto(p)] += c;
         });
-        const order = ['wlan', 'l2l3', 'tcp', 'udp', 'other'].filter(k => totals[k] > 0);
+        const order = PROTO_CAT_ORDER.filter(k => totals[k] > 0);
         Plotly.newPlot('chart-protocol-category', [{
             type: 'pie', hole: 0.5,
             labels: order.map(k => PROTO_CAT_LABELS[k]),
