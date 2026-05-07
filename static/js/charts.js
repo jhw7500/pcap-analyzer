@@ -57,9 +57,16 @@
         const values = Object.values(ov.protocol_dist);
         Plotly.newPlot('chart-protocol', [{
             type: 'pie', hole: 0.5, labels, values,
-            textinfo: 'label+percent', textposition: 'outside',
+            textinfo: 'percent', textposition: 'inside',
+            insidetextorientation: 'horizontal',
+            hovertemplate: '%{label}: %{value:,} (%{percent})<extra></extra>',
             marker: { colors: COLORS },
-        }], { ...DARK }, { responsive: true, displayModeBar: false });
+            sort: true,
+        }], {
+            ...DARK,
+            showlegend: true,
+            legend: { font: { size: 11 }, x: 1, xanchor: 'right', y: 0.5 },
+        }, { responsive: true, displayModeBar: false });
     }
 
     /* ── 서브타입 분포 (수평 바) ── */
@@ -70,7 +77,13 @@
         Plotly.newPlot('chart-subtype', [{
             type: 'bar', orientation: 'h', x: values, y: labels,
             marker: { color: '#3b82f6' },
-        }], { ...DARK, yaxis: { autorange: 'reversed' } }, { responsive: true, displayModeBar: false });
+            hovertemplate: '%{y}: %{x:,}<extra></extra>',
+        }], {
+            ...DARK,
+            margin: { t: 10, r: 10, b: 30, l: 10 },
+            yaxis: { autorange: 'reversed', automargin: true },
+            xaxis: { automargin: true },
+        }, { responsive: true, displayModeBar: false });
     }
 
     /* ── 디바이스 테이블 ── */
