@@ -1,4 +1,5 @@
 """에러 카탈로그 구조 테스트."""
+
 from analyzer.errors import ErrorCode, ERROR_CATALOG, error_payload
 
 
@@ -20,6 +21,10 @@ class TestErrorCatalog:
             assert code.value.isupper(), f"{code.value} not uppercase"
             assert " " not in code.value, f"{code.value} has spaces"
 
+    def test_casefile_error_codes_exist(self):
+        assert ErrorCode.INCIDENT_NOT_FOUND in ERROR_CATALOG
+        assert ErrorCode.CASEFILE_UNAVAILABLE in ERROR_CATALOG
+
 
 class TestErrorPayload:
     def test_has_three_fields(self):
@@ -37,3 +42,7 @@ class TestErrorPayload:
     def test_extra_message_empty_unchanged(self):
         p = error_payload(ErrorCode.CANCELLED)
         assert p["error"] == ERROR_CATALOG[ErrorCode.CANCELLED]["message"]
+
+    def test_casefile_payload_shape(self):
+        p = error_payload(ErrorCode.INCIDENT_NOT_FOUND)
+        assert set(p.keys()) == {"error", "code", "hint"}

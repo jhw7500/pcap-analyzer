@@ -1,4 +1,5 @@
 """FastAPI 라우트 테스트."""
+
 import json
 from fastapi.testclient import TestClient
 
@@ -50,6 +51,11 @@ class TestAnalysisAPI:
     def test_text_not_found(self):
         resp = client.get("/api/analysis/nonexistent_id_12345/text")
         assert resp.status_code == 404
+
+    def test_invalid_analysis_id_returns_400(self):
+        resp = client.get("/api/analysis/bad..id")
+        assert resp.status_code == 400
+        assert resp.json()["code"] == "INVALID_ANALYSIS_ID"
 
 
 class TestUploadValidation:

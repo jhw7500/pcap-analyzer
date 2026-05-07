@@ -1,0 +1,21 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "e2e: Playwright E2E tests (require running server)",
+    "slow: tests that take more than 5 seconds",
+    "tshark: tests that require tshark installed",
+]
+addopts = "-m 'not e2e and not slow and not tshark'"
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["analyzer", "ai", "routes", "config"]
+omit = ["tests/*", "test_*"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80
+exclude_lines = [
+    "if __name__",
+    "pragma: no cover",
+]
