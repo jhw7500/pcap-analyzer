@@ -1,4 +1,5 @@
 """에러 코드 카탈로그 — API 응답과 UI 안내의 단일 출처."""
+
 from enum import Enum
 from typing import Dict
 
@@ -13,6 +14,8 @@ class ErrorCode(str, Enum):
     CANCELLED = "CANCELLED"
     ANALYSIS_NOT_FOUND = "ANALYSIS_NOT_FOUND"
     INVALID_ANALYSIS_ID = "INVALID_ANALYSIS_ID"
+    INCIDENT_NOT_FOUND = "INCIDENT_NOT_FOUND"
+    CASEFILE_UNAVAILABLE = "CASEFILE_UNAVAILABLE"
     AI_REVIEW_FAILED = "AI_REVIEW_FAILED"
 
 
@@ -52,6 +55,14 @@ ERROR_CATALOG: Dict[ErrorCode, Dict[str, str]] = {
     ErrorCode.INVALID_ANALYSIS_ID: {
         "message": "잘못된 분석 ID입니다.",
         "hint": "경로 구분자나 상위 참조(..)가 포함된 ID는 차단됩니다.",
+    },
+    ErrorCode.INCIDENT_NOT_FOUND: {
+        "message": "요청한 incident를 찾을 수 없습니다.",
+        "hint": "incident_id를 확인하거나 기본 incident로 다시 요청하세요.",
+    },
+    ErrorCode.CASEFILE_UNAVAILABLE: {
+        "message": "casefile을 생성할 수 없습니다.",
+        "hint": "분석 JSON의 structured.ping 필드 유효성을 확인하세요.",
     },
     ErrorCode.AI_REVIEW_FAILED: {
         "message": "AI 리뷰 실행에 실패했습니다.",

@@ -1,17 +1,30 @@
 """11. STA별 종합 진단 — 모든 분석 결과를 교차하여 현장 제안 생성"""
-from typing import List, Dict
+
+from typing import Any, Dict, List
 from collections import Counter
 from ..models import Frame, AnalysisSection
 from ..detector import mac_name
+from ..ping_matching import build_ping_matches
 
 
-def analyze(frames: List[Frame], roles: Dict, index=None) -> AnalysisSection:
+def analyze(
+    frames: List[Frame], roles: Dict[str, Dict[str, Any]], index=None
+) -> AnalysisSection:
     lines = []
     sta_macs = [m for m, r in roles.items() if r["role"] == "STA"]
 
     if not sta_macs:
         return AnalysisSection(
-            title="11. 종합 진단", lines=["STA 없음"], summary="진단 대상 없음")
+            title="11. 종합 진단", lines=["STA 없음"], summary="진단 대상 없음"
+        )
+
+    ping = build_ping_matches(frames, roles)
+    matched_set = set()
+    loss_set = set()
+    for item in ping.get("pairs", []):
+        matched_set.add((item.get("src"), item.get("dst"), item.get("seq")))
+    for item in ping.get("losses", []):
+        loss_set.add((item.get("src"), item.get("dst"), item.get("seq")))
 
     warnings = []
 
@@ -35,23 +48,20 @@ def analyze(frames: List[Frame], roles: Dict, index=None) -> AnalysisSection:
         rssi_avg = sum(rssis) / len(rssis) if rssis else None
         rssi_min = min(rssis) if rssis else None
 
-        roaming_frames = [f for f in sta_frames
-                         if f.is_roaming_related and f.ta == sta]
+        roaming_frames = [f for f in sta_frames if f.is_roaming_related and f.ta == sta]
         auth_count = sum(1 for f in roaming_frames if f.subtype == "11")
 
-        # Ping loss (STA 프레임 내에서만 검색)
-        ping_req = {}
         ping_matched = 0
+        ping_lost = 0
         for f in sta_frames:
-            if f.is_icmp_request and not f.retry:
-                key = (f.ip_src, f.ip_dst, f.icmp_seq) if f.icmp_seq else (f.ip_src, f.ip_dst)
-                ping_req[key] = f
-            elif f.is_icmp_reply:
-                key = (f.ip_dst, f.ip_src, f.icmp_seq) if f.icmp_seq else (f.ip_dst, f.ip_src)
-                if key in ping_req:
-                    del ping_req[key]
-                    ping_matched += 1
-        ping_lost = len(ping_req)
+            if not f.is_icmp_request or f.retry:
+                continue
+            seq = f.icmp_seq if f.icmp_seq else str(f.number)
+            key = (f.ip_src, f.ip_dst, seq)
+            if key in matched_set:
+                ping_matched += 1
+            elif key in loss_set:
+                ping_lost += 1
         ping_total = ping_matched + ping_lost
 
         # 분당 최대 retry
@@ -65,8 +75,9 @@ def analyze(frames: List[Frame], roles: Dict, index=None) -> AnalysisSection:
         diags = []
         if ping_lost > 0 and ping_total > 0:
             loss_pct = ping_lost * 100.0 / ping_total
-            diags.append(("WARNING",
-                f"Ping Loss {ping_lost}/{ping_total} ({loss_pct:.0f}%)"))
+            diags.append(
+                ("WARNING", f"Ping Loss {ping_lost}/{ping_total} ({loss_pct:.0f}%)")
+            )
 
         if retry_pct > 40:
             diags.append(("WARNING", f"높은 Retry Rate: {retry_pct:.1f}%"))
@@ -89,7 +100,9 @@ def analyze(frames: List[Frame], roles: Dict, index=None) -> AnalysisSection:
         lines.append(f"--- {name} ({sta}) ---")
         rssi_str = f", RSSI avg: {rssi_avg:.0f}dBm" if rssi_avg else ""
         lines.append(f"  프레임: {total:,}, Retry: {retry_pct:.1f}%{rssi_str}")
-        lines.append(f"  로밍: {auth_count}회, Ping: {ping_matched}성공/{ping_lost}손실")
+        lines.append(
+            f"  로밍: {auth_count}회, Ping: {ping_matched}성공/{ping_lost}손실"
+        )
 
         for level, msg in diags:
             marker = "!!" if level == "WARNING" else "i "
@@ -99,14 +112,19 @@ def analyze(frames: List[Frame], roles: Dict, index=None) -> AnalysisSection:
 
         # 현장 제안
         if ping_lost > 0 and retry_pct > 30:
-            lines.append(f"  -> 제안: Retry 폭증이 ping loss 원인. "
-                         f"로밍 트리거 RSSI 임계값 상향 또는 TX power 조정 권장")
+            lines.append(
+                f"  -> 제안: Retry 폭증이 ping loss 원인. "
+                f"로밍 트리거 RSSI 임계값 상향 또는 TX power 조정 권장"
+            )
         elif ping_lost > 0 and auth_count > 2:
-            lines.append(f"  -> 제안: 잦은 로밍으로 인한 전환 지연. "
-                         f"로밍 히스테리시스 값 확대 권장")
+            lines.append(
+                f"  -> 제안: 잦은 로밍으로 인한 전환 지연. "
+                f"로밍 히스테리시스 값 확대 권장"
+            )
         elif ping_lost > 0:
-            lines.append(f"  -> 제안: ping loss 원인 추가 조사 필요 "
-                         f"(wpa.log, kernel log 확인)")
+            lines.append(
+                f"  -> 제안: ping loss 원인 추가 조사 필요 (wpa.log, kernel log 확인)"
+            )
         lines.append("")
 
     lines.append("=" * 60)

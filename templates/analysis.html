@@ -8,6 +8,8 @@
         <p class="text-gray-400 text-sm">{{ result.analyzed_at }} | {{ "{:,}".format(result.frame_count) }} 프레임</p>
     </div>
     <div class="flex gap-2">
+        <a href="/analysis/{{ result.id }}/casefile" target="_blank" rel="noopener noreferrer"
+           class="bg-indigo-600 hover:bg-indigo-700 px-3 py-1.5 rounded text-sm font-medium">Casefile 보기</a>
         <a href="/api/analysis/{{ result.id }}" target="_blank"
            class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm">JSON 내보내기</a>
         <a href="/api/analysis/{{ result.id }}/text" target="_blank"

@@ -1,31 +1,28 @@
 """10. Ping Loss 구간 탐지 — 응답 없는 Request + 원인 역추적"""
-from bisect import bisect_left, bisect_right
-from typing import List, Dict
+
+from typing import Any, Dict, List
 from ..models import Frame, AnalysisSection
-from ..detector import mac_name
+from ..ping_matching import build_ping_matches
 
 
-def _find_losses(frames: List[Frame]) -> List[Frame]:
-    requests = {}
-    matched_ids = set()
-    all_requests = []
-
-    for f in frames:
-        if f.is_icmp_request and not f.retry:
-            key = (f.ip_src, f.ip_dst, f.icmp_seq) if f.icmp_seq else (f.ip_src, f.ip_dst)
-            requests[key] = f
-            all_requests.append((key, f))
-        elif f.is_icmp_reply:
-            key = (f.ip_dst, f.ip_src, f.icmp_seq) if f.icmp_seq else (f.ip_dst, f.ip_src)
-            if key in requests:
-                matched_ids.add(id(requests[key]))
-                del requests[key]
-
-    return [req for _, req in all_requests if id(req) not in matched_ids]
+def _find_losses(frames: List[Frame], roles: Dict[str, Dict[str, Any]]) -> List[Frame]:
+    ping = build_ping_matches(frames, roles)
+    req_by_num = {f.number: f for f in frames}
+    losses: List[Frame] = []
+    for item in ping.get("losses", []):
+        req_num = item.get("req_num")
+        if req_num in req_by_num:
+            losses.append(req_by_num[req_num])
+    return losses
 
 
-def _diagnose_loss(loss_frame: Frame, roles: Dict, index=None,
-                   frames=None, window: float = 1.0) -> Dict:
+def _diagnose_loss(
+    loss_frame: Frame,
+    roles: Dict[str, Dict[str, Any]],
+    index=None,
+    frames=None,
+    window: float = 1.0,
+) -> Dict[str, Any]:
     t = loss_frame.epoch
 
     if index:
@@ -33,9 +30,10 @@ def _diagnose_loss(loss_frame: Frame, roles: Dict, index=None,
         nearby = before_f + after_f
         roaming_nearby = index.nearest_roaming(t, max_gap=5.0)
     else:
-        nearby = [f for f in frames if t - window <= f.epoch <= t + window]
+        source_frames = frames or []
+        nearby = [f for f in source_frames if t - window <= f.epoch <= t + window]
         roaming_nearby = None
-        for f in frames:
+        for f in source_frames:
             if f.is_roaming_related and f.subtype in ("11", "0", "2"):
                 gap = abs(f.epoch - t)
                 if gap < 5:
@@ -68,20 +66,25 @@ def _diagnose_loss(loss_frame: Frame, roles: Dict, index=None,
     }
 
 
-def analyze(frames: List[Frame], roles: Dict, index=None) -> AnalysisSection:
+def analyze(
+    frames: List[Frame], roles: Dict[str, Dict[str, Any]], index=None
+) -> AnalysisSection:
     lines = []
 
-    losses = _find_losses(frames)
+    losses = _find_losses(frames, roles)
     if not losses:
         return AnalysisSection(
             title="10. Ping Loss 분석",
             lines=["응답 없는 ping 없음 — 모든 Request에 Reply 수신"],
-            summary="ping loss 없음")
+            summary="ping loss 없음",
+        )
 
     lines.append(f"응답 없는 ICMP Request: {len(losses)}건")
     lines.append("")
-    lines.append(f"{'#':>3} | {'Frame':>6} | {'Timestamp':>15} | {'Src→Dst':>30} | "
-                 f"{'원인':>20} | {'Retry%':>7} | {'RSSI':>5}")
+    lines.append(
+        f"{'#':>3} | {'Frame':>6} | {'Timestamp':>15} | {'Src→Dst':>30} | "
+        f"{'원인':>20} | {'Retry%':>7} | {'RSSI':>5}"
+    )
     lines.append("-" * 100)
 
     cause_counts = {}
@@ -92,9 +95,10 @@ def analyze(frames: List[Frame], roles: Dict, index=None) -> AnalysisSection:
 
         rssi_str = f"{diag['rssi_avg']:.0f}" if diag["rssi_avg"] is not None else "-"
         lines.append(
-            f"{i+1:>3} | #{req.number:>5} | {req.time_short:>15} | "
+            f"{i + 1:>3} | #{req.number:>5} | {req.time_short:>15} | "
             f"{req.ip_src:>14}→{req.ip_dst:<14} | "
-            f"{diag['cause']:>20} | {diag['retry_pct']:>5.0f}% | {rssi_str:>5}")
+            f"{diag['cause']:>20} | {diag['retry_pct']:>5.0f}% | {rssi_str:>5}"
+        )
 
     # 연속 loss 구간
     lines.append("")
@@ -103,7 +107,7 @@ def analyze(frames: List[Frame], roles: Dict, index=None) -> AnalysisSection:
         streaks = []
         streak_start = 0
         for j in range(1, len(losses)):
-            if losses[j].epoch - losses[j-1].epoch > 2.0:
+            if losses[j].epoch - losses[j - 1].epoch > 2.0:
                 if j - streak_start >= 2:
                     streaks.append((streak_start, j - 1))
                 streak_start = j
@@ -116,7 +120,8 @@ def analyze(frames: List[Frame], roles: Dict, index=None) -> AnalysisSection:
                 lines.append(
                     f"  {losses[s].time_short} ~ {losses[e].time_short} "
                     f"({e - s + 1}건, {dur:.1f}초) "
-                    f"근거: #{losses[s].number}~#{losses[e].number}")
+                    f"근거: #{losses[s].number}~#{losses[e].number}"
+                )
         else:
             lines.append("  연속 loss 구간 없음 (산발적 발생)")
     else:
