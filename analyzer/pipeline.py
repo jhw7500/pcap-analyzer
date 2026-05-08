@@ -134,20 +134,46 @@ def run_analysis(
         _progress(f"{name} 분석...", 50 + int(40 * i / len(analyzer_list)))
         text_sections.append(mod.analyze(frames, roles, index))
 
-    # 구조화된 데이터 (웹 시각화용)
-    _progress("시각화 데이터 생성 중...", 90)
+    # 구조화된 데이터 (웹 시각화용) — 90→99% 단계별 진행
     overview_section = text_sections[0]
-    structured = {
-        "overview": _structured_overview(frames, roles, overview_section),
-        "signal": _structured_signal(frames, roles, index),
-        "ping": _structured_ping(frames, roles),
-        "roaming": _structured_roaming(frames, roles),
-        "per_second": _structured_per_second(frames),
-        "device_stats": _structured_device_stats(frames, roles, index),
-    }
+    structured: Dict[str, Any] = {}
+
+    _progress("시각화: 개요 데이터 생성 중...", 90)
+    structured["overview"] = _structured_overview(frames, roles, overview_section)
+    if _cancelled():
+        return {"cancelled": True}
+
+    _progress("시각화: 신호 품질 데이터 생성 중...", 91)
+    structured["signal"] = _structured_signal(frames, roles, index)
+    if _cancelled():
+        return {"cancelled": True}
+
+    _progress("시각화: Ping 데이터 생성 중...", 93)
+    structured["ping"] = _structured_ping(frames, roles)
+    if _cancelled():
+        return {"cancelled": True}
+
+    _progress("시각화: 로밍 데이터 생성 중...", 94)
+    structured["roaming"] = _structured_roaming(frames, roles)
+    if _cancelled():
+        return {"cancelled": True}
+
+    _progress("시각화: 초당 통계 생성 중...", 95)
+    structured["per_second"] = _structured_per_second(frames)
+    if _cancelled():
+        return {"cancelled": True}
+
+    _progress("시각화: 장치별 통계 생성 중...", 96)
+    structured["device_stats"] = _structured_device_stats(frames, roles, index)
+    if _cancelled():
+        return {"cancelled": True}
+
+    _progress("지연/이상/신호절벽 분석 중...", 98)
     structured["delay_zones"] = analyze_delays(structured["ping"], structured["roaming"], structured["per_second"])
     structured["anomaly_frames"] = detect_anomalies(structured["overview"])
     structured["signal_cliffs"] = analyze_signal_cliffs(structured["signal"])
+
+    _progress("종합 진단 생성 중...", 99)
     structured["diagnosis"] = _structured_diagnosis(structured)
 
     # 텍스트 리포트 (호환용)
