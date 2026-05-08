@@ -206,7 +206,9 @@
         bgcolor: 'rgba(15,23,42,0.95)',  // slate-900 + 알파
         bordercolor: '#64748b',           // slate-500
         font: { color: '#f1f5f9', size: 12 },  // slate-100 (밝은 흰)
+        namelength: -1,  // trace name truncate 방지 (기본 15자)
     };
+    const HOVER_X = { hoverformat: '%H:%M:%S' };  // 시:분:초만 (날짜는 unified 박스 상단에)
     const layout = {
         paper_bgcolor: 'rgba(0,0,0,0)',
         plot_bgcolor: 'rgba(0,0,0,0)',
@@ -216,10 +218,10 @@
         hovermode: 'x unified',
         hoverlabel: HOVERLABEL,
         uirevision: 'keep',  // pan/zoom 후 사용자 axis 상태 유지
-        xaxis:  { anchor: 'y',  domain: [0, 1], showticklabels: false, gridcolor: GRID, ...SPIKE },
-        xaxis2: { anchor: 'y2', domain: [0, 1], showticklabels: false, matches: 'x', gridcolor: GRID, ...SPIKE },
-        xaxis3: { anchor: 'y3', domain: [0, 1], showticklabels: false, matches: 'x', gridcolor: GRID, ...SPIKE },
-        xaxis4: { anchor: 'y4', domain: [0, 1], matches: 'x', gridcolor: GRID, ...SPIKE },
+        xaxis:  { anchor: 'y',  domain: [0, 1], showticklabels: false, gridcolor: GRID, ...SPIKE, ...HOVER_X },
+        xaxis2: { anchor: 'y2', domain: [0, 1], showticklabels: false, matches: 'x', gridcolor: GRID, ...SPIKE, ...HOVER_X },
+        xaxis3: { anchor: 'y3', domain: [0, 1], showticklabels: false, matches: 'x', gridcolor: GRID, ...SPIKE, ...HOVER_X },
+        xaxis4: { anchor: 'y4', domain: [0, 1], matches: 'x', gridcolor: GRID, ...SPIKE, ...HOVER_X },
         yaxis:  { title: 'RSSI (dBm)', domain: [0.78, 1.0], gridcolor: GRID },
         yaxis2: { title: 'Retry/s',    domain: [0.53, 0.75], gridcolor: GRID },
         yaxis3: { title: 'RTT (ms)',   domain: [0.28, 0.50], gridcolor: GRID },
