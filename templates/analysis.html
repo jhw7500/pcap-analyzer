@@ -313,6 +313,38 @@ function hideAiReview() {
     if (panel) panel.classList.add('hidden');
 }
 
+async function copyAiReview(btn) {
+    if (!_aiReviewCache) return;
+    try {
+        await navigator.clipboard.writeText(_aiReviewCache);
+        const orig = btn.textContent;
+        btn.textContent = '✓ 복사됨';
+        btn.classList.add('text-green-400');
+        setTimeout(() => {
+            btn.textContent = orig;
+            btn.classList.remove('text-green-400');
+        }, 1500);
+    } catch (e) {
+        alert('클립보드 복사 실패: ' + e.message);
+    }
+}
+
+function downloadAiReview(id) {
+    if (!_aiReviewCache) return;
+    const blob = new Blob([_aiReviewCache], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ai-review_${id || 'analysis'}_${ts}.md`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }, 200);
+}
+
 function showAiReview(markdown, id) {
     _aiReviewCache = markdown;
     let panel = document.getElementById('ai-review-panel');
@@ -329,11 +361,17 @@ function showAiReview(markdown, id) {
             <div class="flex justify-between items-center mb-4">
                 <h2 class="text-lg font-bold text-purple-400">AI 리뷰 결과</h2>
                 <div class="flex items-center gap-2">
+                    <button onclick="copyAiReview(this)"
+                            class="text-xs text-gray-300 hover:text-white px-2 py-1 rounded border border-gray-600"
+                            title="markdown 텍스트 복사">📋 복사</button>
+                    <button onclick="downloadAiReview('${escId}')"
+                            class="text-xs text-gray-300 hover:text-white px-2 py-1 rounded border border-gray-600"
+                            title=".md 파일로 저장">⬇ 저장</button>
                     <button onclick="requestAiReview('${escId}', true)"
                             class="text-xs text-gray-400 hover:text-white px-2 py-1 rounded border border-gray-600"
                             title="새로 분석">↻ 새로</button>
                     <button onclick="hideAiReview()"
-                            class="text-gray-400 hover:text-white text-xl">&times;</button>
+                            class="text-gray-400 hover:text-white text-xl ml-1">&times;</button>
                 </div>
             </div>
             <div class="prose prose-invert prose-sm max-w-none whitespace-pre-wrap">${markdown}</div>
