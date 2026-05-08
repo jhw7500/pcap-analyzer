@@ -89,13 +89,12 @@ async def get_progress_by_id(job_id: str):
 
 @router.get("/api/progress")
 async def get_progress_latest():
-    """하위호환: 가장 최근 active job의 진행률. 없으면 마지막 기록 또는 idle."""
+    """가장 최근 active job의 진행률. active 없으면 idle 0% (이전 finished 표시 안 함)."""
     with _jobs_lock:
-        if not _jobs:
-            return JSONResponse({"msg": "", "pct": 0, "active": False})
         active = [j for j in _jobs.values() if j["active"]]
-        target = max(active, key=lambda j: j["created"]) if active else \
-                 max(_jobs.values(), key=lambda j: j["created"])
+        if not active:
+            return JSONResponse({"msg": "", "pct": 0, "active": False})
+        target = max(active, key=lambda j: j["created"])
         return JSONResponse({
             "msg": target["msg"],
             "pct": target["pct"],

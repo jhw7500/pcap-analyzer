@@ -55,11 +55,15 @@ class TestProgressLatestWithJobs:
         assert data["pct"] == 42
         assert data["active"] is True
 
-    def test_returns_finished_when_no_active(self):
+    def test_returns_idle_when_no_active(self):
+        # active 없으면 finished가 있어도 idle 0% (이전 분석 잔존 표시 회피)
         upload_module._jobs["job-done"] = _make_job(active=False, msg="완료", pct=100)
         resp = client.get("/api/progress")
         assert resp.status_code == 200
-        assert resp.json()["active"] is False
+        body = resp.json()
+        assert body["active"] is False
+        assert body["pct"] == 0
+        assert body["msg"] == ""
 
 
 class TestProgressById:
