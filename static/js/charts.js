@@ -139,6 +139,8 @@
     }
 
     /* ── 페이로드 세부 (카테고리 탭별 가로 막대) ── */
+    const WIFI_HEADER_SET = new Set(['802.11', 'WLAN', 'MNGT', 'CTRL']);
+    function isWifiHeader(p) { return WIFI_HEADER_SET.has(p.toUpperCase()); }
     function renderProtoDetail(cat) {
         const el = document.getElementById('chart-protocol-detail');
         if (!el) return;
@@ -148,6 +150,48 @@
             .slice(0, 15);
         if (entries.length === 0) {
             el.innerHTML = '<p class="text-gray-500 text-center py-12">이 카테고리에 해당하는 프로토콜이 없습니다.</p>';
+            return;
+        }
+        // Wi-Fi 카테고리는 802.11 헤더 / 인증 두 그룹으로 분리해 색상·범례 구분
+        if (cat === 'wifi') {
+            const headers = entries.filter(([p]) => isWifiHeader(p));
+            const auths   = entries.filter(([p]) => !isWifiHeader(p));
+            const total = entries.reduce((s, [, v]) => s + v, 0);
+            const fmt = v => `${v.toLocaleString()} (${(v / total * 100).toFixed(1)}%)`;
+            const traces = [];
+            if (headers.length > 0) traces.push({
+                type: 'bar', orientation: 'h',
+                x: headers.map(e => e[1]),
+                y: headers.map(e => e[0]),
+                name: '802.11 헤더',
+                marker: { color: '#06b6d4' },
+                text: headers.map(e => fmt(e[1])),
+                textposition: 'outside',
+                hovertemplate: '%{y}: %{x:,}<extra></extra>',
+            });
+            if (auths.length > 0) traces.push({
+                type: 'bar', orientation: 'h',
+                x: auths.map(e => e[1]),
+                y: auths.map(e => e[0]),
+                name: '인증 (802.1X)',
+                marker: { color: '#fbbf24' },
+                text: auths.map(e => fmt(e[1])),
+                textposition: 'outside',
+                hovertemplate: '%{y}: %{x:,}<extra></extra>',
+            });
+            Plotly.newPlot(el, traces, {
+                ...DARK,
+                margin: { t: 10, r: 100, b: 30, l: 10 },
+                yaxis: {
+                    autorange: 'reversed',
+                    automargin: true,
+                    categoryorder: 'array',
+                    categoryarray: [...headers.map(e => e[0]), ...auths.map(e => e[0])],
+                },
+                xaxis: { automargin: true },
+                showlegend: true,
+                legend: { orientation: 'h', y: 1.1, x: 0, font: { size: 11 } },
+            }, { responsive: true, displayModeBar: false });
             return;
         }
         const labels = entries.map(e => e[0]);
