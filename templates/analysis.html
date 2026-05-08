@@ -108,6 +108,12 @@
                 <button type="button" class="timeline-solo px-2 py-0.5 rounded bg-gray-500 hover:bg-gray-400 text-white" data-panel="frames">Frames/s</button>
                 <button type="button" class="timeline-show-all px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 text-gray-200">전체 표시</button>
             </div>
+            <div class="flex items-center gap-3 text-xs flex-wrap mb-2">
+                <span class="text-gray-500">오버레이:</span>
+                <label class="flex items-center gap-1 cursor-pointer hover:text-white text-gray-300"><input type="checkbox" data-overlay="roaming" checked class="timeline-overlay accent-orange-500"> 로밍 이벤트(점선)</label>
+                <label class="flex items-center gap-1 cursor-pointer hover:text-white text-gray-300"><input type="checkbox" data-overlay="zone"    checked class="timeline-overlay accent-red-500">    이상 구간(빨간 배경)</label>
+                <label class="flex items-center gap-1 cursor-pointer hover:text-white text-gray-300"><input type="checkbox" data-overlay="cliff"   checked class="timeline-overlay accent-orange-500"> RSSI Cliff(▼)</label>
+            </div>
             <div class="flex items-center gap-2 text-xs">
                 <span class="text-gray-500">패널 높이:</span>
                 <input type="range" id="timeline-height" min="400" max="1500" step="50" value="700" class="w-48 accent-blue-500">

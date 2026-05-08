@@ -7,6 +7,11 @@
         plot_bgcolor: 'rgba(0,0,0,0)',
         font: { color: '#9ca3af', size: 11 },
         margin: { t: 10, r: 10, b: 30, l: 40 },
+        hoverlabel: {
+            bgcolor: 'rgba(15,23,42,0.95)',  // slate-900 + 알파
+            bordercolor: '#64748b',           // slate-500
+            font: { color: '#f1f5f9', size: 12 },  // slate-100
+        },
     };
 
     const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6',

@@ -127,14 +127,15 @@
         });
     }
 
-    /* ── 로밍 이벤트 세로 점선 ── */
-    const shapes = [];
+    /* ── 로밍 이벤트 세로 점선 ── (그룹 토글용 _kind 메타 부여) */
+    const allShapes = [];
     const seqs = roaming.sequences || [];
     seqs.forEach(s => {
         const t = epochToDate(s.auth_epoch);
-        shapes.push({
+        allShapes.push({
+            _kind: 'roaming',
             type: 'line', x0: t, x1: t, y0: 0, y1: 1, yref: 'paper',
-            line: { color: 'rgba(245,158,11,0.5)', dash: 'dot', width: 1 },
+            line: { color: 'rgba(245,158,11,0.3)', dash: 'dot', width: 1 },
         });
     });
 
@@ -142,7 +143,8 @@
     const delays = DATA.delay_zones || {};
     const zones = delays.delay_zones || [];
     zones.forEach(z => {
-        shapes.push({
+        allShapes.push({
+            _kind: 'zone',
             type: 'rect',
             x0: epochToDate(z.start_epoch), x1: epochToDate(z.end_epoch),
             y0: 0, y1: 1, yref: 'paper',
@@ -152,7 +154,7 @@
         });
     });
 
-    /* ── RSSI cliff 마커 ── */
+    /* ── RSSI cliff 마커 ── (그룹 토글용 _overlay 메타 부여) */
     const cliffs = DATA.signal_cliffs || {};
     const cliffColors = ['#f97316', '#ec4899', '#8b5cf6'];
     let ci = 0;
@@ -164,11 +166,12 @@
                 y: events.map(e => e.rssi_before),
                 type: 'scatter', mode: 'markers',
                 name: staName + ' RSSI Cliff',
-                marker: { color: cliffColors[ci % cliffColors.length], size: 10, symbol: 'triangle-down' },
+                marker: { color: cliffColors[ci % cliffColors.length], size: 7, symbol: 'triangle-down' },
                 xaxis: 'x', yaxis: 'y',
                 text: events.map(e => `${e.drop_db}dB drop in ${e.duration_sec}s`),
                 hovertemplate: '%{text}<extra></extra>',
                 _panel: 'rssi',
+                _overlay: 'cliff',
             });
             ci++;
         }
@@ -176,6 +179,11 @@
 
     const GRID = 'rgba(255,255,255,0.05)';
     const SPIKE = { showspikes: true, spikemode: 'across', spikethickness: 1, spikecolor: '#9ca3af', spikedash: 'dot' };
+    const HOVERLABEL = {
+        bgcolor: 'rgba(15,23,42,0.95)',  // slate-900 + 알파
+        bordercolor: '#64748b',           // slate-500
+        font: { color: '#f1f5f9', size: 12 },  // slate-100 (밝은 흰)
+    };
     const layout = {
         paper_bgcolor: 'rgba(0,0,0,0)',
         plot_bgcolor: 'rgba(0,0,0,0)',
@@ -183,6 +191,7 @@
         showlegend: false,  // 외부 사이드바로 대체
         dragmode: 'pan',
         hovermode: 'x unified',
+        hoverlabel: HOVERLABEL,
         uirevision: 'keep',  // pan/zoom 후 사용자 axis 상태 유지
         xaxis:  { anchor: 'y',  domain: [0, 1], showticklabels: false, gridcolor: GRID, ...SPIKE },
         xaxis2: { anchor: 'y2', domain: [0, 1], showticklabels: false, matches: 'x', gridcolor: GRID, ...SPIKE },
@@ -192,7 +201,7 @@
         yaxis2: { title: 'Retry/s',    domain: [0.53, 0.75], gridcolor: GRID },
         yaxis3: { title: 'RTT (ms)',   domain: [0.28, 0.50], gridcolor: GRID },
         yaxis4: { title: 'Frames/s',   domain: [0.00, 0.25], gridcolor: GRID },
-        shapes,
+        shapes: allShapes.map(({ _kind, ...rest }) => rest),
         margin: { t: 20, r: 20, b: 40, l: 60 },
     };
 
@@ -272,6 +281,32 @@
             applyPanelLayout(PANELS.slice());
         });
     }
+
+    /* ── 오버레이 토글 ── 로밍 점선 / 이상 구간 / RSSI Cliff ── */
+    function applyOverlayToggle() {
+        const want = {
+            roaming: document.querySelector('.timeline-overlay[data-overlay="roaming"]')?.checked ?? true,
+            zone:    document.querySelector('.timeline-overlay[data-overlay="zone"]')?.checked    ?? true,
+            cliff:   document.querySelector('.timeline-overlay[data-overlay="cliff"]')?.checked   ?? true,
+        };
+        const filteredShapes = allShapes
+            .filter(s => want[s._kind])
+            .map(({ _kind, ...rest }) => rest);
+        Plotly.relayout(timelineEl, { shapes: filteredShapes });
+        // cliff trace는 panel toggle과 별개 — _overlay 기준으로도 토글
+        const visibleArr = timelineEl.data.map(t => {
+            if (t._overlay === 'cliff' && !want.cliff) return false;
+            if (t._panel) {
+                const cb = document.querySelector(`.timeline-toggle[data-panel="${t._panel}"]`);
+                return !cb || cb.checked;
+            }
+            return true;
+        });
+        Plotly.restyle(timelineEl, { visible: visibleArr });
+    }
+    document.querySelectorAll('.timeline-overlay').forEach(cb => {
+        cb.addEventListener('change', applyOverlayToggle);
+    });
 
     /* ── 외부 사이드바 범례 ── 트레이스별 체크박스 ── */
     function traceColor(t) {
