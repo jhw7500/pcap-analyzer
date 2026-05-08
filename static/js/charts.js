@@ -186,6 +186,10 @@
     }
 
     /* ── 서브타입 세부 (카테고리 탭별 가로 막대) ── */
+    function subtypeLabel(sub) {
+        if (sub === undefined || sub === null || sub === '') return '비-802.11 / 미분류';
+        return SUBTYPE_NAMES[sub] || ('type=' + sub);
+    }
     function renderSubtypeDetail(cat) {
         const subtypeEl = document.getElementById('chart-subtype');
         if (!subtypeEl) return;
@@ -197,7 +201,7 @@
             subtypeEl.innerHTML = '<p class="text-gray-500 text-center py-12">이 카테고리에 해당하는 서브타입이 없습니다.</p>';
             return;
         }
-        const labels = entries.map(e => SUBTYPE_NAMES[e[0]] || ('type=' + e[0]));
+        const labels = entries.map(e => subtypeLabel(e[0]));
         const values = entries.map(e => e[1]);
         const total = values.reduce((a, b) => a + b, 0);
         Plotly.newPlot(subtypeEl, [{
