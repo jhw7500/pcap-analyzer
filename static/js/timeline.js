@@ -103,12 +103,10 @@
             y: normalPairs.map(p => p.rtt_ms),
             type: 'scatter', mode: 'markers',
             name: `Ping 정상 (<${PING_DELAY_THRESHOLD.toFixed(0)}ms)`,
-            marker: { color: '#10b981', size: 3 },
+            marker: { color: 'rgba(16,185,129,0.6)', size: 2 },  // 살짝 투명한 녹색
             xaxis: 'x3', yaxis: 'y3',
-            visible: 'legendonly',  // 사이드바 체크박스로 켤 수 있음
             hovertemplate: '%{x|%H:%M:%S} · %{y:.1f} ms<extra></extra>',
             _panel: 'rtt',
-            _userVisible: false,
         });
     }
     if (delayedPairs.length > 0) {
@@ -131,7 +129,7 @@
             y: losses.map(() => 0),
             type: 'scatter', mode: 'markers',
             name: 'Ping Loss',
-            marker: { color: '#ef4444', symbol: 'x', size: 7 },
+            marker: { color: 'rgba(239,68,68,0.7)', symbol: 'x', size: 4 },  // 작고 살짝 투명
             xaxis: 'x3', yaxis: 'y3',
             hovertemplate: '%{x|%H:%M:%S} · 응답 없음<extra></extra>',
             _panel: 'rtt',
