@@ -60,6 +60,27 @@
         </div>
     </div>
 
+    <!-- 업로드 제한 -->
+    <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
+        <h2 class="text-lg font-semibold mb-4">업로드 제한</h2>
+        <div>
+            <label class="block text-xs text-gray-500 mb-1">최대 업로드 크기 (MB) — 비우면 기본 200MB</label>
+            <input type="number" name="max_upload_mb" value="{{ config.get('max_upload_mb', '') }}"
+                   min="1" step="1" placeholder="200"
+                   class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
+            <p class="text-xs text-gray-500 mt-2">
+                현재 적용 중: <span class="text-blue-300 font-mono">{{ current_max_upload_mb }}MB</span>
+                {% if env_max_upload_mb %}
+                <span class="block text-yellow-400 mt-1">⚠ 환경변수 <code class="bg-gray-700 px-1 rounded">PCAP_MAX_UPLOAD_MB={{ env_max_upload_mb }}</code>가 설정되어 있어 이 값보다 우선합니다. 해제하려면 셸에서 <code class="bg-gray-700 px-1 rounded">unset PCAP_MAX_UPLOAD_MB</code> 후 서버 재시작.</span>
+                {% endif %}
+            </p>
+            <p class="text-xs text-gray-500 mt-2">
+                큰 캡처는 분석 시간이 매우 길어집니다. tshark로 사전 필터링 권장:
+                <code class="bg-gray-700 px-1 rounded">tshark -r big.pcap -Y "filter" -w small.pcap</code>
+            </p>
+        </div>
+    </div>
+
     <!-- UI 에셋 -->
     <div class="bg-gray-800 rounded-lg p-6 border border-gray-700">
         <h2 class="text-lg font-semibold mb-4">UI 에셋</h2>

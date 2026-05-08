@@ -1,4 +1,6 @@
 """시스템/AI 설정 페이지."""
+import os
+
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -18,6 +20,8 @@ async def settings_page(request: Request):
         "config": cfg,
         "ai_api_key_hint": config.mask_secret(cfg.get("ai_api_key", "")),
         "offline_assets": config.is_offline_assets(),
+        "current_max_upload_mb": config.max_upload_size() // (1024 * 1024),
+        "env_max_upload_mb": os.environ.get("PCAP_MAX_UPLOAD_MB", "").strip(),
     })
 
 
@@ -29,6 +33,7 @@ async def save_settings(
     ai_model: str = Form(""),
     ai_auto_review: str = Form(""),
     ui_offline_assets: str = Form(""),
+    max_upload_mb: str = Form(""),
 ):
     if tshark_path:
         config.set_value("tshark_path", tshark_path)
@@ -40,4 +45,5 @@ async def save_settings(
         config.set_value("ai_model", ai_model)
     config.set_value("ai_auto_review", ai_auto_review)
     config.set_value("ui_offline_assets", ui_offline_assets)
+    config.set_value("max_upload_mb", max_upload_mb.strip())
     return RedirectResponse("/settings", status_code=303)
