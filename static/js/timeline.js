@@ -61,6 +61,7 @@
             name: name + ' RSSI',
             line: { color: colors[i % colors.length], width: 1 },
             xaxis: 'x', yaxis: 'y',
+            hovertemplate: '%{y:.0f} dBm<extra></extra>',
             _panel: 'rssi',
         });
     });
@@ -79,6 +80,7 @@
             line: { color: '#ef4444', width: 1 },
             fill: 'tozeroy', fillcolor: 'rgba(239,68,68,0.1)',
             xaxis: 'x2', yaxis: 'y2',
+            hovertemplate: '%{y:.0f} pkt/s<extra></extra>',
             _panel: 'retry',
         });
     }
@@ -104,6 +106,7 @@
             marker: { color: '#10b981', size: 3 },
             xaxis: 'x3', yaxis: 'y3',
             visible: 'legendonly',  // 사이드바 체크박스로 켤 수 있음
+            hovertemplate: '%{y:.1f} ms<extra></extra>',
             _panel: 'rtt',
             _userVisible: false,
         });
@@ -116,6 +119,7 @@
             name: `Ping 지연 (≥${PING_DELAY_THRESHOLD.toFixed(0)}ms)`,
             marker: { color: '#f97316', size: 5 },
             xaxis: 'x3', yaxis: 'y3',
+            hovertemplate: '%{y:.1f} ms<extra></extra>',
             _panel: 'rtt',
         });
     }
@@ -129,6 +133,7 @@
             name: 'Ping Loss',
             marker: { color: '#ef4444', symbol: 'x', size: 7 },
             xaxis: 'x3', yaxis: 'y3',
+            hovertemplate: '응답 없음<extra></extra>',
             _panel: 'rtt',
         });
     }
@@ -146,6 +151,7 @@
             line: { color: '#6b7280', width: 1 },
             fill: 'tozeroy', fillcolor: 'rgba(107,114,128,0.1)',
             xaxis: 'x4', yaxis: 'y4',
+            hovertemplate: '%{y:.0f} pkt/s<extra></extra>',
             _panel: 'frames',
         });
     }
@@ -208,7 +214,7 @@
         font: { color: '#f1f5f9', size: 12 },  // slate-100 (밝은 흰)
         namelength: -1,  // trace name truncate 방지 (기본 15자)
     };
-    const HOVER_X = { hoverformat: '%H:%M:%S' };  // 시:분:초만 (날짜는 unified 박스 상단에)
+    const HOVER_X = { hoverformat: '%Y-%m-%d %H:%M:%S' };  // 박스 상단에 날짜 + 시각
     const layout = {
         paper_bgcolor: 'rgba(0,0,0,0)',
         plot_bgcolor: 'rgba(0,0,0,0)',
