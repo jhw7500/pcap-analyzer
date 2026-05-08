@@ -124,15 +124,25 @@
     // Ping loss 마커
     const losses = downsampleStep(ping.losses || [], 1000);
     if (losses.length > 0) {
+        // 시간 bucket(60초)으로 묶어 'loss 농도 막대'로 표시 — 7K초 캡처에 수백 건이라도
+        // 시각적으로 농도 분포가 보이고 가로띠로 보이지 않음
+        const BUCKET_SEC = 60;
+        const buckets = new Map();
+        losses.forEach(p => {
+            const ts = Math.floor(p.epoch / BUCKET_SEC) * BUCKET_SEC;
+            buckets.set(ts, (buckets.get(ts) || 0) + 1);
+        });
+        const bucketEntries = Array.from(buckets.entries()).sort((a, b) => a[0] - b[0]);
         traces.push({
-            x: losses.map(p => epochToDate(p.epoch)),
-            y: losses.map(() => 0),
-            type: 'scatter', mode: 'markers',
-            name: 'Ping Loss',
-            marker: { color: 'rgba(239,68,68,0.7)', symbol: 'x', size: 4 },  // 작고 살짝 투명
+            x: bucketEntries.map(b => epochToDate(b[0] + BUCKET_SEC / 2)),  // bucket 중앙
+            y: bucketEntries.map(b => b[1]),
+            type: 'bar',
+            name: `Ping Loss (${losses.length}건 / ${BUCKET_SEC}초당)`,
+            marker: { color: 'rgba(239,68,68,0.55)' },
             xaxis: 'x3', yaxis: 'y3',
-            hovertemplate: '%{x|%H:%M:%S} · 응답 없음<extra></extra>',
+            hovertemplate: '%{x|%H:%M:%S} · %{y}건 손실<extra></extra>',
             _panel: 'rtt',
+            width: BUCKET_SEC * 1000 * 0.85,
         });
     }
 
