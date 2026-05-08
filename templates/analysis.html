@@ -42,7 +42,7 @@
             <div id="chart-frame-category" style="height:280px"></div>
         </div>
         <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-            <h3 class="text-sm font-semibold text-gray-400 mb-2">프로토콜 분포 <span class="text-xs text-gray-500 font-normal">(Wi-Fi 관련 + 페이로드 통합)</span></h3>
+            <h3 class="text-sm font-semibold text-gray-400 mb-2">데이터 프레임 페이로드 <span class="text-xs text-gray-500 font-normal">(802.11 헤더 제외, 안에 들어 있는 통신만)</span></h3>
             <div id="chart-protocol-category" style="height:280px"></div>
         </div>
     </div>
@@ -60,9 +60,9 @@
     </div>
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-6">
         <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
-            <h3 class="text-sm font-semibold text-gray-400">프로토콜 세부</h3>
+            <h3 class="text-sm font-semibold text-gray-400">페이로드 세부</h3>
             <div class="flex gap-1 text-xs flex-wrap">
-                <button type="button" class="proto-tab px-3 py-1 rounded bg-blue-600 text-white" data-cat="wifi">Wi-Fi 관련</button>
+                <button type="button" class="proto-tab px-3 py-1 rounded bg-blue-600 text-white" data-cat="auth">연결 인증</button>
                 <button type="button" class="proto-tab px-3 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600" data-cat="l2l3">네트워크 제어</button>
                 <button type="button" class="proto-tab px-3 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600" data-cat="tcp">TCP 통신</button>
                 <button type="button" class="proto-tab px-3 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600" data-cat="udp">UDP 통신</button>

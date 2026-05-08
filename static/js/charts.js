@@ -89,8 +89,10 @@
     /* ── 페이로드 프로토콜 카테고리 분류 ── (Wireshark 표시명 기준)  */
     function categorizeProto(p) {
         const u = (p || '').toUpperCase();
-        // Wi-Fi 관련: 802.11 헤더 자체 + 인증(802.1X) 모두 한 카테고리로
-        if (/^(802\.11|WLAN|MNGT|CTRL|EAPOL|EAP|RSN|WPS|EAP-TLS|EAP-PEAP|EAP-TTLS|EAP-MD5|EAP-MSCHAPV2)$/.test(u)) return 'wifi';
+        // 802.11 헤더 자체 — 페이로드 도넛/탭에서 제외 (프레임 종류 도넛에 이미 표시)
+        if (/^(802\.11|WLAN|MNGT|CTRL)$/.test(u)) return 'header_only';
+        // 연결 인증 (802.1X 프레임워크)
+        if (/^(EAPOL|EAP|RSN|WPS|EAP-TLS|EAP-PEAP|EAP-TTLS|EAP-MD5|EAP-MSCHAPV2)$/.test(u)) return 'auth';
         // L2/L3 제어 (ARP, ICMP, 라우팅/스위칭/터널 제어)
         if (/^(ARP|RARP|LLC|ICMP|ICMPV6|IGMP|IGMPV3|STP|RSTP|MSTP|LLDP|CDP|VTP|DTP|OAM|GRE|ESP|AH|PIM|OSPF|EIGRP|ISIS|BGP|RIP|HSRP|VRRP|MPLS|VXLAN|GENEVE)$/.test(u)) return 'l2l3';
         // TCP 기반 응용 (NetBIOS Session, Web, DB, Messaging 등)
@@ -100,26 +102,28 @@
         return 'other';
     }
     const PROTO_CAT_LABELS = {
-        wifi: 'Wi-Fi 관련 (802.11 + 인증)',
+        auth: '연결 인증',
         l2l3: '네트워크 제어',
         tcp: 'TCP 통신',
         udp: 'UDP 통신',
         other: '기타',
     };
     const PROTO_CAT_COLORS = {
-        wifi: '#06b6d4',
+        auth: '#fbbf24',
         l2l3: '#ec4899',
         tcp: '#84cc16',
         udp: '#a855f7',
         other: '#6b7280',
     };
-    const PROTO_CAT_ORDER = ['wifi', 'l2l3', 'tcp', 'udp', 'other'];
+    const PROTO_CAT_ORDER = ['auth', 'l2l3', 'tcp', 'udp', 'other'];
 
-    /* ── 페이로드 카테고리 도넛 ── (Wi-Fi 관련 + 네트워크 제어 + TCP/UDP 통신 + 기타) */
+    /* ── 데이터 프레임 페이로드 카테고리 도넛 ── (802.11 헤더는 프레임 종류 도넛에 이미 있음) */
     if (ov.protocol_dist && Object.keys(ov.protocol_dist).length > 0) {
-        const totals = { wifi: 0, l2l3: 0, tcp: 0, udp: 0, other: 0 };
+        const totals = { auth: 0, l2l3: 0, tcp: 0, udp: 0, other: 0 };
         Object.entries(ov.protocol_dist).forEach(([p, c]) => {
-            totals[categorizeProto(p)] += c;
+            const cat = categorizeProto(p);
+            if (cat === 'header_only') return;
+            totals[cat] += c;
         });
         const order = PROTO_CAT_ORDER.filter(k => totals[k] > 0);
         Plotly.newPlot('chart-protocol-category', [{
@@ -139,8 +143,6 @@
     }
 
     /* ── 페이로드 세부 (카테고리 탭별 가로 막대) ── */
-    const WIFI_HEADER_SET = new Set(['802.11', 'WLAN', 'MNGT', 'CTRL']);
-    function isWifiHeader(p) { return WIFI_HEADER_SET.has(p.toUpperCase()); }
     function renderProtoDetail(cat) {
         const el = document.getElementById('chart-protocol-detail');
         if (!el) return;
@@ -150,48 +152,6 @@
             .slice(0, 15);
         if (entries.length === 0) {
             el.innerHTML = '<p class="text-gray-500 text-center py-12">이 카테고리에 해당하는 프로토콜이 없습니다.</p>';
-            return;
-        }
-        // Wi-Fi 카테고리는 802.11 헤더 / 인증 두 그룹으로 분리해 색상·범례 구분
-        if (cat === 'wifi') {
-            const headers = entries.filter(([p]) => isWifiHeader(p));
-            const auths   = entries.filter(([p]) => !isWifiHeader(p));
-            const total = entries.reduce((s, [, v]) => s + v, 0);
-            const fmt = v => `${v.toLocaleString()} (${(v / total * 100).toFixed(1)}%)`;
-            const traces = [];
-            if (headers.length > 0) traces.push({
-                type: 'bar', orientation: 'h',
-                x: headers.map(e => e[1]),
-                y: headers.map(e => e[0]),
-                name: '802.11 헤더',
-                marker: { color: '#06b6d4' },
-                text: headers.map(e => fmt(e[1])),
-                textposition: 'outside',
-                hovertemplate: '%{y}: %{x:,}<extra></extra>',
-            });
-            if (auths.length > 0) traces.push({
-                type: 'bar', orientation: 'h',
-                x: auths.map(e => e[1]),
-                y: auths.map(e => e[0]),
-                name: '인증 (802.1X)',
-                marker: { color: '#fbbf24' },
-                text: auths.map(e => fmt(e[1])),
-                textposition: 'outside',
-                hovertemplate: '%{y}: %{x:,}<extra></extra>',
-            });
-            Plotly.newPlot(el, traces, {
-                ...DARK,
-                margin: { t: 10, r: 100, b: 30, l: 10 },
-                yaxis: {
-                    autorange: 'reversed',
-                    automargin: true,
-                    categoryorder: 'array',
-                    categoryarray: [...headers.map(e => e[0]), ...auths.map(e => e[0])],
-                },
-                xaxis: { automargin: true },
-                showlegend: true,
-                legend: { orientation: 'h', y: 1.1, x: 0, font: { size: 11 } },
-            }, { responsive: true, displayModeBar: false });
             return;
         }
         const labels = entries.map(e => e[0]);
@@ -211,7 +171,7 @@
         }, { responsive: true, displayModeBar: false });
     }
     if (ov.protocol_dist && Object.keys(ov.protocol_dist).length > 0) {
-        renderProtoDetail('wifi');
+        renderProtoDetail('auth');
         document.querySelectorAll('.proto-tab').forEach(btn => {
             btn.addEventListener('click', () => {
                 document.querySelectorAll('.proto-tab').forEach(b => {
