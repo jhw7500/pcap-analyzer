@@ -271,11 +271,24 @@
 <script src="/static/js/timeline.js"></script>
 <script>
     if ({{ result.get('ai_review', '') | tojson }} && {{ result.get('ai_review', '') | tojson }}.length > 0) {
-        document.addEventListener('DOMContentLoaded', () => showAiReview({{ result.get('ai_review', '') | tojson }}));
+        document.addEventListener('DOMContentLoaded', () => showAiReview({{ result.get('ai_review', '') | tojson }}, '{{ result.id }}'));
     }
 </script>
 <script>
-async function requestAiReview(id) {
+let _aiReviewCache = null;  // 마지막 결과를 메모리에도 캐시
+
+async function requestAiReview(id, force) {
+    const existing = document.getElementById('ai-review-panel');
+    // 이미 그려진 패널이 hidden 상태면 다시 보이기 (서버 호출 X)
+    if (existing && !force) {
+        existing.classList.remove('hidden');
+        return;
+    }
+    // 메모리 캐시가 있으면 재사용
+    if (_aiReviewCache && !force) {
+        showAiReview(_aiReviewCache, id);
+        return;
+    }
     const btn = document.getElementById('ai-review-btn');
     btn.disabled = true;
     btn.textContent = 'AI 분석 중...';
@@ -285,7 +298,8 @@ async function requestAiReview(id) {
         if (data.error) {
             alert(data.error);
         } else {
-            showAiReview(data.review);
+            _aiReviewCache = data.review;
+            showAiReview(data.review, id);
         }
     } catch (e) {
         alert('AI 리뷰 실패: ' + e.message);
@@ -294,7 +308,13 @@ async function requestAiReview(id) {
     btn.textContent = 'AI 리뷰 요청';
 }
 
-function showAiReview(markdown) {
+function hideAiReview() {
+    const panel = document.getElementById('ai-review-panel');
+    if (panel) panel.classList.add('hidden');
+}
+
+function showAiReview(markdown, id) {
+    _aiReviewCache = markdown;
     let panel = document.getElementById('ai-review-panel');
     if (!panel) {
         panel = document.createElement('div');
@@ -302,12 +322,19 @@ function showAiReview(markdown) {
         panel.className = 'fixed inset-0 bg-black/70 flex items-center justify-center z-50';
         document.body.appendChild(panel);
     }
+    panel.classList.remove('hidden');
+    const escId = (id || '').replace(/'/g, '');
     panel.innerHTML = `
         <div class="bg-gray-800 rounded-lg p-6 max-w-3xl max-h-[80vh] overflow-y-auto border border-gray-600 m-4">
             <div class="flex justify-between items-center mb-4">
                 <h2 class="text-lg font-bold text-purple-400">AI 리뷰 결과</h2>
-                <button onclick="document.getElementById('ai-review-panel').remove()"
-                        class="text-gray-400 hover:text-white text-xl">&times;</button>
+                <div class="flex items-center gap-2">
+                    <button onclick="requestAiReview('${escId}', true)"
+                            class="text-xs text-gray-400 hover:text-white px-2 py-1 rounded border border-gray-600"
+                            title="새로 분석">↻ 새로</button>
+                    <button onclick="hideAiReview()"
+                            class="text-gray-400 hover:text-white text-xl">&times;</button>
+                </div>
             </div>
             <div class="prose prose-invert prose-sm max-w-none whitespace-pre-wrap">${markdown}</div>
         </div>`;
