@@ -72,8 +72,18 @@ def run_analysis(
 
     _progress("tshark로 프레임 추출 중...", 10)
     import config as _config
+    import time as _time
     _tshark_path = _config.detect_tshark()
     _tshark_info = detect_tshark_version(_tshark_path or "tshark")
+
+    # 추출 진행률: 시간·프레임 수에 따라 10→28%로 점진 (asymptotic, 절대 30 초과 안함)
+    _extract_t0 = _time.time()
+    def _frame_progress(count):
+        elapsed = _time.time() - _extract_t0
+        # 시간 기반 0~18% 추가 (60초쯤 12%, 5분쯤 17%)
+        pct = 10 + int(18 * (1 - 1 / (1 + elapsed / 30)))
+        _progress(f"tshark 추출... {count:,}프레임 처리됨", min(pct, 28))
+
     frames = extract_frames(
         pcap_path,
         wpa_passphrase=passphrase,
@@ -84,6 +94,7 @@ def run_analysis(
         ip_filter=ip_filter,
         tshark_path=_tshark_path,
         cancel_event=cancel_event,
+        progress_cb=_frame_progress,
     )
     if not frames:
         return {"error": "프레임을 추출하지 못했습니다. tshark 경로 또는 pcap 파일을 확인하세요."}

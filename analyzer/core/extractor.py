@@ -6,7 +6,7 @@ import sys
 import threading
 import time
 import importlib
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .models import Frame as FrameType
@@ -173,6 +173,7 @@ def extract_frames(
     ip_filter: str = "",
     tshark_path: Optional[str] = None,
     cancel_event: Optional[threading.Event] = None,
+    progress_cb: "Optional[Callable[[int], None]]" = None,
 ) -> List[FrameType]:
     resolved_path = tshark_path or "tshark"
     cmd = build_tshark_cmd(
@@ -200,11 +201,21 @@ def extract_frames(
                 cancelled[0] = True
                 try:
                     proc.terminate()
-                    proc.wait(timeout=3)
+                    proc.wait(timeout=1)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+                    try:
+                        proc.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        pass
+                # stdout 강제 close → main loop의 readline이 즉시 EOF
+                try:
+                    if proc.stdout is not None:
+                        proc.stdout.close()
+                except Exception:
+                    pass
                 return
-            time.sleep(0.1)
+            time.sleep(0.05)
 
     watcher: Optional[threading.Thread] = None
     if cancel_event is not None:
@@ -213,21 +224,31 @@ def extract_frames(
 
     frames: List[FrameType] = []
     count = 0
-    progress_interval = 500000
+    log_interval = 500000
+    progress_interval = 50000  # progress_cb 호출 간격 (5만 프레임)
 
     stdout = proc.stdout
     if stdout is None:
         return []
 
-    for line in stdout:
-        if cancel_event is not None and cancel_event.is_set():
-            break
-        frame = parse_tsv_line(line)
-        if frame is not None:
-            frames.append(frame)
-            count += 1
-            if count % progress_interval == 0:
-                print(f"  -> {count:,}프레임 처리 중...", file=sys.stderr)
+    try:
+        for line in stdout:
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            frame = parse_tsv_line(line)
+            if frame is not None:
+                frames.append(frame)
+                count += 1
+                if count % log_interval == 0:
+                    print(f"  -> {count:,}프레임 처리 중...", file=sys.stderr)
+                if progress_cb is not None and count % progress_interval == 0:
+                    try:
+                        progress_cb(count)
+                    except Exception:
+                        pass
+    except (ValueError, OSError):
+        # stdout 강제 close 시 발생 가능 — 무시하고 정상 종료 흐름으로
+        pass
 
     _ = proc.wait()
     if watcher is not None:

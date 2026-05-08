@@ -43,6 +43,7 @@
                 <input type="text" name="ai_model" value="{{ config.get('ai_model', '') }}"
                        placeholder="claude-sonnet-4-6"
                        class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
+                <p class="text-xs text-gray-500 mt-1">권장: <code class="bg-gray-700 px-1 rounded">claude-sonnet-4-6</code> (속도/비용 균형) · <code class="bg-gray-700 px-1 rounded">claude-opus-4-7</code> (최고 품질, 큰 캡처에 권장) · <code class="bg-gray-700 px-1 rounded">claude-haiku-4-5</code> (빠르고 저비용) · OpenAI: <code class="bg-gray-700 px-1 rounded">gpt-4o</code></p>
             </div>
             <div class="col-span-2">
                 <label class="block text-xs text-gray-500 mb-1">API 키 (환경변수 PCAP_AI_API_KEY로도 설정 가능, 비워두면 기존 값 유지)</label>
