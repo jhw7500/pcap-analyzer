@@ -70,6 +70,7 @@ async def index(request: Request):
         "tshark": tshark,
         "analyses": analyses,
         "offline_assets": config.is_offline_assets(),
+        "max_upload_mb": config.max_upload_size() // (1024 * 1024),
     })
 
 

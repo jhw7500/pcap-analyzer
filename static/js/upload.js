@@ -13,6 +13,51 @@
 
     let pollTimer = null;
 
+    // 옵션 폼 localStorage 캐시 (파일은 제외, 텍스트 옵션만)
+    const OPT_KEY = 'pcap.upload.options';
+    const OPT_FIELDS = ['ssid', 'passphrase', 'mac_filter', 'ip_filter', 'time_start', 'time_end'];
+    function restoreOptions() {
+        try {
+            const saved = JSON.parse(localStorage.getItem(OPT_KEY) || '{}');
+            for (const name of OPT_FIELDS) {
+                const el = form.querySelector(`[name="${name}"]`);
+                if (el && saved[name] !== undefined) el.value = saved[name];
+            }
+        } catch (e) { /* ignore */ }
+    }
+    function saveOptions() {
+        try {
+            const data = {};
+            for (const name of OPT_FIELDS) {
+                const el = form.querySelector(`[name="${name}"]`);
+                if (el) data[name] = el.value;
+            }
+            localStorage.setItem(OPT_KEY, JSON.stringify(data));
+        } catch (e) { /* ignore */ }
+    }
+    restoreOptions();
+    // 입력값이 바뀔 때마다 즉시 저장 (분석 시작 안 해도 새로고침/재방문 시 유지)
+    for (const name of OPT_FIELDS) {
+        const el = form.querySelector(`[name="${name}"]`);
+        if (el) el.addEventListener('input', saveOptions);
+    }
+
+    // 클라이언트 측 파일 크기 즉시 검사
+    const MAX_MB = parseInt(fileInput.getAttribute('data-max-mb') || '200', 10);
+    const MAX_BYTES = MAX_MB * 1024 * 1024;
+    function validateFile(file) {
+        if (!file) return false;
+        if (file.size > MAX_BYTES) {
+            const sizeMb = (file.size / 1024 / 1024).toFixed(1);
+            alert(`파일이 너무 큽니다: ${sizeMb}MB (상한 ${MAX_MB}MB)\n\n` +
+                  `환경변수 PCAP_MAX_UPLOAD_MB 또는 config.local.json의 max_upload_mb 키로 조정 가능.`);
+            fileInput.value = '';
+            fileName.classList.add('hidden');
+            return false;
+        }
+        return true;
+    }
+
     dropZone.addEventListener('click', () => fileInput.click());
 
     dropZone.addEventListener('dragover', (e) => {
@@ -26,14 +71,18 @@
         e.preventDefault();
         dropZone.classList.remove('border-blue-500', 'bg-gray-700/30');
         if (e.dataTransfer.files.length) {
+            const f = e.dataTransfer.files[0];
+            if (!validateFile(f)) return;
             fileInput.files = e.dataTransfer.files;
-            showFileName(e.dataTransfer.files[0].name);
+            showFileName(f.name);
         }
     });
 
     fileInput.addEventListener('change', () => {
         if (fileInput.files.length) {
-            showFileName(fileInput.files[0].name);
+            const f = fileInput.files[0];
+            if (!validateFile(f)) return;
+            showFileName(f.name);
         }
     });
 
