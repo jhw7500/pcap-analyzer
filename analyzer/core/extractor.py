@@ -250,10 +250,29 @@ def extract_frames(
     frames: List[FrameType] = []
     count = 0
     log_interval = 500000
-    progress_interval = 50000  # progress_cb 호출 간격 (5만 프레임)
+    progress_interval = 5000  # progress_cb 호출 간격 (frame count 기반)
+
+    # 시간 기반 ticker — 프레임 콜백 사이 공백을 메워 UI가 멈춰 보이지 않게
+    ticker_stop = threading.Event()
+    ticker_thread: Optional[threading.Thread] = None
+
+    def _progress_ticker():
+        while not ticker_stop.is_set():
+            if progress_cb is not None:
+                try:
+                    progress_cb(count)
+                except Exception:
+                    pass
+            if ticker_stop.wait(1.5):
+                return
+
+    if progress_cb is not None:
+        ticker_thread = threading.Thread(target=_progress_ticker, daemon=True)
+        ticker_thread.start()
 
     stdout = proc.stdout
     if stdout is None:
+        ticker_stop.set()
         return []
 
     try:
@@ -274,6 +293,10 @@ def extract_frames(
     except (ValueError, OSError):
         # stdout 강제 close 시 발생 가능 — 무시하고 정상 종료 흐름으로
         pass
+
+    ticker_stop.set()
+    if ticker_thread is not None:
+        ticker_thread.join(timeout=1)
 
     _ = proc.wait()
     if watcher is not None:
