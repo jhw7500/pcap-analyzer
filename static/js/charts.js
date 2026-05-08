@@ -276,9 +276,16 @@
         // 로밍 테이블
         const rTable = document.querySelector('#roaming-table tbody');
         if (rTable) {
+            const fmtTime = epoch => {
+                const d = new Date(epoch * 1000);
+                const pad = n => String(n).padStart(2, '0');
+                const ms = String(Math.floor((d.getMilliseconds()))).padStart(3, '0');
+                return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${ms}`;
+            };
             rTable.innerHTML = seqs.map((s, i) =>
                 `<tr class="border-b border-gray-700/50 ${s.is_slow ? 'text-red-400' : ''}">
                     <td class="py-1">${i + 1}</td>
+                    <td class="py-1 font-mono text-xs">${fmtTime(s.auth_epoch)}</td>
                     <td class="py-1 font-mono text-xs">${s.sta_name}</td>
                     <td class="py-1 font-mono text-xs">${s.ap_name}</td>
                     <td class="py-1 text-right">${s.gap_ms.toFixed(1)}</td>
