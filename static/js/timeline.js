@@ -83,15 +83,38 @@
         });
     }
 
-    /* ── 서브플롯 3: Ping RTT ── */
-    const pairs = downsampleStep(ping.pairs || [], 2000);
-    if (pairs.length > 0) {
+    /* ── 서브플롯 3: Ping RTT ── 정상은 숨김(legendonly), 지연·loss만 강조 */
+    const allPairs = ping.pairs || [];
+    const rttsSorted = allPairs
+        .map(p => p.rtt_ms).filter(v => v != null && v > 0)
+        .sort((a, b) => a - b);
+    // 임계값: P90(상위 10%) — 단 너무 낮으면 시각적 의미 없으니 50ms 하한
+    const p90 = rttsSorted.length > 0
+        ? rttsSorted[Math.floor(rttsSorted.length * 0.9)]
+        : 50;
+    const PING_DELAY_THRESHOLD = Math.max(p90, 50);
+    const normalPairs  = downsampleStep(allPairs.filter(p => p.rtt_ms != null && p.rtt_ms <  PING_DELAY_THRESHOLD), 2000);
+    const delayedPairs = allPairs.filter(p => p.rtt_ms != null && p.rtt_ms >= PING_DELAY_THRESHOLD);
+    if (normalPairs.length > 0) {
         traces.push({
-            x: pairs.map(p => epochToDate(p.epoch)),
-            y: pairs.map(p => p.rtt_ms),
+            x: normalPairs.map(p => epochToDate(p.epoch)),
+            y: normalPairs.map(p => p.rtt_ms),
             type: 'scatter', mode: 'markers',
-            name: 'Ping RTT',
+            name: `Ping 정상 (<${PING_DELAY_THRESHOLD.toFixed(0)}ms)`,
             marker: { color: '#10b981', size: 3 },
+            xaxis: 'x3', yaxis: 'y3',
+            visible: 'legendonly',  // 사이드바 체크박스로 켤 수 있음
+            _panel: 'rtt',
+            _userVisible: false,
+        });
+    }
+    if (delayedPairs.length > 0) {
+        traces.push({
+            x: delayedPairs.map(p => epochToDate(p.epoch)),
+            y: delayedPairs.map(p => p.rtt_ms),
+            type: 'scatter', mode: 'markers',
+            name: `Ping 지연 (≥${PING_DELAY_THRESHOLD.toFixed(0)}ms)`,
+            marker: { color: '#f97316', size: 5 },
             xaxis: 'x3', yaxis: 'y3',
             _panel: 'rtt',
         });
@@ -104,7 +127,7 @@
             y: losses.map(() => 0),
             type: 'scatter', mode: 'markers',
             name: 'Ping Loss',
-            marker: { color: '#ef4444', symbol: 'x', size: 6 },
+            marker: { color: '#ef4444', symbol: 'x', size: 7 },
             xaxis: 'x3', yaxis: 'y3',
             _panel: 'rtt',
         });
