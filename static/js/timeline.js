@@ -61,7 +61,7 @@
             name: name + ' RSSI',
             line: { color: colors[i % colors.length], width: 1 },
             xaxis: 'x', yaxis: 'y',
-            hovertemplate: '%{y:.0f} dBm<extra></extra>',
+            hovertemplate: '%{x|%H:%M:%S} · %{y:.0f} dBm<extra></extra>',
             _panel: 'rssi',
         });
     });
@@ -80,7 +80,7 @@
             line: { color: '#ef4444', width: 1 },
             fill: 'tozeroy', fillcolor: 'rgba(239,68,68,0.1)',
             xaxis: 'x2', yaxis: 'y2',
-            hovertemplate: '%{y:.0f} pkt/s<extra></extra>',
+            hovertemplate: '%{x|%H:%M:%S} · %{y:.0f} pkt/s<extra></extra>',
             _panel: 'retry',
         });
     }
@@ -106,7 +106,7 @@
             marker: { color: '#10b981', size: 3 },
             xaxis: 'x3', yaxis: 'y3',
             visible: 'legendonly',  // 사이드바 체크박스로 켤 수 있음
-            hovertemplate: '%{y:.1f} ms<extra></extra>',
+            hovertemplate: '%{x|%H:%M:%S} · %{y:.1f} ms<extra></extra>',
             _panel: 'rtt',
             _userVisible: false,
         });
@@ -119,7 +119,7 @@
             name: `Ping 지연 (≥${PING_DELAY_THRESHOLD.toFixed(0)}ms)`,
             marker: { color: '#f97316', size: 5 },
             xaxis: 'x3', yaxis: 'y3',
-            hovertemplate: '%{y:.1f} ms<extra></extra>',
+            hovertemplate: '%{x|%H:%M:%S} · %{y:.1f} ms<extra></extra>',
             _panel: 'rtt',
         });
     }
@@ -133,7 +133,7 @@
             name: 'Ping Loss',
             marker: { color: '#ef4444', symbol: 'x', size: 7 },
             xaxis: 'x3', yaxis: 'y3',
-            hovertemplate: '응답 없음<extra></extra>',
+            hovertemplate: '%{x|%H:%M:%S} · 응답 없음<extra></extra>',
             _panel: 'rtt',
         });
     }
@@ -151,7 +151,7 @@
             line: { color: '#6b7280', width: 1 },
             fill: 'tozeroy', fillcolor: 'rgba(107,114,128,0.1)',
             xaxis: 'x4', yaxis: 'y4',
-            hovertemplate: '%{y:.0f} pkt/s<extra></extra>',
+            hovertemplate: '%{x|%H:%M:%S} · %{y:.0f} pkt/s<extra></extra>',
             _panel: 'frames',
         });
     }
@@ -198,7 +198,7 @@
                 marker: { color: cliffColors[ci % cliffColors.length], size: 7, symbol: 'triangle-down' },
                 xaxis: 'x', yaxis: 'y',
                 text: events.map(e => `${e.drop_db}dB drop in ${e.duration_sec}s`),
-                hovertemplate: '%{text}<extra></extra>',
+                hovertemplate: '%{x|%H:%M:%S} · %{text}<extra></extra>',
                 _panel: 'rssi',
                 _overlay: 'cliff',
             });
