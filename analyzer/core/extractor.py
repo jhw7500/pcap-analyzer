@@ -44,6 +44,7 @@ TSHARK_FIELDS = [
     "wlan_radio.11ac.mcs",        # cols[21]
     "wlan_radio.11be.mcs",        # cols[22]
     "radiotap.he.data_3.data_mcs",  # cols[23] — 802.11ax (HE) MCS
+    "wlan_radio.data_rate",       # cols[24] — Mbps (legacy 폴백 표시용)
 ]
 
 
@@ -142,12 +143,23 @@ def parse_tsv_line(line: str) -> Optional[FrameType]:
         cols.append("")
 
     try:
-        # MCS: HT > VHT(11ac) > 11be > HE(11ax) 순으로 첫 non-empty
-        mcs_val = (cols[7] or
-                   (cols[20] if len(cols) > 20 else "") or
-                   (cols[21] if len(cols) > 21 else "") or
-                   (cols[22] if len(cols) > 22 else "") or
-                   (cols[23] if len(cols) > 23 else ""))
+        # MCS: HT > VHT(11ac) > 11be > HE(11ax) 순으로 첫 non-empty.
+        # 출처별 PHY 모드도 함께 추적해 device_stats의 mcs_by_phy 분리에 사용.
+        ht_val = cols[7] or (cols[20] if len(cols) > 20 else "")
+        vht_val = cols[21] if len(cols) > 21 else ""
+        eht_val = cols[22] if len(cols) > 22 else ""
+        he_val = cols[23] if len(cols) > 23 else ""
+        if ht_val:
+            mcs_val, mcs_phy = ht_val, "HT"
+        elif vht_val:
+            mcs_val, mcs_phy = vht_val, "VHT"
+        elif eht_val:
+            mcs_val, mcs_phy = eht_val, "EHT"
+        elif he_val:
+            mcs_val, mcs_phy = he_val, "HE"
+        else:
+            mcs_val, mcs_phy = "", "Legacy"
+        data_rate = cols[24] if len(cols) > 24 else ""
         return Frame(
             number=int(cols[0]),
             epoch=float(cols[1]),
@@ -169,6 +181,8 @@ def parse_tsv_line(line: str) -> Optional[FrameType]:
             tcp_flags=cols[17],
             seq=cols[18] if len(cols) > 18 else "",
             icmp_seq=cols[19] if len(cols) > 19 else "",
+            mcs_phy=mcs_phy,
+            data_rate=data_rate,
         )
     except (ValueError, IndexError):
         return None

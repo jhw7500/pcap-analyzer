@@ -41,6 +41,8 @@ class Frame:
     seq: str
     icmp_seq: str = ""
     bssid: str = ""
+    mcs_phy: str = ""  # "HT" | "VHT" | "HE" | "EHT" | "Legacy" — mcs 값 출처
+    data_rate: str = ""  # Mbps (legacy 송신 식별용)
 
     @property
     def subtype_name(self) -> str:

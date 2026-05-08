@@ -182,6 +182,31 @@ def _structured_device_stats(
         mcs_dist = Counter(f.mcs_int for f in tx_frames if f.mcs_int is not None)
         mcs_named = {str(k): v for k, v in sorted(mcs_dist.items())}
 
+        # PHY 모드별 분리: HT/VHT/HE/EHT는 MCS index, Legacy는 Mbps rate.
+        # 한 디바이스가 mode를 섞어 송신하는 경우(예: HE 데이터 + 6Mbps mgmt)도 정직하게 표현.
+        phy_buckets: Dict[str, "Counter[str]"] = {
+            "HT": Counter(), "VHT": Counter(), "HE": Counter(),
+            "EHT": Counter(), "Legacy": Counter(),
+        }
+        phy_frame_count: "Counter[str]" = Counter()
+        for f in tx_frames:
+            phy = getattr(f, "mcs_phy", "") or ""
+            if phy in ("HT", "VHT", "HE", "EHT"):
+                m = f.mcs_int
+                if m is not None:
+                    phy_buckets[phy][str(m)] += 1
+                    phy_frame_count[phy] += 1
+            else:
+                rate = (getattr(f, "data_rate", "") or "").split(",")[0].strip()
+                if rate:
+                    phy_buckets["Legacy"][rate] += 1
+                    phy_frame_count["Legacy"] += 1
+        mcs_by_phy = {
+            phy: dict(sorted(c.items(), key=lambda kv: float(kv[0])))
+            for phy, c in phy_buckets.items() if c
+        }
+        phy_summary = dict(phy_frame_count)
+
         rssis = [f.rssi_first for f in tx_frames if f.rssi_first is not None]
         rssi_stats = {}
         if rssis:
@@ -227,6 +252,8 @@ def _structured_device_stats(
             if dev_frames
             else 0,
             "mcs_dist": mcs_named,
+            "mcs_by_phy": mcs_by_phy,
+            "phy_summary": phy_summary,
             "rssi_stats": rssi_stats,
             "per_bucket": per_bucket if dev_frames else [],
         }

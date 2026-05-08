@@ -410,18 +410,45 @@
             textinfo: 'label+percent', textposition: 'inside',
         }], { ...DARK }, { responsive: true, displayModeBar: false });
 
-        // MCS 분포
-        const mcs = s.mcs_dist || {};
-        if (Object.keys(mcs).length > 0) {
-            Plotly.newPlot('chart-device-mcs', [{
-                type: 'bar', x: Object.keys(mcs), y: Object.values(mcs),
-                marker: { color: '#8b5cf6' },
-                text: Object.values(mcs).map(v => v.toLocaleString()),
+        // MCS / 레거시 레이트 분포 (PHY 모드별 grouped bar)
+        const byPhy = s.mcs_by_phy || {};
+        const PHY_COLORS = { HT: '#facc15', VHT: '#06b6d4', HE: '#8b5cf6', EHT: '#ec4899', Legacy: '#9ca3af' };
+        const PHY_ORDER = ['HT', 'VHT', 'HE', 'EHT', 'Legacy'];
+        const phyTraces = [];
+        for (const phy of PHY_ORDER) {
+            const dist = byPhy[phy];
+            if (!dist || Object.keys(dist).length === 0) continue;
+            const sortedKeys = Object.keys(dist).sort((a, b) => parseFloat(a) - parseFloat(b));
+            const labels = sortedKeys.map(k => phy === 'Legacy' ? `Legacy ${k}Mbps` : `${phy} MCS${k}`);
+            phyTraces.push({
+                type: 'bar',
+                name: phy,
+                x: labels,
+                y: sortedKeys.map(k => dist[k]),
+                marker: { color: PHY_COLORS[phy] },
+                text: sortedKeys.map(k => dist[k].toLocaleString()),
                 textposition: 'outside',
-            }], { ...DARK, xaxis: { title: 'MCS Index', dtick: 1 }, yaxis: { title: '프레임 수' } },
-            { responsive: true, displayModeBar: false });
+                hovertemplate: '%{x}<br>프레임 %{y:,}<extra></extra>',
+            });
+        }
+        if (phyTraces.length > 0) {
+            const summary = s.phy_summary || {};
+            const summaryStr = PHY_ORDER
+                .filter(p => summary[p])
+                .map(p => `${p}=${summary[p].toLocaleString()}`)
+                .join(' / ');
+            Plotly.newPlot('chart-device-mcs', phyTraces, {
+                ...DARK,
+                title: { text: summaryStr, font: { size: 11, color: '#9ca3af' }, x: 0.02, xanchor: 'left' },
+                xaxis: { title: 'PHY 모드 · MCS / Legacy Mbps', tickangle: -30, tickfont: { size: 10 } },
+                yaxis: { title: '프레임 수' },
+                barmode: 'group',
+                showlegend: true,
+                legend: { orientation: 'h', y: 1.12 },
+                margin: { t: 50 },
+            }, { responsive: true, displayModeBar: false });
         } else {
-            document.getElementById('chart-device-mcs').innerHTML = '<p class="text-gray-500 text-center py-10">MCS 데이터 없음</p>';
+            document.getElementById('chart-device-mcs').innerHTML = '<p class="text-gray-500 text-center py-10">MCS / 레거시 레이트 데이터 없음</p>';
         }
 
         // 서브타입 Top 10
