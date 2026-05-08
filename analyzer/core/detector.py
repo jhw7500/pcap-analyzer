@@ -69,7 +69,7 @@ def detect_roles(frames: List[Frame]) -> Dict[str, Dict]:
     sta_idx = 1
 
     for mac in sorted(ap_macs, key=lambda m: mac_counts.get(m, 0), reverse=True):
-        short = mac[-5:].replace(":", "")
+        short = mac[-8:].replace(":", "")  # 마지막 3바이트 (6hex)
         roles[mac] = {"role": "AP", "name": f"AP{ap_idx}({short})", "count": mac_counts[mac]}
         ap_idx += 1
 
@@ -78,7 +78,7 @@ def detect_roles(frames: List[Frame]) -> Dict[str, Dict]:
             continue
         if sta_counts[mac] < 5:
             continue
-        short = mac[-5:].replace(":", "")
+        short = mac[-8:].replace(":", "")  # 마지막 3바이트 (6hex)
         roles[mac] = {"role": "STA", "name": f"STA{sta_idx}({short})", "count": sta_counts[mac]}
         sta_idx += 1
 

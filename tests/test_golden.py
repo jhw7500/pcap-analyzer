@@ -84,4 +84,4 @@ class TestGoldenBasicPcap:
     def test_device_stats_names(self, fixture_path):
         result = run_analysis(fixture_path)
         stats = result["structured"]["device_stats"]
-        assert set(stats.keys()) == {"AP1(4455)", "STA1(eeff)"}
+        assert set(stats.keys()) == {"AP1(334455)", "STA1(ddeeff)"}
