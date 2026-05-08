@@ -32,9 +32,11 @@
                 <label class="block text-xs text-gray-500 mb-1">AI 프로바이더</label>
                 <select name="ai_provider" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
                     <option value="">비활성화</option>
-                    <option value="claude" {% if config.get('ai_provider') == 'claude' %}selected{% endif %}>Claude (Anthropic)</option>
+                    <option value="claude" {% if config.get('ai_provider') == 'claude' %}selected{% endif %}>Claude API (Anthropic 키)</option>
+                    <option value="claude_cli" {% if config.get('ai_provider') == 'claude_cli' %}selected{% endif %}>Claude CLI (구독 OAuth)</option>
                     <option value="openai" {% if config.get('ai_provider') == 'openai' %}selected{% endif %}>OpenAI</option>
                 </select>
+                <p class="text-xs text-gray-500 mt-1">Claude CLI: 서버에 설치된 <code class="bg-gray-700 px-1 rounded">claude</code> 명령을 spawn해 Pro/Max 구독 세션으로 호출. API 키 불필요. 사전에 셸에서 <code class="bg-gray-700 px-1 rounded">claude</code> 실행 후 <code class="bg-gray-700 px-1 rounded">/login</code>으로 OAuth 인증 필요.</p>
             </div>
             <div>
                 <label class="block text-xs text-gray-500 mb-1">모델</label>

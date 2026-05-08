@@ -15,8 +15,11 @@ async def run_review(structured: dict) -> dict:
     api_key = config.get("ai_api_key")
     model = config.get("ai_model")
 
-    if not provider or not api_key:
-        return {"error": "AI 설정이 없습니다. 설정 페이지에서 프로바이더와 API 키를 입력하세요."}
+    if not provider:
+        return {"error": "AI 설정이 없습니다. 설정 페이지에서 프로바이더를 선택하세요."}
+    # claude_cli는 OAuth 기반이라 API 키 불필요
+    if provider != "claude_cli" and not api_key:
+        return {"error": "API 키가 없습니다. 설정 페이지에서 입력하세요."}
 
     prompt = build_review_prompt(structured)
     response = await call_ai(provider, api_key, model, prompt, SYSTEM_PROMPT)

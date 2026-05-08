@@ -1,15 +1,62 @@
-"""AI 프로바이더 — Claude, OpenAI API 호출."""
-import httpx
+"""AI 프로바이더 — Claude API, Claude CLI(구독), OpenAI API 호출."""
+import asyncio
+import shutil
 from typing import Optional
+
+import httpx
 
 async def call_ai(provider: str, api_key: str, model: str, prompt: str, system: str = "") -> str:
     """AI API를 호출하여 응답 텍스트를 반환한다."""
     if provider == "claude":
         return await _call_claude(api_key, model, prompt, system)
+    elif provider == "claude_cli":
+        return await _call_claude_cli(model, prompt, system)
     elif provider == "openai":
         return await _call_openai(api_key, model, prompt, system)
     else:
         return f"지원하지 않는 AI 프로바이더: {provider}"
+
+
+async def _call_claude_cli(model: str, prompt: str, system: str) -> str:
+    """Claude Code CLI를 spawn해 OAuth 인증된 Pro/Max 구독 세션으로 호출."""
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        return ("Claude CLI를 PATH에서 찾을 수 없습니다. "
+                "https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/quickstart 에서 설치 후 "
+                "셸에서 `claude` 실행 → `/login`으로 OAuth 인증.")
+
+    args = [claude_bin, "-p"]
+    if system:
+        args += ["--append-system-prompt", system]
+    if model:
+        args += ["--model", model]
+    # 도구 호출 차단 (단순 LLM 응답만)
+    args += ["--allowedTools", ""]
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd="/tmp",  # 프로젝트 CLAUDE.md 자동 로드 회피
+        )
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=prompt.encode("utf-8")),
+            timeout=180.0,
+        )
+    except asyncio.TimeoutError:
+        return "Claude CLI 호출 시간 초과 (180초)"
+    except Exception as e:
+        return f"Claude CLI 실행 실패: {e}"
+
+    if proc.returncode != 0:
+        err = stderr.decode("utf-8", errors="ignore").strip()
+        if "Not logged in" in err or "/login" in err:
+            return "Claude CLI에 로그인되어 있지 않습니다. 서버 사용자 계정으로 `claude` 실행 후 `/login`으로 OAuth 인증."
+        return f"Claude CLI 오류 (exit {proc.returncode}): {err[:300]}"
+
+    return stdout.decode("utf-8", errors="ignore").strip() or "응답 없음"
 
 async def _call_claude(api_key: str, model: str, prompt: str, system: str) -> str:
     model = model or "claude-sonnet-4-6"
