@@ -105,8 +105,14 @@ class Frame:
     def mcs_int(self) -> Optional[int]:
         if not self.mcs:
             return None
+        first = self.mcs.split(",")[0].strip()
+        if not first:
+            return None
         try:
-            return int(self.mcs.split(",")[0])
+            # HE(802.11ax) radiotap.he.data_3.data_mcs는 "0x0007" 형태 hex로 옴
+            if first.lower().startswith("0x"):
+                return int(first, 16)
+            return int(first)
         except (ValueError, IndexError):
             return None
 
