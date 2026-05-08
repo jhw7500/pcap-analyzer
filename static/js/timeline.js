@@ -330,6 +330,8 @@
     document.querySelectorAll('.timeline-overlay').forEach(cb => {
         cb.addEventListener('change', applyOverlayToggle);
     });
+    // 첫 로드 시 체크박스 상태(default: 로밍 OFF) 즉시 반영
+    applyOverlayToggle();
 
     /* ── 외부 사이드바 범례 ── 트레이스별 체크박스 ── */
     function traceColor(t) {
