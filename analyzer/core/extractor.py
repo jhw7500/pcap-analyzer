@@ -26,7 +26,7 @@ TSHARK_FIELDS = [
     "wlan.fc.type_subtype",
     "_ws.col.Protocol",
     "frame.len",
-    "radiotap.mcs.index",
+    "radiotap.mcs.index",  # 802.11n (HT) MCS — cols[7]
     "radiotap.dbm_antsignal",
     "wlan.ta",
     "wlan.ra",
@@ -39,6 +39,10 @@ TSHARK_FIELDS = [
     "tcp.flags",
     "wlan.seq",
     "icmp.seq",
+    # PHY별 MCS — 자동차 칩셋(802.11ac/ax)에선 radiotap.mcs.index가 비고 wlan_radio 쪽에 들어감
+    "wlan_radio.11n.mcs_index",   # cols[20]
+    "wlan_radio.11ac.mcs",        # cols[21]
+    "wlan_radio.11be.mcs",        # cols[22]
 ]
 
 
@@ -137,6 +141,11 @@ def parse_tsv_line(line: str) -> Optional[FrameType]:
         cols.append("")
 
     try:
+        # MCS: HT(radiotap.mcs.index, wlan_radio.11n) > VHT(11ac) > 11be 순으로 첫 non-empty
+        mcs_val = (cols[7] or
+                   (cols[20] if len(cols) > 20 else "") or
+                   (cols[21] if len(cols) > 21 else "") or
+                   (cols[22] if len(cols) > 22 else ""))
         return Frame(
             number=int(cols[0]),
             epoch=float(cols[1]),
@@ -145,7 +154,7 @@ def parse_tsv_line(line: str) -> Optional[FrameType]:
             subtype=_normalize_subtype(cols[4]),
             protocol=cols[5],
             length=int(cols[6]) if cols[6] else 0,
-            mcs=cols[7],
+            mcs=mcs_val,
             rssi=cols[8],
             ta=cols[9],
             ra=cols[10],
