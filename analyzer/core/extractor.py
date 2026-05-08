@@ -43,6 +43,7 @@ TSHARK_FIELDS = [
     "wlan_radio.11n.mcs_index",   # cols[20]
     "wlan_radio.11ac.mcs",        # cols[21]
     "wlan_radio.11be.mcs",        # cols[22]
+    "radiotap.he.data_3.data_mcs",  # cols[23] — 802.11ax (HE) MCS
 ]
 
 
@@ -141,11 +142,12 @@ def parse_tsv_line(line: str) -> Optional[FrameType]:
         cols.append("")
 
     try:
-        # MCS: HT(radiotap.mcs.index, wlan_radio.11n) > VHT(11ac) > 11be 순으로 첫 non-empty
+        # MCS: HT > VHT(11ac) > 11be > HE(11ax) 순으로 첫 non-empty
         mcs_val = (cols[7] or
                    (cols[20] if len(cols) > 20 else "") or
                    (cols[21] if len(cols) > 21 else "") or
-                   (cols[22] if len(cols) > 22 else ""))
+                   (cols[22] if len(cols) > 22 else "") or
+                   (cols[23] if len(cols) > 23 else ""))
         return Frame(
             number=int(cols[0]),
             epoch=float(cols[1]),
