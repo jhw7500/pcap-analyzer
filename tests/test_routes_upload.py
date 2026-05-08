@@ -141,7 +141,7 @@ class TestUploadValidation:
         assert resp.json()["code"] == "EMPTY_FILE"
 
     def test_file_too_large_returns_413(self):
-        with patch("routes.upload.config.MAX_UPLOAD_SIZE", 64), \
+        with patch("routes.upload.config.max_upload_size", return_value=64), \
              patch("routes.upload.config.detect_tshark", return_value="/usr/bin/tshark"):
             payload = PCAP_MAGIC + b"\x00" * 200
             resp = client.post(

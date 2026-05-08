@@ -7,8 +7,10 @@ from pathlib import Path
 CONFIG_PATH = Path(__file__).parent / "config.local.json"
 DATA_DIR = Path(__file__).parent / "data" / "analyses"
 
-# 업로드 크기 제한 (bytes)
-MAX_UPLOAD_SIZE = 200 * 1024 * 1024  # 200MB
+# 업로드 크기 제한 (bytes) — max_upload_size()를 호출하는 게 권장
+# 환경변수 PCAP_MAX_UPLOAD_MB 또는 config.local.json의 'max_upload_mb' 키로 오버라이드 가능.
+DEFAULT_MAX_UPLOAD_SIZE = 200 * 1024 * 1024  # 200MB (기본)
+MAX_UPLOAD_SIZE = DEFAULT_MAX_UPLOAD_SIZE  # 하위호환 (직접 참조 자제)
 
 
 def _load_file() -> dict:
@@ -68,6 +70,19 @@ def detect_tshark() -> Optional[str]:
 def ensure_data_dir() -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     return DATA_DIR
+
+
+def max_upload_size() -> int:
+    """업로드 상한 (bytes). 환경변수 → config.local.json → 기본값 순."""
+    raw = get("max_upload_mb", "").strip()
+    if raw:
+        try:
+            mb = int(raw)
+            if mb > 0:
+                return mb * 1024 * 1024
+        except ValueError:
+            pass
+    return DEFAULT_MAX_UPLOAD_SIZE
 
 
 def is_offline_assets() -> bool:

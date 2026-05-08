@@ -136,10 +136,10 @@ async def upload_pcap(
                     return JSONResponse(error_payload(ErrorCode.INVALID_MAGIC), status_code=400)
                 first_chunk = False
             total += len(chunk)
-            if total > config.MAX_UPLOAD_SIZE:
+            if total > config.max_upload_size():
                 tmp.close()
                 Path(tmp.name).unlink(missing_ok=True)
-                limit_mb = config.MAX_UPLOAD_SIZE // (1024 * 1024)
+                limit_mb = config.max_upload_size() // (1024 * 1024)
                 return JSONResponse(
                     error_payload(ErrorCode.FILE_TOO_LARGE, f"(상한 {limit_mb}MB)"),
                     status_code=413,
