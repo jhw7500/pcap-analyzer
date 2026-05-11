@@ -461,35 +461,37 @@
         }], { ...DARK, yaxis: { autorange: 'reversed' }, margin: { l: 80 } },
         { responsive: true, displayModeBar: false });
 
-        // 구간별 프레임/Retry 시계열
+        // 구간별 Retry율 시계열 (라인만, hover에 프레임수/MCS 정보 포함)
         const buckets = s.per_bucket || [];
         if (buckets.length > 0) {
-            Plotly.newPlot('chart-device-timeline', [
-                {
-                    x: buckets.map(b => new Date(b.epoch * 1000)),
-                    y: buckets.map(b => b.total),
-                    type: 'bar', name: '총 프레임/10s',
-                    marker: { color: 'rgba(59,130,246,0.5)' },
-                },
-                {
-                    x: buckets.map(b => new Date(b.epoch * 1000)),
-                    y: buckets.map(b => b.retry),
-                    type: 'bar', name: 'Retry/10s',
-                    marker: { color: 'rgba(239,68,68,0.7)' },
-                },
-                {
-                    x: buckets.map(b => new Date(b.epoch * 1000)),
-                    y: buckets.map(b => b.retry_pct),
-                    type: 'scatter', mode: 'lines', name: 'Retry율 (%)',
-                    line: { color: '#f59e0b', width: 2 },
-                    yaxis: 'y2',
-                },
-            ], {
-                ...DARK, barmode: 'overlay',
+            Plotly.newPlot('chart-device-timeline', [{
+                x: buckets.map(b => new Date(b.epoch * 1000)),
+                y: buckets.map(b => b.retry_pct),
+                type: 'scatter', mode: 'lines+markers',
+                name: 'Retry율 (%)',
+                line: { color: '#f59e0b', width: 2 },
+                marker: { color: '#f59e0b', size: 5 },
+                customdata: buckets.map(b => [
+                    b.total || 0,
+                    b.retry || 0,
+                    b.top_mcs || '-',
+                    (b.avg_mcs ?? '-'),
+                    (b.legacy_pct ?? 0),
+                    b.tx_total || 0,
+                ]),
+                hovertemplate:
+                    '<b>%{x|%H:%M:%S}</b><br>' +
+                    'Retry율: <b>%{y}%</b><br>' +
+                    '프레임: %{customdata[0]:,} (retry %{customdata[1]:,})<br>' +
+                    '송신: %{customdata[5]:,}<br>' +
+                    'MCS 우세: %{customdata[2]} (평균 %{customdata[3]})<br>' +
+                    'Legacy 비율: %{customdata[4]}%' +
+                    '<extra></extra>',
+            }], {
+                ...DARK,
                 xaxis: { title: '시간' },
-                yaxis: { title: '프레임 수' },
-                yaxis2: { title: 'Retry율 (%)', side: 'right', overlaying: 'y', showgrid: false, range: [0, 100] },
-                legend: { font: { size: 11 } },
+                yaxis: { title: 'Retry율 (%)', range: [0, 100] },
+                hovermode: 'x unified',
             }, { responsive: true, displayModeBar: true });
         }
     }

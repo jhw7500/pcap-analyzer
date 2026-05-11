@@ -231,12 +231,34 @@ def _structured_device_stats(
                 ]
                 total = len(bucket_frames)
                 retries = sum(1 for f in bucket_frames if f.retry)
+                # bucket별 MCS / PHY 통계 (송신 프레임 기준)
+                bucket_tx = [f for f in bucket_frames if f.ta == mac]
+                phy_mcs_counts: "Counter[str]" = Counter()
+                mcs_sum, mcs_n, legacy_n = 0, 0, 0
+                for f in bucket_tx:
+                    phy = getattr(f, "mcs_phy", "") or ""
+                    if phy in ("HT", "VHT", "HE", "EHT"):
+                        m = f.mcs_int
+                        if m is not None:
+                            phy_mcs_counts[f"{phy} MCS{m}"] += 1
+                            mcs_sum += m
+                            mcs_n += 1
+                    else:
+                        legacy_n += 1
+                top_mcs = phy_mcs_counts.most_common(1)[0][0] if phy_mcs_counts else ""
+                avg_mcs = round(mcs_sum / mcs_n, 1) if mcs_n else None
+                tx_total = len(bucket_tx)
+                legacy_pct = round(legacy_n * 100 / tx_total, 1) if tx_total else 0
                 per_bucket.append(
                     {
                         "epoch": bucket_start,
                         "total": total,
                         "retry": retries,
                         "retry_pct": round(retries * 100 / total, 1) if total else 0,
+                        "top_mcs": top_mcs,
+                        "avg_mcs": avg_mcs,
+                        "legacy_pct": legacy_pct,
+                        "tx_total": tx_total,
                     }
                 )
 

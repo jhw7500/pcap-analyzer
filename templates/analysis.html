@@ -217,19 +217,19 @@
         <h3 class="text-sm font-semibold text-gray-400 mb-2">장치 상세 분석</h3>
         <select id="device-select" class="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm mb-4"></select>
         <div id="device-detail-stats" class="mb-4"></div>
-        <div class="grid grid-cols-3 gap-4">
+        <div class="grid grid-cols-2 gap-4 mb-4">
             <div>
                 <h4 class="text-xs text-gray-500 mb-1">프레임 타입</h4>
                 <div id="chart-device-type" style="height:250px"></div>
             </div>
             <div>
-                <h4 class="text-xs text-gray-500 mb-1">MCS / 레거시 레이트 (PHY 모드별)</h4>
-                <div id="chart-device-mcs" style="height:250px"></div>
-            </div>
-            <div>
                 <h4 class="text-xs text-gray-500 mb-1">서브타입 Top 10</h4>
                 <div id="chart-device-subtype" style="height:250px"></div>
             </div>
+        </div>
+        <div>
+            <h4 class="text-xs text-gray-500 mb-1">MCS / 레거시 레이트 (PHY 모드별)</h4>
+            <div id="chart-device-mcs" style="height:420px"></div>
         </div>
     </div>
     <!-- 구간별 Retry 시계열 -->
