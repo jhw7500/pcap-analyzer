@@ -8,38 +8,36 @@ PING_MATCH_WINDOW_SEC = 30.0
 
 
 def build_ping_stats(
-    pairs: List[Dict[str, Any]], losses: List[Dict[str, Any]]
+    pairs: List[Dict[str, Any]],
+    losses: List[Dict[str, Any]],
+    extra: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     rtt_values = [p["rtt_ms"] for p in pairs if p.get("rtt_ms") is not None]
     rtt_sorted = sorted(rtt_values) if rtt_values else []
     total = len(pairs) + len(losses)
-    if not rtt_sorted:
-        return {
-            "count": 0,
-            "min": None,
-            "max": None,
-            "avg": None,
-            "p50": None,
-            "p95": None,
-            "p99": None,
-            "loss_count": len(losses),
-            "loss_pct": round(len(losses) * 100 / total, 1) if total else 0,
-        }
-    return {
+    base: Dict[str, Any] = {
         "count": len(rtt_sorted),
-        "min": round(rtt_sorted[0], 2),
-        "max": round(rtt_sorted[-1], 2),
-        "avg": round(sum(rtt_sorted) / len(rtt_sorted), 2),
-        "p50": round(rtt_sorted[len(rtt_sorted) // 2], 2),
-        "p95": round(
-            rtt_sorted[min(len(rtt_sorted) - 1, int(len(rtt_sorted) * 0.95))], 2
-        ),
-        "p99": round(
-            rtt_sorted[min(len(rtt_sorted) - 1, int(len(rtt_sorted) * 0.99))], 2
-        ),
         "loss_count": len(losses),
         "loss_pct": round(len(losses) * 100 / total, 1) if total else 0,
     }
+    if rtt_sorted:
+        base.update({
+            "min": round(rtt_sorted[0], 2),
+            "max": round(rtt_sorted[-1], 2),
+            "avg": round(sum(rtt_sorted) / len(rtt_sorted), 2),
+            "p50": round(rtt_sorted[len(rtt_sorted) // 2], 2),
+            "p95": round(
+                rtt_sorted[min(len(rtt_sorted) - 1, int(len(rtt_sorted) * 0.95))], 2
+            ),
+            "p99": round(
+                rtt_sorted[min(len(rtt_sorted) - 1, int(len(rtt_sorted) * 0.99))], 2
+            ),
+        })
+    else:
+        base.update({"min": None, "max": None, "avg": None, "p50": None, "p95": None, "p99": None})
+    if extra:
+        base.update(extra)
+    return base
 
 
 def build_ping_matches(
@@ -51,21 +49,43 @@ def build_ping_matches(
     requests_queue: Dict[Any, List[Frame]] = {}
     matched_by_req: Dict[int, Frame] = {}
 
+    # 통계용 raw 카운트
+    req_total_raw = 0          # ICMP echo request 전체 캡처 수
+    req_retry_bit = 0           # 그 중 802.11 retry 비트가 set된 수
+    req_retry_skipped = 0       # 동일 seq 재전송으로 dedup된 수
+    reply_total_raw = 0         # ICMP echo reply 전체 캡처 수
+    reply_retry_bit = 0         # 그 중 retry 비트 set된 수
+    reply_unique_keys: set = set()  # (dst,src,seq) unique reply
+    seen_req_keys: Dict[Any, float] = {}  # 가장 최근 등장 epoch
+
     for f in frames:
-        if f.is_icmp_request and not f.retry:
+        if f.is_icmp_request:
+            req_total_raw += 1
+            if f.retry:
+                req_retry_bit += 1
             key = (
                 (f.ip_src, f.ip_dst, f.icmp_seq)
                 if f.icmp_seq
                 else (f.ip_src, f.ip_dst, "")
             )
+            # 동일 seq가 윈도우 내 다시 등장하면 재전송으로 간주하고 skip
+            last_epoch = seen_req_keys.get(key)
+            if last_epoch is not None and (f.epoch - last_epoch) < window_sec:
+                req_retry_skipped += 1
+                continue
+            seen_req_keys[key] = f.epoch
             all_requests.append((key, f))
             requests_queue.setdefault(key, []).append(f)
         elif f.is_icmp_reply:
+            reply_total_raw += 1
+            if f.retry:
+                reply_retry_bit += 1
             key = (
                 (f.ip_dst, f.ip_src, f.icmp_seq)
                 if f.icmp_seq
                 else (f.ip_dst, f.ip_src, "")
             )
+            reply_unique_keys.add(key)
             q = requests_queue.get(key)
             if not q:
                 continue
@@ -73,6 +93,9 @@ def build_ping_matches(
                 q.pop(0)
             if q:
                 req = q.pop(0)
+                # 이미 매칭된 req에는 첫 reply만 유지 (재전송된 reply 무시)
+                if id(req) in matched_by_req:
+                    continue
                 matched_by_req[id(req)] = f
 
     full_list = []
@@ -126,7 +149,16 @@ def build_ping_matches(
     pairs.sort(key=lambda x: x["epoch"])
     losses.sort(key=lambda x: x["epoch"])
 
-    stats = build_ping_stats(pairs, losses)
+    extra_stats = {
+        "req_total_raw": req_total_raw,
+        "req_retry_bit": req_retry_bit,           # 802.11 retry 비트 set된 req
+        "req_first_send": req_total_raw - req_retry_bit,
+        "req_retry_skipped": req_retry_skipped,
+        "reply_total_raw": reply_total_raw,
+        "reply_retry_bit": reply_retry_bit,        # retry 비트 set된 reply
+        "reply_unique_count": len(reply_unique_keys),
+    }
+    stats = build_ping_stats(pairs, losses, extra=extra_stats)
 
     return {
         "full_list": full_list,
