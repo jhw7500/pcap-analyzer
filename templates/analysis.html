@@ -196,23 +196,7 @@
 
 <!-- 장치별 탭 -->
 <div class="tab-content hidden" id="tab-devices">
-    <!-- AP vs STA 프레임 비교 -->
-    <div class="grid grid-cols-2 gap-4 mb-4">
-        <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-            <h3 class="text-sm font-semibold text-gray-400 mb-2">AP별 총 프레임 비교</h3>
-            <div id="chart-ap-compare" style="height:250px"></div>
-        </div>
-        <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-            <h3 class="text-sm font-semibold text-gray-400 mb-2">STA별 총 프레임 비교</h3>
-            <div id="chart-sta-compare" style="height:250px"></div>
-        </div>
-    </div>
-    <!-- 장치별 Retry/MCS 비교 -->
-    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4">
-        <h3 class="text-sm font-semibold text-gray-400 mb-2">장치별 Retry율 + RSSI 비교</h3>
-        <div id="chart-device-retry-compare" style="height:300px"></div>
-    </div>
-    <!-- 개별 장치 상세 -->
+    <!-- 개별 장치 상세 (가장 위로) -->
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4">
         <h3 class="text-sm font-semibold text-gray-400 mb-2">장치 상세 분석</h3>
         <select id="device-select" class="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm mb-4"></select>
@@ -231,16 +215,41 @@
             <h4 class="text-xs text-gray-500 mb-1">MCS / 레거시 레이트 (PHY 모드별)</h4>
             <div id="chart-device-mcs" style="height:420px"></div>
         </div>
+        <div class="mt-4">
+            <h4 class="text-xs text-gray-500 mb-1">PHY 모드 시간 분포 + Retry율 (10초 단위)</h4>
+            <p class="text-xs text-gray-500 mb-1">x축 시간대별 송신 PHY 모드 stacked + Retry율 라인 overlay</p>
+            <div id="chart-device-mcs-time" style="height:320px"></div>
+        </div>
+        <div class="mt-4">
+            <h4 class="text-xs text-gray-500 mb-1">구간별 프레임 수 (10초 단위)</h4>
+            <div id="chart-device-frames" style="height:280px"></div>
+        </div>
+        <div class="mt-4">
+            <h4 class="text-xs text-gray-500 mb-1">구간별 Retry율 추이 (10초 단위)</h4>
+            <div id="chart-device-timeline" style="height:280px"></div>
+        </div>
+        <div class="mt-4">
+            <h4 class="text-xs text-gray-500 mb-1">Retry 피크 구간 — 1초 세분화 (자동 검출 top 3)</h4>
+            <p class="text-xs text-gray-500 mb-1">retry율 높은 10초 bucket을 1초 단위로 세분화해 MCS 분포와 함께 표시</p>
+            <div id="chart-device-retry-peaks" class="space-y-3"></div>
+        </div>
     </div>
-    <!-- 구간별 프레임 시계열 (선택한 장치) -->
-    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4">
-        <h3 class="text-sm font-semibold text-gray-400 mb-2">구간별 프레임 수 (10초 단위, 선택 장치)</h3>
-        <div id="chart-device-frames" style="height:300px"></div>
+
+    <!-- 전체 장치 비교 (페이지 끝) -->
+    <h3 class="text-base font-semibold text-gray-300 mb-2 mt-6">전체 장치 비교</h3>
+    <div class="grid grid-cols-2 gap-4 mb-4">
+        <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+            <h3 class="text-sm font-semibold text-gray-400 mb-2">AP별 총 프레임 비교</h3>
+            <div id="chart-ap-compare" style="height:250px"></div>
+        </div>
+        <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+            <h3 class="text-sm font-semibold text-gray-400 mb-2">STA별 총 프레임 비교</h3>
+            <div id="chart-sta-compare" style="height:250px"></div>
+        </div>
     </div>
-    <!-- 구간별 Retry 시계열 (선택한 장치) -->
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-        <h3 class="text-sm font-semibold text-gray-400 mb-2">구간별 Retry율 추이 (10초 단위, 선택 장치)</h3>
-        <div id="chart-device-timeline" style="height:300px"></div>
+        <h3 class="text-sm font-semibold text-gray-400 mb-2">장치별 Retry율 + RSSI 비교</h3>
+        <div id="chart-device-retry-compare" style="height:300px"></div>
     </div>
 </div>
 

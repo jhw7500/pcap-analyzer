@@ -32,9 +32,15 @@
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
             btn.classList.add('active');
-            document.getElementById('tab-' + btn.dataset.tab).classList.remove('hidden');
-            /* Plotly 차트가 hidden→visible 될 때 리사이즈 필요 */
-            setTimeout(() => window.dispatchEvent(new Event('resize')), 50);
+            const activePane = document.getElementById('tab-' + btn.dataset.tab);
+            activePane.classList.remove('hidden');
+            /* hidden→visible 시 plotly 차트 명시 resize (이전 패널 위에 그려지는 현상 회피) */
+            requestAnimationFrame(() => {
+                activePane.querySelectorAll('.js-plotly-plot').forEach(el => {
+                    try { Plotly.Plots.resize(el); } catch (e) { /* ignore */ }
+                });
+                window.dispatchEvent(new Event('resize'));
+            });
         });
     });
 
@@ -265,13 +271,20 @@
             hovertemplate: '%{text}<br>%{y:.1f}ms<extra></extra>',
         }], {
             ...DARK,
+            dragmode: 'zoom',
             xaxis: { title: '\ub85c\ubc0d \uc2dc\ud000\uc2a4 #' },
             yaxis: { title: 'Auth\u2192Assoc Gap (ms)' },
             shapes: [{
                 type: 'line', x0: 0, x1: seqs.length + 1, y0: 100, y1: 100,
                 line: { color: '#ef4444', dash: 'dash', width: 1 },
             }],
-        }, { responsive: true, displayModeBar: false });
+        }, {
+            responsive: true,
+            displayModeBar: true,
+            displaylogo: false,
+            modeBarButtonsToRemove: ['lasso2d', 'select2d'],
+            scrollZoom: true,
+        });
 
         // 로밍 테이블
         const rTable = document.querySelector('#roaming-table tbody');
@@ -461,45 +474,131 @@
         }], { ...DARK, yaxis: { autorange: 'reversed' }, margin: { l: 80 } },
         { responsive: true, displayModeBar: false });
 
-        // 구간별 프레임 수 시계열 (선택 장치, 총 프레임 + retry 프레임 stacked)
-        const buckets = s.per_bucket || [];
-        if (buckets.length > 0) {
-            const xs = buckets.map(b => new Date(b.epoch * 1000));
-            const totals = buckets.map(b => b.total || 0);
-            const retries = buckets.map(b => b.retry || 0);
-            const nonRetry = totals.map((t, i) => Math.max(t - retries[i], 0));
-            Plotly.newPlot('chart-device-frames', [
-                {
-                    x: xs, y: nonRetry, name: '정상 프레임',
-                    type: 'bar', marker: { color: 'rgba(59,130,246,0.7)' },
-                    hovertemplate: '<b>%{x|%H:%M:%S}</b><br>정상 %{y:,}<extra></extra>',
-                },
-                {
-                    x: xs, y: retries, name: 'Retry 프레임',
-                    type: 'bar', marker: { color: 'rgba(239,68,68,0.85)' },
-                    customdata: buckets.map(b => [
-                        b.total || 0,
-                        b.retry_pct || 0,
-                        b.top_mcs || '-',
-                        (b.avg_mcs ?? '-'),
-                        (b.legacy_pct ?? 0),
-                        b.tx_total || 0,
-                    ]),
-                    hovertemplate:
-                        '<b>%{x|%H:%M:%S}</b><br>' +
-                        'Retry: %{y:,} / 총 %{customdata[0]:,} (%{customdata[1]}%)<br>' +
-                        '송신: %{customdata[5]:,}<br>' +
-                        'MCS 우세: %{customdata[2]} (평균 %{customdata[3]})<br>' +
-                        'Legacy 비율: %{customdata[4]}%' +
-                        '<extra></extra>',
-                },
-            ], {
+        // PHY 모드 시간 분포 + Retry율 overlay (선택 장치)
+        const bucketsM = s.per_bucket || [];
+        const phyModes = ['HE', 'EHT', 'VHT', 'HT', 'Legacy'];
+        const PHY_TIME_COLORS = { HE: '#8b5cf6', EHT: '#ec4899', VHT: '#06b6d4', HT: '#facc15', Legacy: '#6b7280' };
+        if (bucketsM.length > 0 && document.getElementById('chart-device-mcs-time')) {
+            const xt = bucketsM.map(b => new Date(b.epoch * 1000));
+            const stackTraces = phyModes
+                .filter(p => bucketsM.some(b => (b.phy_mode_dist || {})[p]))
+                .map(p => ({
+                    x: xt,
+                    y: bucketsM.map(b => (b.phy_mode_dist || {})[p] || 0),
+                    name: p, type: 'bar',
+                    marker: { color: PHY_TIME_COLORS[p] },
+                    hovertemplate: `<b>%{x|%H:%M:%S}</b><br>${p}: %{y:,}<extra></extra>`,
+                }));
+            const retryLine = {
+                x: xt,
+                y: bucketsM.map(b => b.retry_pct || 0),
+                name: 'Retry율 (%)', type: 'scatter', mode: 'lines+markers',
+                line: { color: '#f59e0b', width: 2 },
+                marker: { color: '#f59e0b', size: 4 },
+                yaxis: 'y2',
+                hovertemplate: '<b>%{x|%H:%M:%S}</b><br>Retry: %{y}%<extra></extra>',
+            };
+            Plotly.newPlot('chart-device-mcs-time', [...stackTraces, retryLine], {
                 ...DARK,
                 barmode: 'stack',
                 xaxis: { title: '시간' },
-                yaxis: { title: '프레임 수' },
-                legend: { font: { size: 11 }, orientation: 'h', y: 1.1 },
+                yaxis: { title: '송신 프레임 수 (PHY 모드별)' },
+                yaxis2: { title: 'Retry율 (%)', side: 'right', overlaying: 'y', showgrid: false, range: [0, 100] },
+                legend: { orientation: 'h', y: 1.12, font: { size: 11 } },
                 margin: { t: 40 },
+            }, { responsive: true, displayModeBar: true });
+        }
+
+        // Retry 피크 zoom-in (선택 장치)
+        const peaksContainer = document.getElementById('chart-device-retry-peaks');
+        if (peaksContainer) {
+            peaksContainer.innerHTML = '';
+            const peaks = s.retry_peaks || [];
+            if (peaks.length === 0) {
+                peaksContainer.innerHTML = '<p class="text-gray-500 text-xs py-3">Retry 피크 구간 없음 (10% 이상 + 50프레임 이상 bucket 없음)</p>';
+            } else {
+                peaks.forEach((pk, idx) => {
+                    const wrap = document.createElement('div');
+                    wrap.className = 'bg-gray-700/30 rounded p-2 border border-gray-700';
+                    const head = document.createElement('div');
+                    const startStr = new Date(pk.start * 1000).toISOString().substr(11, 8);
+                    head.className = 'text-xs text-gray-400 mb-1';
+                    head.textContent = `Peak ${idx + 1}: ${startStr} ~ +${pk.duration}s, ` +
+                        `프레임 ${(pk.total || 0).toLocaleString()}, ` +
+                        `retry ${(pk.retry || 0).toLocaleString()} (${pk.retry_pct}%)`;
+                    wrap.appendChild(head);
+                    const div = document.createElement('div');
+                    div.style.height = '180px';
+                    const divId = `chart-device-retry-peak-${idx}`;
+                    div.id = divId;
+                    wrap.appendChild(div);
+                    peaksContainer.appendChild(wrap);
+                    const subs = pk.sub_buckets || [];
+                    if (subs.length === 0) return;
+                    Plotly.newPlot(divId, [
+                        {
+                            x: subs.map(b => new Date(b.epoch * 1000)),
+                            y: subs.map(b => b.total || 0),
+                            type: 'bar', name: '프레임 수',
+                            marker: { color: '#3b82f6' },
+                            customdata: subs.map(b => [
+                                b.retry || 0, b.retry_pct || 0, b.tx_total || 0, b.mcs_breakdown || '-',
+                            ]),
+                            hovertemplate:
+                                '<b>%{x|%H:%M:%S}</b><br>' +
+                                '프레임: %{y:,} (retry %{customdata[0]:,} / %{customdata[1]}%)<br>' +
+                                '송신: %{customdata[2]:,}<br>' +
+                                'MCS 분포: %{customdata[3]}' +
+                                '<extra></extra>',
+                        },
+                        {
+                            x: subs.map(b => new Date(b.epoch * 1000)),
+                            y: subs.map(b => b.retry_pct || 0),
+                            type: 'scatter', mode: 'lines+markers', name: 'Retry율 (%)',
+                            line: { color: '#f59e0b', width: 2 },
+                            marker: { color: '#f59e0b', size: 4 },
+                            yaxis: 'y2',
+                            hovertemplate: 'Retry: %{y}%<extra></extra>',
+                        },
+                    ], {
+                        ...DARK,
+                        xaxis: { title: '시간 (1초)' },
+                        yaxis: { title: '프레임 수' },
+                        yaxis2: { title: 'Retry율 (%)', side: 'right', overlaying: 'y', showgrid: false, range: [0, 100] },
+                        showlegend: false,
+                        margin: { t: 10, b: 30, l: 50, r: 50 },
+                    }, { responsive: true, displayModeBar: false });
+                });
+            }
+        }
+
+        // 구간별 프레임 수 시계열 (단일 색 막대, hover에 MCS 분포)
+        const buckets = s.per_bucket || [];
+        if (buckets.length > 0) {
+            Plotly.newPlot('chart-device-frames', [{
+                x: buckets.map(b => new Date(b.epoch * 1000)),
+                y: buckets.map(b => b.total || 0),
+                type: 'bar', marker: { color: '#3b82f6' },
+                customdata: buckets.map(b => [
+                    b.retry || 0,
+                    b.retry_pct || 0,
+                    b.tx_total || 0,
+                    b.mcs_breakdown || '-',
+                    (b.avg_mcs ?? '-'),
+                    (b.legacy_pct ?? 0),
+                ]),
+                hovertemplate:
+                    '<b>%{x|%H:%M:%S}</b><br>' +
+                    '프레임: <b>%{y:,}</b> (retry %{customdata[0]:,} / %{customdata[1]}%)<br>' +
+                    '송신: %{customdata[2]:,}<br>' +
+                    'MCS 분포: %{customdata[3]}<br>' +
+                    '평균 MCS: %{customdata[4]} / Legacy 비율: %{customdata[5]}%' +
+                    '<extra></extra>',
+            }], {
+                ...DARK,
+                xaxis: { title: '시간' },
+                yaxis: { title: '프레임 수' },
+                margin: { t: 20 },
             }, { responsive: true, displayModeBar: true });
         }
 
@@ -515,7 +614,7 @@
                 customdata: buckets.map(b => [
                     b.total || 0,
                     b.retry || 0,
-                    b.top_mcs || '-',
+                    b.mcs_breakdown || '-',
                     (b.avg_mcs ?? '-'),
                     (b.legacy_pct ?? 0),
                     b.tx_total || 0,
@@ -525,8 +624,8 @@
                     'Retry율: <b>%{y}%</b><br>' +
                     '프레임: %{customdata[0]:,} (retry %{customdata[1]:,})<br>' +
                     '송신: %{customdata[5]:,}<br>' +
-                    'MCS 우세: %{customdata[2]} (평균 %{customdata[3]})<br>' +
-                    'Legacy 비율: %{customdata[4]}%' +
+                    'MCS 분포: %{customdata[2]}<br>' +
+                    '평균 MCS: %{customdata[3]} / Legacy 비율: %{customdata[4]}%' +
                     '<extra></extra>',
             }], {
                 ...DARK,
@@ -606,9 +705,14 @@
             ...DARK,
             xaxis: { title: { text: '시간', font: { size: 12 } }, gridcolor: '#374151' },
             yaxis: { title: { text: 'RTT (ms)', font: { size: 12 } }, gridcolor: '#374151' },
-            legend: { font: { size: 12 } },
-            margin: { t: 10, r: 20, b: 50, l: 60 },
-        }, { responsive: true, displayModeBar: true });
+            legend: { orientation: 'h', x: 0, y: 1.12, font: { size: 12 } },
+            margin: { t: 60, r: 20, b: 50, l: 60 },
+        }, {
+            responsive: true,
+            displayModeBar: true,
+            displaylogo: false,
+            modeBarButtonsToRemove: ['lasso2d', 'select2d'],
+        });
     }
 
     // RTT 히스토그램
@@ -629,17 +733,34 @@
     const pingStats = document.getElementById('ping-stats');
     if (pingStats && pingStatsData.count) {
         const s = pingStatsData;
+        const reqRaw = s.req_total_raw ?? 0;
+        const reqRetryBit = s.req_retry_bit ?? 0;
+        const reqFirst = s.req_first_send ?? (reqRaw - reqRetryBit);
+        const reqSkip = s.req_retry_skipped ?? 0;
+        const replyRaw = s.reply_total_raw ?? 0;
+        const replyRetryBit = s.reply_retry_bit ?? 0;
+        const replyUnique = s.reply_unique_count ?? 0;
+        const replyDup = replyRaw - replyUnique;
         pingStats.innerHTML = `
             <table class="w-full text-sm">
-                <tr><td class="text-gray-400 py-1">총 Ping</td><td class="text-right text-white font-bold">${s.count + s.loss_count}건</td></tr>
-                <tr><td class="text-gray-400 py-1">응답</td><td class="text-right text-green-400">${s.count}건</td></tr>
-                <tr><td class="text-gray-400 py-1">미응답 (Loss)</td><td class="text-right text-red-400">${s.loss_count}건 (${s.loss_pct}%)</td></tr>
+                <tr><td class="text-gray-400 py-1">총 Ping (unique req)</td><td class="text-right text-white font-bold">${(s.count + s.loss_count).toLocaleString()}건</td></tr>
+                <tr><td class="text-gray-400 py-1">응답 (match)</td><td class="text-right text-green-400">${s.count.toLocaleString()}건</td></tr>
+                <tr><td class="text-gray-400 py-1">미응답 (Loss)</td><td class="text-right text-red-400">${s.loss_count.toLocaleString()}건 (${s.loss_pct}%)</td></tr>
                 <tr class="border-t border-gray-700"><td class="text-gray-400 py-1">Min RTT</td><td class="text-right text-white">${s.min}ms</td></tr>
                 <tr><td class="text-gray-400 py-1">Max RTT</td><td class="text-right text-white">${s.max}ms</td></tr>
                 <tr><td class="text-gray-400 py-1">Avg RTT</td><td class="text-right text-white font-bold">${s.avg}ms</td></tr>
                 <tr class="border-t border-gray-700"><td class="text-gray-400 py-1">P50 (중앙값)</td><td class="text-right text-white">${s.p50}ms</td></tr>
                 <tr><td class="text-gray-400 py-1">P95</td><td class="text-right ${s.p95 > 10 ? 'text-yellow-400' : 'text-white'}">${s.p95}ms</td></tr>
                 <tr><td class="text-gray-400 py-1">P99</td><td class="text-right ${s.p99 > 20 ? 'text-red-400' : 'text-white'}">${s.p99}ms</td></tr>
+                <tr class="border-t border-gray-700"><td class="text-gray-400 py-1" colspan="2"><span class="text-xs text-gray-500">— Raw 캡처 카운트 (모니터 sniffer 기준) —</span></td></tr>
+                <tr><td class="text-gray-400 py-1">Request 캡처 (raw)</td><td class="text-right text-white">${reqRaw.toLocaleString()}건</td></tr>
+                <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ 첫 송신 (retry 비트 X)</td><td class="text-right text-green-400 text-xs">${reqFirst.toLocaleString()}건</td></tr>
+                <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ 재전송 (retry 비트 O)</td><td class="text-right text-yellow-400 text-xs">${reqRetryBit.toLocaleString()}건</td></tr>
+                <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ 동일 seq dedup (매칭 제외)</td><td class="text-right text-gray-500 text-xs">${reqSkip.toLocaleString()}건</td></tr>
+                <tr><td class="text-gray-400 py-1">Reply 캡처 (raw)</td><td class="text-right text-white">${replyRaw.toLocaleString()}건</td></tr>
+                <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ retry 비트 O</td><td class="text-right text-yellow-400 text-xs">${replyRetryBit.toLocaleString()}건</td></tr>
+                <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ unique seq</td><td class="text-right text-gray-300 text-xs">${replyUnique.toLocaleString()}건</td></tr>
+                <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ 다중 캡처 중복</td><td class="text-right text-gray-500 text-xs">${replyDup.toLocaleString()}건</td></tr>
             </table>`;
     }
 
