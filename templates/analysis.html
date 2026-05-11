@@ -232,9 +232,14 @@
             <div id="chart-device-mcs" style="height:420px"></div>
         </div>
     </div>
-    <!-- 구간별 Retry 시계열 -->
+    <!-- 구간별 프레임 시계열 (선택한 장치) -->
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4">
+        <h3 class="text-sm font-semibold text-gray-400 mb-2">구간별 프레임 수 (10초 단위, 선택 장치)</h3>
+        <div id="chart-device-frames" style="height:300px"></div>
+    </div>
+    <!-- 구간별 Retry 시계열 (선택한 장치) -->
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-        <h3 class="text-sm font-semibold text-gray-400 mb-2">구간별 프레임/Retry 추이 (10초 단위)</h3>
+        <h3 class="text-sm font-semibold text-gray-400 mb-2">구간별 Retry율 추이 (10초 단위, 선택 장치)</h3>
         <div id="chart-device-timeline" style="height:300px"></div>
     </div>
 </div>

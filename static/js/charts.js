@@ -461,8 +461,49 @@
         }], { ...DARK, yaxis: { autorange: 'reversed' }, margin: { l: 80 } },
         { responsive: true, displayModeBar: false });
 
-        // 구간별 Retry율 시계열 (라인만, hover에 프레임수/MCS 정보 포함)
+        // 구간별 프레임 수 시계열 (선택 장치, 총 프레임 + retry 프레임 stacked)
         const buckets = s.per_bucket || [];
+        if (buckets.length > 0) {
+            const xs = buckets.map(b => new Date(b.epoch * 1000));
+            const totals = buckets.map(b => b.total || 0);
+            const retries = buckets.map(b => b.retry || 0);
+            const nonRetry = totals.map((t, i) => Math.max(t - retries[i], 0));
+            Plotly.newPlot('chart-device-frames', [
+                {
+                    x: xs, y: nonRetry, name: '정상 프레임',
+                    type: 'bar', marker: { color: 'rgba(59,130,246,0.7)' },
+                    hovertemplate: '<b>%{x|%H:%M:%S}</b><br>정상 %{y:,}<extra></extra>',
+                },
+                {
+                    x: xs, y: retries, name: 'Retry 프레임',
+                    type: 'bar', marker: { color: 'rgba(239,68,68,0.85)' },
+                    customdata: buckets.map(b => [
+                        b.total || 0,
+                        b.retry_pct || 0,
+                        b.top_mcs || '-',
+                        (b.avg_mcs ?? '-'),
+                        (b.legacy_pct ?? 0),
+                        b.tx_total || 0,
+                    ]),
+                    hovertemplate:
+                        '<b>%{x|%H:%M:%S}</b><br>' +
+                        'Retry: %{y:,} / 총 %{customdata[0]:,} (%{customdata[1]}%)<br>' +
+                        '송신: %{customdata[5]:,}<br>' +
+                        'MCS 우세: %{customdata[2]} (평균 %{customdata[3]})<br>' +
+                        'Legacy 비율: %{customdata[4]}%' +
+                        '<extra></extra>',
+                },
+            ], {
+                ...DARK,
+                barmode: 'stack',
+                xaxis: { title: '시간' },
+                yaxis: { title: '프레임 수' },
+                legend: { font: { size: 11 }, orientation: 'h', y: 1.1 },
+                margin: { t: 40 },
+            }, { responsive: true, displayModeBar: true });
+        }
+
+        // 구간별 Retry율 시계열 (라인만, hover에 프레임수/MCS 정보 포함)
         if (buckets.length > 0) {
             Plotly.newPlot('chart-device-timeline', [{
                 x: buckets.map(b => new Date(b.epoch * 1000)),
