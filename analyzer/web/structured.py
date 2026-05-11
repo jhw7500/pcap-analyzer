@@ -219,6 +219,7 @@ def _structured_device_stats(
             }
 
         per_bucket = []
+        retry_peaks: list = []
         if dev_frames:
             start_epoch = int(dev_frames[0].epoch)
             end_epoch = int(dev_frames[-1].epoch)
@@ -234,20 +235,30 @@ def _structured_device_stats(
                 # bucket별 MCS / PHY 통계 (송신 프레임 기준)
                 bucket_tx = [f for f in bucket_frames if f.ta == mac]
                 phy_mcs_counts: "Counter[str]" = Counter()
-                mcs_sum, mcs_n, legacy_n = 0, 0, 0
+                legacy_counts: "Counter[str]" = Counter()
+                phy_mode_dist: "Counter[str]" = Counter()
+                mcs_sum, mcs_n = 0, 0
                 for f in bucket_tx:
                     phy = getattr(f, "mcs_phy", "") or ""
                     if phy in ("HT", "VHT", "HE", "EHT"):
                         m = f.mcs_int
                         if m is not None:
                             phy_mcs_counts[f"{phy} MCS{m}"] += 1
+                            phy_mode_dist[phy] += 1
                             mcs_sum += m
                             mcs_n += 1
                     else:
-                        legacy_n += 1
-                top_mcs = phy_mcs_counts.most_common(1)[0][0] if phy_mcs_counts else ""
+                        rate = (getattr(f, "data_rate", "") or "").split(",")[0].strip()
+                        if rate:
+                            legacy_counts[f"Legacy {rate}Mbps"] += 1
+                            phy_mode_dist["Legacy"] += 1
+                combined = phy_mcs_counts + legacy_counts
+                mcs_breakdown = ", ".join(
+                    f"{k}×{v:,}" for k, v in combined.most_common(5)
+                )
                 avg_mcs = round(mcs_sum / mcs_n, 1) if mcs_n else None
                 tx_total = len(bucket_tx)
+                legacy_n = sum(legacy_counts.values())
                 legacy_pct = round(legacy_n * 100 / tx_total, 1) if tx_total else 0
                 per_bucket.append(
                     {
@@ -255,12 +266,67 @@ def _structured_device_stats(
                         "total": total,
                         "retry": retries,
                         "retry_pct": round(retries * 100 / total, 1) if total else 0,
-                        "top_mcs": top_mcs,
+                        "mcs_breakdown": mcs_breakdown,
                         "avg_mcs": avg_mcs,
                         "legacy_pct": legacy_pct,
                         "tx_total": tx_total,
+                        "phy_mode_dist": dict(phy_mode_dist),
                     }
                 )
+
+            # retry 피크 구간 zoom-in (top 3 retry%, total>50인 bucket)
+            retry_peaks = []
+            candidate_peaks = sorted(
+                [b for b in per_bucket if b.get("total", 0) > 50],
+                key=lambda b: -b.get("retry_pct", 0),
+            )[:3]
+            for pk in candidate_peaks:
+                if pk.get("retry_pct", 0) < 10:
+                    break
+                pk_start = pk["epoch"]
+                pk_end = pk_start + bucket_size
+                pk_frames = [
+                    f for f in dev_frames if pk_start <= f.epoch < pk_end
+                ]
+                sub_buckets = []
+                for sub_start in range(pk_start, pk_end):
+                    sub_end = sub_start + 1
+                    sub = [f for f in pk_frames if sub_start <= f.epoch < sub_end]
+                    if not sub:
+                        continue
+                    sub_total = len(sub)
+                    sub_retry = sum(1 for f in sub if f.retry)
+                    sub_tx = [f for f in sub if f.ta == mac]
+                    sub_mcs_counts: "Counter[str]" = Counter()
+                    for f in sub_tx:
+                        phy = getattr(f, "mcs_phy", "") or ""
+                        if phy in ("HT", "VHT", "HE", "EHT") and f.mcs_int is not None:
+                            sub_mcs_counts[f"{phy} MCS{f.mcs_int}"] += 1
+                        else:
+                            rate = (
+                                getattr(f, "data_rate", "") or ""
+                            ).split(",")[0].strip()
+                            if rate:
+                                sub_mcs_counts[f"Legacy {rate}Mbps"] += 1
+                    sub_breakdown = ", ".join(
+                        f"{k}×{v:,}" for k, v in sub_mcs_counts.most_common(4)
+                    )
+                    sub_buckets.append({
+                        "epoch": sub_start,
+                        "total": sub_total,
+                        "retry": sub_retry,
+                        "retry_pct": round(sub_retry * 100 / sub_total, 1) if sub_total else 0,
+                        "tx_total": len(sub_tx),
+                        "mcs_breakdown": sub_breakdown,
+                    })
+                retry_peaks.append({
+                    "start": pk_start,
+                    "duration": bucket_size,
+                    "total": pk.get("total", 0),
+                    "retry": pk.get("retry", 0),
+                    "retry_pct": pk.get("retry_pct", 0),
+                    "sub_buckets": sub_buckets,
+                })
 
         result[info["name"]] = {
             "mac": mac,
@@ -278,6 +344,7 @@ def _structured_device_stats(
             "phy_summary": phy_summary,
             "rssi_stats": rssi_stats,
             "per_bucket": per_bucket if dev_frames else [],
+            "retry_peaks": retry_peaks if dev_frames else [],
         }
     return result
 
