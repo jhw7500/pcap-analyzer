@@ -52,9 +52,17 @@ async def _call_claude_cli(model: str, prompt: str, system: str) -> str:
 
     if proc.returncode != 0:
         err = stderr.decode("utf-8", errors="ignore").strip()
-        if "Not logged in" in err or "/login" in err:
+        out = stdout.decode("utf-8", errors="ignore").strip()
+        msg = err or out or "(빈 출력)"
+        if "Not logged in" in msg or "/login" in msg:
             return "Claude CLI에 로그인되어 있지 않습니다. 서버 사용자 계정으로 `claude` 실행 후 `/login`으로 OAuth 인증."
-        return f"Claude CLI 오류 (exit {proc.returncode}): {err[:300]}"
+        if "issue with the selected model" in msg or "may not exist" in msg:
+            return (
+                f"모델 '{model}' 사용 불가. 설정 페이지에서 다른 모델로 변경하세요. "
+                "권장: claude-sonnet-4-6, claude-opus-4-7, claude-haiku-4-5. "
+                f"\n(원본: {msg[:200]})"
+            )
+        return f"Claude CLI 오류 (exit {proc.returncode}): {msg[:400]}"
 
     return stdout.decode("utf-8", errors="ignore").strip() or "응답 없음"
 
