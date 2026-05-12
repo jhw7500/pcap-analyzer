@@ -205,6 +205,9 @@ docs/superpowers/
 *.png
 node_modules/
 dist/
+/test_iter2.py
+/test_iterate.py
+/test_playwright.py
 ```
 
 ### Step 2.3: 동작 검증 (dry-run)
