@@ -83,9 +83,15 @@ install.bat > install.log 2>&1
 [5/5] 완료
 ```
 
-### 오프라인(폐쇄망) 환경
+### 오프라인 우선 동작 (wheels/ + PyPI fallback)
 
-압축에 `wheels/` 디렉토리가 동봉되어 있으면 자동으로 오프라인 모드로 설치됩니다. 인터넷 없이도 동작합니다.
+설치 스크립트는 `wheels/` 안의 사전 빌드된 wheel을 **우선** 사용하고, ABI 불일치나 누락이 있으면 자동으로 PyPI에서 보완합니다.
+
+- **완전 폐쇄망**: 빌드 호스트와 동일한 Python 마이너 버전(예: 3.10)이면 wheels/만으로 설치 완료. PyPI 호출 없음.
+- **인터넷 가용 + ABI 다름**: 호환 wheel은 wheels/에서, 나머지는 PyPI에서 받아 설치 (예: 빌드 호스트 Python 3.10 → 설치 대상 Python 3.12).
+- **완전 폐쇄망 + ABI 불일치**: 설치 실패. 빌드 호스트와 동일한 Python 마이너 버전 설치 후 재시도.
+
+빌드 호스트 정보는 `wheels/` 안의 native wheel 파일명(예: `markupsafe-3.0.3-cp310-...whl`)의 `cp310` 부분으로 확인 가능합니다.
 
 ## 4. 실행 & 접속
 
@@ -148,6 +154,7 @@ PCAP_AI_API_KEY=sk-ant-...
 | 분석 진행률 멈춤 | 수백만 프레임 pcap은 분 단위 소요. `/api/progress`로 진행 상태 확인 |
 | Windows 콘솔에서 한글 깨짐 | install.bat/run.bat 모두 `chcp 65001`로 UTF-8 설정. 그래도 깨지면 Windows Terminal 또는 PowerShell 사용 권장 |
 | 한글 경로(Windows)에서 venv 실패 | 영문 경로(`C:\pcap` 등)로 이동 후 재시도 |
+| `Could not find a version that satisfies` (offline 모드) | 빌드 호스트와 설치 대상의 Python 마이너 버전 다름. 인터넷 가용하면 자동 fallback됨. 폐쇄망이면 동일 Python 버전 설치 필요 |
 
 ## 6. AI 리뷰 사용 (선택)
 

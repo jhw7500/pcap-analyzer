@@ -56,9 +56,15 @@ echo "[3/5] 의존성 설치"
 # shellcheck disable=SC1091
 source .venv/bin/activate
 if [ -d wheels ] && [ -n "$(ls -A wheels 2>/dev/null)" ]; then
-    echo "  오프라인 모드 (wheels/ 사용)"
-    # 오프라인 환경에서는 pip upgrade 생략 (venv 기본 pip로 충분)
-    pip install --no-index --find-links wheels -r requirements.txt
+    echo "  오프라인 우선 모드 (wheels/ + 필요 시 PyPI)"
+    # wheels/와 PyPI를 모두 인덱스로 — 호환 wheel은 wheels/에서, 누락/ABI 불일치는 PyPI에서
+    # (완전 폐쇄망 환경에서 wheels/만으로 충분하면 PyPI는 한 번도 호출되지 않음)
+    if ! pip install --find-links wheels -r requirements.txt; then
+        echo "  ERROR: 의존성 설치 실패"
+        echo "  완전 폐쇄망에서 ABI 불일치(예: 빌드 호스트와 다른 Python 버전)면"
+        echo "  빌드 호스트와 동일한 Python 마이너 버전(예: 3.10)을 설치 후 재시도하세요."
+        exit 1
+    fi
 else
     echo "  PyPI 모드"
     python -m pip install --upgrade pip >/dev/null

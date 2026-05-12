@@ -42,6 +42,7 @@ SKIP_WHEELS=1 SKIP_VENDOR=1 bash scripts/build-release.sh
 
 - Linux (Ubuntu 22.04 이상 권장; macOS/Windows는 미지원)
 - Python 3.10+ (설치 대상과 동일 마이너 버전 권장 — wheel ABI 일치)
+- **중요**: 빌드 호스트의 Python 마이너 버전이 설치 대상의 Python 마이너 버전과 일치하지 않으면, native 패키지의 wheel ABI tag(예: `cp310`)가 안 맞아 오프라인 설치 실패. 인터넷 가용 환경이면 install.sh가 자동으로 PyPI fallback함. 폐쇄망 배포라면 빌드 호스트의 Python을 설치 대상에 맞춰야 함.
 - 명령: `python3`, `pip`, `tar`, `zip`, `sha256sum`, `curl`, `rsync` (`git`은 선택 — 없으면 `0.0.0-nogit` 버전 사용)
 - 인터넷 연결 (vendor + wheel 다운로드용 — 빌드 시점에만)
 - (선택) `python3-dev`, `build-essential` — wheel 빌드 시 시스템 헤더 필요한 패키지가 있을 경우

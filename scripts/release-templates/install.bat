@@ -63,8 +63,8 @@ set "HAS_WHEELS="
 if exist wheels\*.whl set "HAS_WHEELS=1"
 if exist wheels\*.tar.gz set "HAS_WHEELS=1"
 if defined HAS_WHEELS (
-    echo   오프라인 모드 ^(wheels\ 사용^)
-    pip install --no-index --find-links wheels -r requirements.txt
+    echo   오프라인 우선 모드 ^(wheels\ + 필요 시 PyPI^)
+    pip install --find-links wheels -r requirements.txt
 ) else (
     echo   PyPI 모드
     python -m pip install --upgrade pip >nul
@@ -72,6 +72,7 @@ if defined HAS_WHEELS (
 )
 if errorlevel 1 (
     echo   ERROR: pip install 실패
+    echo   완전 폐쇄망에서 ABI 불일치이면 빌드 호스트와 동일한 Python 마이너 버전을 설치하세요.
     exit /b 1
 )
 
