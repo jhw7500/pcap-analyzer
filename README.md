@@ -76,6 +76,20 @@ make fetch-vendor          # curl로 static/vendor/에 다운로드
 | 분석이 멈춰 보임 | 수백만 프레임 pcap은 시간이 걸림. `/api/progress`로 확인. |
 | 로밍이 감지되지 않음 | 캡처 시작 시점이 AP 전환 뒤라 Auth 프레임이 없을 수 있음. |
 
+## 배포
+
+압축 파일(`pcap-analyzer-<VERSION>.tar.gz` 또는 `.zip`)로 배포하려면:
+
+```bash
+bash scripts/build-release.sh
+```
+
+`dist/`에 OS별 압축 파일이 생성됨. 사용자용 설치 가이드는 `scripts/release-templates/INSTALL.md`(release 압축 안에서는 `docs/INSTALL.md`), 개발자용 빌드 옵션은 `docs/RELEASE.md` 참조.
+
+## 개발 모드 (LAN 원격 접속 테스트)
+
+호스트(Linux dev box)에서 코드 수정 + Windows PC 브라우저로 원격 접속 테스트하는 워크플로우는 `docs/DEV.md` 참조.
+
 ## 개발
 
 ```bash
