@@ -1,5 +1,6 @@
 """tshark를 실행하여 pcap에서 프레임 데이터를 추출한다."""
 
+import functools
 import re
 import subprocess
 import sys
@@ -105,6 +106,46 @@ def _normalize_subtype(value: str) -> str:
         return first
 
 
+@functools.lru_cache(maxsize=8)
+def _get_supported_fields(tshark_path: str) -> frozenset:
+    """tshark가 인식하는 필드 이름 집합. (tshark -G fields 출력 파싱, lru_cache로 1회 호출)"""
+    try:
+        result = subprocess.run(
+            [tshark_path, "-G", "fields"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return frozenset()
+    if result.returncode != 0:
+        return frozenset()
+    # 'F\t<display_name>\t<field_name>\t...' 형식
+    names = set()
+    for line in result.stdout.splitlines():
+        if line.startswith("F\t"):
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                names.add(parts[2])
+    return frozenset(names)
+
+
+def _filter_unsupported_fields(tshark_path: str) -> tuple:
+    """TSHARK_FIELDS를 호스트 tshark가 지원하는 것만 추려서 반환.
+
+    Returns (used_fields, dropped_fields, dropped_indices). dropped_indices는
+    원본 TSHARK_FIELDS에서의 인덱스 위치(extract_frames가 빈 컬럼 padding에 사용).
+    capability detection 실패(empty supported set) 시에는 원본 그대로 반환.
+    """
+    supported = _get_supported_fields(tshark_path)
+    if not supported:
+        return list(TSHARK_FIELDS), [], []
+    used = [f for f in TSHARK_FIELDS if f in supported]
+    dropped = [f for f in TSHARK_FIELDS if f not in supported]
+    dropped_indices = [TSHARK_FIELDS.index(f) for f in dropped]
+    return used, dropped, dropped_indices
+
+
 def build_tshark_cmd(
     pcap_path: str,
     wpa_passphrase: str = "",
@@ -114,9 +155,11 @@ def build_tshark_cmd(
     mac_filter: str = "",
     ip_filter: str = "",
     tshark_path: str = "tshark",
+    fields: Optional[List[str]] = None,
 ) -> List[str]:
     cmd = [tshark_path or "tshark", "-r", pcap_path, "-T", "fields"]
-    for field in TSHARK_FIELDS:
+    field_list = fields if fields is not None else TSHARK_FIELDS
+    for field in field_list:
         cmd.extend(["-e", field])
 
     if wpa_passphrase and ssid:
@@ -215,6 +258,12 @@ def extract_frames(
     progress_cb: "Optional[Callable[[int], None]]" = None,
 ) -> List[FrameType]:
     resolved_path = tshark_path or "tshark"
+    used_fields, dropped_fields, dropped_indices = _filter_unsupported_fields(resolved_path)
+    if dropped_fields:
+        print(
+            f"[WARN] tshark({resolved_path})에 미지원 필드 자동 제외: {dropped_fields}",
+            file=sys.stderr,
+        )
     cmd = build_tshark_cmd(
         pcap_path,
         wpa_passphrase,
@@ -224,6 +273,7 @@ def extract_frames(
         mac_filter,
         ip_filter,
         tshark_path=resolved_path,
+        fields=used_fields,
     )
 
     # 스트리밍 방식: stdout을 한 줄씩 읽어 메모리 사용량을 최소화한다.
@@ -294,10 +344,19 @@ def extract_frames(
         _cleanup_stderr_file(stderr_file)
         return []
 
+    # 미지원 필드 인덱스(오름차순) — line 분할 후 그 위치에 빈 컬럼 insert
+    sorted_dropped = sorted(dropped_indices)
+
     try:
         for line in stdout:
             if cancel_event is not None and cancel_event.is_set():
                 break
+            if sorted_dropped:
+                cols = line.rstrip("\n").split("\t")
+                for idx in sorted_dropped:
+                    if idx <= len(cols):
+                        cols.insert(idx, "")
+                line = "\t".join(cols) + "\n"
             frame = parse_tsv_line(line)
             if frame is not None:
                 frames.append(frame)
