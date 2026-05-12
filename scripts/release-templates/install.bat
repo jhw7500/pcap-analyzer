@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 REM pcap-analyzer 설치 스크립트 (Windows)
 REM Usage: install.bat
 chcp 65001 >nul 2>&1
@@ -46,7 +46,7 @@ echo   tshark: !TSHARK!
 REM [2/5] Python venv
 echo [2/5] Python 가상환경 생성
 if exist .venv (
-    echo   .venv\ 이미 존재 — 재사용
+    echo   .venv\ 이미 존재 - 재사용
 ) else (
     python -m venv .venv
     if errorlevel 1 (

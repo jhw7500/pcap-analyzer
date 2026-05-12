@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 REM pcap-analyzer 실행 (Windows, 포그라운드)
 REM Usage: run.bat
 chcp 65001 >nul 2>&1

@@ -152,7 +152,8 @@ PCAP_AI_API_KEY=sk-ant-...
 | `install.bat`: `tshark가 필요합니다` (Windows) | Wireshark는 설치되어 있지만 PATH 미등록. Wireshark 재설치 후 "Add Wireshark to system PATH" 옵션 체크 또는 시스템 환경변수에 `C:\Program Files\Wireshark` 수동 추가 후 install.bat 재실행 |
 | `tshark 감지: 미감지` (런타임) | install 후 런타임에 못 찾는 드문 경우. 설정 페이지(`/settings`)에서 `tshark.exe` 절대 경로 지정 |
 | 분석 진행률 멈춤 | 수백만 프레임 pcap은 분 단위 소요. `/api/progress`로 진행 상태 확인 |
-| Windows 콘솔에서 한글 깨짐 | install.bat/run.bat 모두 `chcp 65001`로 UTF-8 설정. 그래도 깨지면 Windows Terminal 또는 PowerShell 사용 권장 |
+| Windows 콘솔에서 한글 깨짐 | install.bat/run.bat는 UTF-8 BOM + CRLF로 저장되어 chcp 65001 전에도 한글 정상 파싱됨. 그래도 깨지면 Windows Terminal 또는 PowerShell 사용 권장 |
+| `'XXX'은(는) 내부 또는 외부 명령...` 류 에러 다발 (Windows) | .bat의 BOM이 압축 해제 중 손실됐을 가능성. zip을 다시 받아 압축 해제 도구를 바꿔서 시도 (탐색기 기본 vs 7-Zip) |
 | 한글 경로(Windows)에서 venv 실패 | 영문 경로(`C:\pcap` 등)로 이동 후 재시도 |
 | `Could not find a version that satisfies` (offline 모드) | 빌드 호스트와 설치 대상의 Python 마이너 버전 다름. 인터넷 가용하면 자동 fallback됨. 폐쇄망이면 동일 Python 버전 설치 필요 |
 
