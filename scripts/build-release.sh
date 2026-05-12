@@ -11,7 +11,7 @@ ROOT="$(pwd)"
 
 # [1] 사전 체크
 echo "[1] 사전 체크"
-for cmd in python3 pip git tar zip rsync curl sha256sum; do
+for cmd in python3 pip tar zip rsync curl sha256sum; do
     if ! command -v "${cmd}" >/dev/null 2>&1; then
         echo "  ERROR: ${cmd} 명령이 필요합니다."
         exit 1
@@ -21,6 +21,7 @@ echo "  OK"
 
 # [2] 버전 결정
 VERSION="${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo "0.0.0-$(git rev-parse --short HEAD 2>/dev/null || echo nogit)")}"
+VERSION="${VERSION//\//-}"
 echo "[2] 버전: ${VERSION}"
 
 # [3] 스테이징 준비
@@ -48,8 +49,8 @@ fi
 if [ "${SKIP_WHEELS:-0}" != "1" ]; then
     echo "[6] wheel 빌드"
     mkdir -p "${STAGE}/wheels"
-    pip wheel -r "${STAGE}/requirements.txt" -w "${STAGE}/wheels/" --quiet
-    echo "  $(ls "${STAGE}/wheels/" | wc -l)개 wheel 생성"
+    python3 -m pip wheel -r "${STAGE}/requirements.txt" -w "${STAGE}/wheels/" --progress-bar off
+    echo "  $(find "${STAGE}/wheels/" -maxdepth 1 -name '*.whl' | wc -l)개 wheel 생성"
 else
     echo "[6] wheel 빌드 skip (SKIP_WHEELS=1)"
 fi
@@ -70,6 +71,7 @@ echo "[8] VERSION 파일 작성: ${VERSION}"
 
 # [9] 압축 생성
 echo "[9] 압축 생성"
+rm -f "${DIST}"/pcap-analyzer-*.tar.gz "${DIST}"/pcap-analyzer-*.zip "${DIST}/SHA256SUMS.txt"
 (cd "${BUILD}" && tar -czf "${DIST}/pcap-analyzer-${VERSION}.tar.gz" "pcap-analyzer-${VERSION}")
 (cd "${BUILD}" && zip -qr "${DIST}/pcap-analyzer-${VERSION}.zip" "pcap-analyzer-${VERSION}")
 
