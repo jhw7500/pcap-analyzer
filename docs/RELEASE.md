@@ -1,6 +1,6 @@
 # 배포 빌드 가이드 (개발자용)
 
-> 사용자용 설치 가이드는 압축 안에 동봉된 `docs/INSTALL.md` 참조.
+> 사용자용 설치 가이드는 소스의 `scripts/release-templates/INSTALL.md` (release 압축 안에서는 `docs/INSTALL.md`) 참조.
 
 ## 빌드 한 줄
 

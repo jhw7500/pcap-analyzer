@@ -2,7 +2,7 @@
 
 호스트(Linux dev box)에서 코드를 수정하면서 Windows PC 브라우저로 LAN 원격 접속하여 테스트하는 워크플로우.
 
-> 배포(설치 가능한 압축물 만들기)는 `docs/RELEASE.md`, 압축 안 사용자용 안내는 `docs/INSTALL.md` 참조.
+> 배포(설치 가능한 압축물 만들기)는 `docs/RELEASE.md`, 압축 안 사용자용 안내는 `docs/INSTALL.md` (압축 안 / 소스에서는 `scripts/release-templates/INSTALL.md`) 참조.
 
 ## 0. 한눈에 보기
 
