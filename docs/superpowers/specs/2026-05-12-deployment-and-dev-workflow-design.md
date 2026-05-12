@@ -423,6 +423,7 @@ README에 두 줄 추가:
 
 - [ ] 기존 pytest 스위트 PASS
 - [ ] `app.py` 단위 테스트 1개 추가 PASS
+- [ ] TSHARK_FIELDS round-trip + pipeline protocol_dist sanity 테스트가 capability detection false negative 회귀를 막는다 (tests/test_tshark_fields_live.py, tests/test_pipeline_smoke.py).
 
 ## 12. 리스크 & 완화
 

@@ -1280,6 +1280,8 @@ python3 -m pytest tests/ -v -x --ignore=tests/e2e
 ```
 Expected: 기존 모든 테스트 + 신규 3개 (test_app_entrypoint.py) PASS
 
+- [ ] TSHARK_FIELDS round-trip + pipeline protocol_dist sanity 테스트가 capability detection false negative 회귀를 막는다 (tests/test_tshark_fields_live.py, tests/test_pipeline_smoke.py).
+
 ### 빌드 + E2E 재현 (Task 7과 동일)
 - [ ] 전체 플로우 한 번 더 돌려서 깨끗한 상태에서도 OK인지 확인.
 
