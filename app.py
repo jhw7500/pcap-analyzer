@@ -1,4 +1,6 @@
 """WLAN Pcap Analyzer 로컬 웹 대시보드."""
+import os
+
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
@@ -41,5 +43,15 @@ async def startup():
         print("WARNING: tshark를 찾을 수 없습니다. 설정 페이지에서 경로를 지정하세요.")
 
 
+def _run_dev_server():
+    """개발/배포 공용 엔트리: env override 지원."""
+    uvicorn.run(
+        "app:app",
+        host=os.getenv("PCAP_HOST", "0.0.0.0"),
+        port=int(os.getenv("PCAP_PORT", "8000")),
+        reload=os.getenv("PCAP_DEV_RELOAD", "true").lower() == "true",
+    )
+
+
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    _run_dev_server()
