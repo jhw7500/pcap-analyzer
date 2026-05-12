@@ -63,3 +63,27 @@ def test_filter_keeps_column_alias_even_if_absent_in_supported():
     # _ws.col.Protocol 은 자동 화이트리스트 → used에 포함, dropped에 안 들어감
     assert "_ws.col.Protocol" in used
     assert "_ws.col.Protocol" not in dropped
+
+
+def test_get_supported_fields_handles_none_stdout():
+    """subprocess가 stdout=None을 반환하는 케이스 방어 (Windows cp949 디코드 실패 등)."""
+    with mock.patch.object(extractor.subprocess, "run") as mock_run:
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = None  # 실제 인코딩 에러 시 발생
+        extractor._get_supported_fields.cache_clear()
+        result = extractor._get_supported_fields("/usr/bin/tshark")
+    assert result == frozenset(), "stdout=None 시 빈 frozenset 반환 (fallback 트리거)"
+    extractor._get_supported_fields.cache_clear()
+
+
+def test_subprocess_uses_utf8_encoding():
+    """_get_supported_fields가 subprocess.run에 encoding='utf-8'을 전달해야 한다."""
+    with mock.patch.object(extractor.subprocess, "run") as mock_run:
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = ""
+        extractor._get_supported_fields.cache_clear()
+        extractor._get_supported_fields("/usr/bin/tshark")
+    call_kwargs = mock_run.call_args.kwargs
+    assert call_kwargs.get("encoding") == "utf-8", "Windows cp949 디코드 실패 방지를 위한 encoding 미설정"
+    assert call_kwargs.get("errors") == "replace", "errors='replace' 누락 시 일부 byte에서 여전히 fail 가능"
+    extractor._get_supported_fields.cache_clear()

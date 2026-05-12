@@ -70,12 +70,17 @@ def detect_tshark_version(tshark_path: str = "tshark") -> Dict[str, str]:
     """tshark --version 출력에서 버전 정보를 추출.
 
     감지 실패 시 version="unknown"으로 반환. 예외를 던지지 않는다.
+
+    Windows에서 OS default encoding(cp949 등)으로 디코드 시 UTF-8 multi-byte 실패 방지를 위해
+    encoding="utf-8", errors="replace" 명시.
     """
     try:
         result = subprocess.run(
             [tshark_path or "tshark", "--version"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         first_line = (result.stdout or "").split("\n", 1)[0].strip()
@@ -108,17 +113,23 @@ def _normalize_subtype(value: str) -> str:
 
 @functools.lru_cache(maxsize=8)
 def _get_supported_fields(tshark_path: str) -> frozenset:
-    """tshark가 인식하는 필드 이름 집합. (tshark -G fields 출력 파싱, lru_cache로 1회 호출)"""
+    """tshark가 인식하는 필드 이름 집합. (tshark -G fields 출력 파싱, lru_cache로 1회 호출)
+
+    Windows에서 OS default encoding(cp949 등)으로 디코드 시 UTF-8 multi-byte 실패 방지를 위해
+    encoding="utf-8", errors="replace" 명시.
+    """
     try:
         result = subprocess.run(
             [tshark_path, "-G", "fields"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
         )
     except (subprocess.SubprocessError, OSError):
         return frozenset()
-    if result.returncode != 0:
+    if result.returncode != 0 or not result.stdout:
         return frozenset()
     # 'F\t<display_name>\t<field_name>\t...' 형식
     names = set()
@@ -292,7 +303,13 @@ def extract_frames(
         mode="w+", suffix=".tshark-stderr", delete=False, encoding="utf-8"
     )
     proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=stderr_file, text=True, bufsize=1
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=stderr_file,
+        text=True,
+        bufsize=1,
+        encoding="utf-8",
+        errors="replace",
     )
 
     # 취소 신호가 들어오면 tshark 프로세스를 즉시 종료하는 watcher 스레드
