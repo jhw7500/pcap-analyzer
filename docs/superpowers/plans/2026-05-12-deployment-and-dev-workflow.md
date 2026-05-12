@@ -174,9 +174,12 @@ dist/
 - [ ] Create `scripts/release-exclude.txt` with content:
 
 ```
+# VCS
 .git/
 .gitignore
 .gitattributes
+
+# Python / virtualenv / caches
 .venv/
 venv/
 __pycache__/
@@ -187,27 +190,53 @@ __pycache__/
 .mypy_cache/
 .coverage
 htmlcov/
+
+# Tool state (Claude Code / OMC / Playwright / Bkit / Gstack)
 .bkit/
 .omc/
 .playwright-mcp/
 .claude/
 .gstack/
+
+# Runtime data & secrets
 data/
 tmp/
 config.local.json
 .env
 .env.*
+
+# Capture files (pcap-analyzer 특성상 PII 포함 — release에 절대 포함 금지)
+*.pcap
+*.pcapng
+*.cap
+
+# Logs
+*.log
+nohup.out
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Internal docs (user-facing INSTALL.md은 build-release.sh가 별도로 작성)
 docs/01-plan/
 docs/03-analysis/
 docs/04-report/
 docs/archive/
 docs/superpowers/
-*.png
+
+# Screenshot/scratch PNGs (root 한정 — static/img/*.png 같은 미래 자산 보호)
+/*.png
+
+# Build artifacts
 node_modules/
 dist/
-/test_iter2.py
-/test_iterate.py
-/test_playwright.py
+
+# Root scratch test scripts (gitignore의 /test_*.py와 동일 anchor)
+/test_*.py
 ```
 
 ### Step 2.3: 동작 검증 (dry-run)
