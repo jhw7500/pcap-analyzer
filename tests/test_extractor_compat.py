@@ -51,3 +51,15 @@ def test_build_cmd_with_filtered_fields():
     assert "-e" in cmd
     e_args = [cmd[i + 1] for i, v in enumerate(cmd) if v == "-e"]
     assert e_args == ["frame.number", "frame.time_epoch"]
+
+
+def test_filter_keeps_column_alias_even_if_absent_in_supported():
+    """_ws.col.* 필드는 tshark -G fields에 안 보여도 자동 supported."""
+    # `_ws.col.Protocol`이 supported set에 없는 상황 시뮬레이션 (실제 tshark 동작 재현)
+    supported_without_col = frozenset(extractor.TSHARK_FIELDS) - {"_ws.col.Protocol"}
+    with mock.patch.object(extractor, "_get_supported_fields") as mock_get:
+        mock_get.return_value = supported_without_col
+        used, dropped, indices = extractor._filter_unsupported_fields("/usr/bin/tshark")
+    # _ws.col.Protocol 은 자동 화이트리스트 → used에 포함, dropped에 안 들어감
+    assert "_ws.col.Protocol" in used
+    assert "_ws.col.Protocol" not in dropped

@@ -130,18 +130,28 @@ def _get_supported_fields(tshark_path: str) -> frozenset:
     return frozenset(names)
 
 
+# tshark column-alias 필드들은 -G fields 출력에 enumerate 안 되지만
+# column resolver가 항상 처리. capability check에서 자동 supported 처리.
+_COLUMN_ALIAS_PREFIX = "_ws.col."
+
+
 def _filter_unsupported_fields(tshark_path: str) -> tuple:
     """TSHARK_FIELDS를 호스트 tshark가 지원하는 것만 추려서 반환.
 
     Returns (used_fields, dropped_fields, dropped_indices). dropped_indices는
     원본 TSHARK_FIELDS에서의 인덱스 위치(extract_frames가 빈 컬럼 padding에 사용).
     capability detection 실패(empty supported set) 시에는 원본 그대로 반환.
+    _ws.col.* 같은 column alias 필드는 -G fields에 enumerate 안 되지만 항상 동작 → 자동 통과.
     """
     supported = _get_supported_fields(tshark_path)
     if not supported:
         return list(TSHARK_FIELDS), [], []
-    used = [f for f in TSHARK_FIELDS if f in supported]
-    dropped = [f for f in TSHARK_FIELDS if f not in supported]
+
+    def _is_supported(field: str) -> bool:
+        return field in supported or field.startswith(_COLUMN_ALIAS_PREFIX)
+
+    used = [f for f in TSHARK_FIELDS if _is_supported(f)]
+    dropped = [f for f in TSHARK_FIELDS if not _is_supported(f)]
     dropped_indices = [TSHARK_FIELDS.index(f) for f in dropped]
     return used, dropped, dropped_indices
 
