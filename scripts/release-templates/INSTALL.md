@@ -1,0 +1,169 @@
+# pcap-analyzer 설치 가이드
+
+이 문서는 압축 해제 후 함께 들어있는 사용자용 설치 가이드입니다.
+
+## 1. 시스템 요구사항
+
+| 항목 | 최소 사양 |
+|---|---|
+| OS | Linux (Ubuntu/Debian 권장), macOS, Windows 10/11 |
+| Python | 3.10 이상 |
+| tshark | Wireshark CLI (필수) |
+| 디스크 | 약 500MB (venv + wheels + vendor 포함) |
+| 메모리 | 2GB 이상 권장 (대용량 pcap 분석 시 4GB+) |
+
+### tshark 설치
+
+- **Linux (Ubuntu/Debian)**: `sudo apt install tshark`
+- **macOS**: `brew install wireshark`
+- **Windows**: https://www.wireshark.org/ 에서 설치 (설치 옵션에서 "Install TShark" + "Add path" 체크)
+
+### Python 3.10+ 확인
+
+```bash
+python3 --version        # Linux/macOS
+python --version         # Windows
+```
+
+3.10 미만이면 OS별 안내에 따라 업그레이드 후 진행하세요.
+
+#### Linux에서 venv 모듈 없음 오류
+
+Ubuntu/Debian 일부 minimal 이미지에는 `python3-venv` 패키지가 빠져 있어 `install.sh`의 [2/5] 단계에서 `ensurepip not available` 오류가 납니다. 해결:
+
+```bash
+sudo apt install python3-venv
+```
+
+## 2. 다운로드 & 압축 해제
+
+### Linux/macOS
+```bash
+tar -xzf pcap-analyzer-<VERSION>.tar.gz
+cd pcap-analyzer-<VERSION>
+```
+
+### Windows
+1. `pcap-analyzer-<VERSION>.zip` 우클릭 → "압축 풀기"
+2. 풀린 폴더 안으로 이동
+
+**주의(Windows)**: 한글이 포함된 경로(`바탕 화면` 등)에서 가끔 venv 생성이 실패합니다. 영문 경로(`C:\pcap` 등) 권장.
+
+## 3. 설치
+
+### Linux/macOS
+```bash
+./install.sh
+```
+
+상세 로그는 `install.log`에 자동 저장됩니다.
+
+### Windows
+```cmd
+install.bat
+```
+
+Windows에서는 `install.log` 자동 저장이 없습니다. 로그가 필요하면:
+```cmd
+install.bat > install.log 2>&1
+```
+
+### 공통: 5단계가 모두 OK로 끝나야 완료
+
+```
+[1/5] 시스템 의존성 확인
+[2/5] Python 가상환경 생성
+[3/5] 의존성 설치
+[4/5] 설치 확인
+[5/5] 완료
+```
+
+### 오프라인(폐쇄망) 환경
+
+압축에 `wheels/` 디렉토리가 동봉되어 있으면 자동으로 오프라인 모드로 설치됩니다. 인터넷 없이도 동작합니다.
+
+## 4. 실행 & 접속
+
+### Linux/macOS
+```bash
+./run.sh
+```
+
+### Windows
+```cmd
+run.bat
+```
+
+시작 후 출력되는 배너의 URL로 브라우저 접속:
+```
+ 접속 URL:
+   http://localhost:8000
+   http://192.168.x.x:8000  (LAN)
+```
+
+종료: `Ctrl+C`
+
+> **macOS 참고**: `run.sh`는 LAN IP 자동 감지에 `hostname -I`를 사용합니다. macOS는 이 옵션을 지원하지 않아 LAN URL 줄이 표시되지 않을 수 있습니다. 동작에는 영향 없으며, `ipconfig getifaddr en0`로 IP를 확인할 수 있습니다.
+
+### 옵션: 포트/호스트 변경
+
+```bash
+PCAP_PORT=9000 ./run.sh        # Linux/macOS
+```
+```cmd
+set PCAP_PORT=9000 && run.bat  # Windows
+```
+
+### .env 파일 사용 (선택)
+
+런타임 환경변수를 파일로 관리하려면 압축 풀린 디렉토리에 `.env` 파일을 만드세요:
+
+```
+PCAP_PORT=9000
+PCAP_AI_PROVIDER=claude
+PCAP_AI_API_KEY=sk-ant-...
+```
+
+**.env 포맷 제약**:
+- 한 줄에 `KEY=VALUE` 하나
+- 값에 따옴표 사용 금지 (`PCAP_PORT="9000"` → 값이 `"9000"`이 됨)
+- 주석(`#`) 행 금지 — 모든 줄이 변수로 파싱됨
+- bash의 `export` 접두사 금지
+
+## 5. 트러블슈팅
+
+| 증상 | 해결 |
+|---|---|
+| `install.sh: tshark가 필요합니다` | tshark 미설치. 위 1. 시스템 요구사항 참조 |
+| `ensurepip not available` (Linux) | `sudo apt install python3-venv` |
+| `Python 3.10 이상 필요` | Python 업그레이드 필요 |
+| `address already in use` | 8000 포트 점유 중. `PCAP_PORT=9000`으로 재실행 |
+| LAN URL 접속 불가 | 호스트 방화벽(`sudo ufw allow 8000` / Windows Defender 인바운드 허용) 확인 |
+| `tshark 감지: 미감지` (Windows) | tshark 경로가 PATH에 없음. 설정 페이지(`/settings`)에서 `tshark.exe` 절대 경로 지정 |
+| 분석 진행률 멈춤 | 수백만 프레임 pcap은 분 단위 소요. `/api/progress`로 진행 상태 확인 |
+| Windows 콘솔에서 한글 깨짐 | install.bat/run.bat 모두 `chcp 65001`로 UTF-8 설정. 그래도 깨지면 Windows Terminal 또는 PowerShell 사용 권장 |
+| 한글 경로(Windows)에서 venv 실패 | 영문 경로(`C:\pcap` 등)로 이동 후 재시도 |
+
+## 6. AI 리뷰 사용 (선택)
+
+분석 결과를 Claude/OpenAI로 자동 해석하려면 환경변수 또는 `config.local.json`에 다음 지정:
+
+```bash
+export PCAP_AI_PROVIDER=claude
+export PCAP_AI_API_KEY=sk-ant-...
+export PCAP_AI_MODEL=claude-sonnet-4-6
+./run.sh
+```
+
+자세한 설정 키는 압축에 포함된 `README.md` 참조.
+
+## 7. 재설치 / 업데이트
+
+새 버전을 받으면:
+
+1. 기존 디렉토리에서 `Ctrl+C`로 종료
+2. 새 압축을 별도 디렉토리에 풀기
+3. (선택) 기존 `data/` 디렉토리를 새 디렉토리로 복사하면 이전 분석 결과 유지
+4. 새 디렉토리에서 `./install.sh` (또는 `install.bat`) → `./run.sh` (또는 `run.bat`)
+
+기존 `.venv/`는 버리고 새로 만드는 게 안전합니다 (의존성 버전 차이 가능).
