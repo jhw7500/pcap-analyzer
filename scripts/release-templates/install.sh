@@ -3,6 +3,9 @@
 # Usage: ./install.sh
 set -euo pipefail
 
+# 스크립트 위치를 cwd로 (어디서 실행해도 동일)
+cd "$(dirname "$0")"
+
 LOG="install.log"
 : > "${LOG}"
 exec > >(tee -a "${LOG}") 2>&1
@@ -52,12 +55,13 @@ fi
 echo "[3/5] 의존성 설치"
 # shellcheck disable=SC1091
 source .venv/bin/activate
-python -m pip install --upgrade pip >/dev/null
 if [ -d wheels ] && [ -n "$(ls -A wheels 2>/dev/null)" ]; then
     echo "  오프라인 모드 (wheels/ 사용)"
+    # 오프라인 환경에서는 pip upgrade 생략 (venv 기본 pip로 충분)
     pip install --no-index --find-links wheels -r requirements.txt
 else
     echo "  PyPI 모드"
+    python -m pip install --upgrade pip >/dev/null
     pip install -r requirements.txt
 fi
 

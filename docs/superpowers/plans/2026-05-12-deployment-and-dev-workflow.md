@@ -274,6 +274,9 @@ git commit -m "chore: 배포 산출물 git 제외 + rsync 제외 목록 추가"
 # Usage: ./install.sh
 set -euo pipefail
 
+# 스크립트 위치를 cwd로 (어디서 실행해도 동일)
+cd "$(dirname "$0")"
+
 LOG="install.log"
 : > "${LOG}"
 exec > >(tee -a "${LOG}") 2>&1
@@ -323,12 +326,13 @@ fi
 echo "[3/5] 의존성 설치"
 # shellcheck disable=SC1091
 source .venv/bin/activate
-python -m pip install --upgrade pip >/dev/null
 if [ -d wheels ] && [ -n "$(ls -A wheels 2>/dev/null)" ]; then
     echo "  오프라인 모드 (wheels/ 사용)"
+    # 오프라인 환경에서는 pip upgrade 생략 (venv 기본 pip로 충분)
     pip install --no-index --find-links wheels -r requirements.txt
 else
     echo "  PyPI 모드"
+    python -m pip install --upgrade pip >/dev/null
     pip install -r requirements.txt
 fi
 
@@ -355,10 +359,11 @@ echo "  ./run.sh"
 @echo off
 REM pcap-analyzer 설치 스크립트 (Windows)
 REM Usage: install.bat
+chcp 65001 >nul 2>&1
 setlocal enabledelayedexpansion
 
-set "LOG=install.log"
-type nul > %LOG%
+REM 스크립트 위치를 cwd로
+cd /d "%~dp0"
 
 set "VERSION=unknown"
 if exist VERSION set /p VERSION=<VERSION
@@ -373,6 +378,18 @@ if errorlevel 1 (
     exit /b 1
 )
 for /f "tokens=2" %%i in ('python --version 2^>^&1') do set "PYV=%%i"
+for /f "tokens=1,2 delims=." %%a in ("!PYV!") do (
+    set "MAJOR=%%a"
+    set "MINOR=%%b"
+)
+if !MAJOR! LSS 3 (
+    echo   ERROR: Python 3.10 이상 필요 ^(현재: !PYV!^)
+    exit /b 1
+)
+if !MAJOR! EQU 3 if !MINOR! LSS 10 (
+    echo   ERROR: Python 3.10 이상 필요 ^(현재: !PYV!^)
+    exit /b 1
+)
 echo   python: !PYV!
 
 where tshark >nul 2>&1
@@ -400,13 +417,15 @@ if exist .venv (
 REM [3/5] 의존성 설치
 echo [3/5] 의존성 설치
 call .venv\Scripts\activate.bat
-python -m pip install --upgrade pip >nul
-dir /b wheels\*.whl >nul 2>&1
-if not errorlevel 1 (
+set "HAS_WHEELS="
+if exist wheels\*.whl set "HAS_WHEELS=1"
+if exist wheels\*.tar.gz set "HAS_WHEELS=1"
+if defined HAS_WHEELS (
     echo   오프라인 모드 ^(wheels\ 사용^)
     pip install --no-index --find-links wheels -r requirements.txt
 ) else (
     echo   PyPI 모드
+    python -m pip install --upgrade pip >nul
     pip install -r requirements.txt
 )
 if errorlevel 1 (
@@ -422,6 +441,9 @@ if errorlevel 1 (
     exit /b 1
 )
 python -c "import config; print('  tshark 감지:', config.detect_tshark() or '미감지')"
+if errorlevel 1 (
+    echo   WARN: tshark 감지 실패 ^(계속 진행^)
+)
 
 REM [5/5] 완료
 echo [5/5] 완료
