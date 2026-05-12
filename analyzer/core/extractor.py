@@ -3,9 +3,11 @@
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import importlib
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -46,6 +48,18 @@ TSHARK_FIELDS = [
     "radiotap.he.data_3.data_mcs",  # cols[23] — 802.11ax (HE) MCS
     "wlan_radio.data_rate",       # cols[24] — Mbps (legacy 폴백 표시용)
 ]
+
+
+def _cleanup_stderr_file(stderr_file) -> None:
+    """tshark stderr 캡처용 임시 파일 정리."""
+    try:
+        stderr_file.close()
+    except Exception:
+        pass
+    try:
+        Path(stderr_file.name).unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 _VERSION_RE = re.compile(r"(\d+\.\d+\.\d+)")
@@ -213,8 +227,12 @@ def extract_frames(
     )
 
     # 스트리밍 방식: stdout을 한 줄씩 읽어 메모리 사용량을 최소화한다.
+    # stderr는 임시 파일로 캡처 — 실패 시 진짜 원인 surface (PIPE는 large stderr에서 deadlock 위험)
+    stderr_file = tempfile.NamedTemporaryFile(
+        mode="w+", suffix=".tshark-stderr", delete=False, encoding="utf-8"
+    )
     proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1
+        cmd, stdout=subprocess.PIPE, stderr=stderr_file, text=True, bufsize=1
     )
 
     # 취소 신호가 들어오면 tshark 프로세스를 즉시 종료하는 watcher 스레드
@@ -273,6 +291,7 @@ def extract_frames(
     stdout = proc.stdout
     if stdout is None:
         ticker_stop.set()
+        _cleanup_stderr_file(stderr_file)
         return []
 
     try:
@@ -303,10 +322,30 @@ def extract_frames(
         watcher.join(timeout=1)
 
     if cancelled[0]:
+        _cleanup_stderr_file(stderr_file)
         return []
 
     if proc.returncode != 0:
-        print(f"[ERROR] tshark 실행 실패 (exit code: {proc.returncode})", file=sys.stderr)
+        stderr_content = ""
+        try:
+            stderr_file.flush()
+            stderr_file.seek(0)
+            stderr_content = stderr_file.read()
+        except (OSError, ValueError):
+            pass
+        print(
+            f"[ERROR] tshark 실행 실패 (exit code: {proc.returncode})",
+            file=sys.stderr,
+        )
+        if stderr_content.strip():
+            print(f"[ERROR] tshark stderr:", file=sys.stderr)
+            for line in stderr_content.splitlines()[-30:]:
+                print(f"  {line}", file=sys.stderr)
+        else:
+            print(f"[ERROR] tshark stderr (empty)", file=sys.stderr)
+        print(f"[ERROR] 호출 명령: {' '.join(cmd)}", file=sys.stderr)
+        _cleanup_stderr_file(stderr_file)
         return []
 
+    _cleanup_stderr_file(stderr_file)
     return frames
