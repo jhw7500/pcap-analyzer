@@ -19,3 +19,7 @@ htmlcov/
 
 # 배포 산출물 (scripts/build-release.sh 출력)
 dist/
+
+# Local install/run logs (release scripts produce these in the extracted dir,
+# but devs sometimes run install.sh from the source tree for testing)
+*.log
