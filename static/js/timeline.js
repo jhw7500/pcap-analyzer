@@ -47,23 +47,33 @@
         return new Date(epoch * 1000);
     }
 
-    /* ── 서브플롯 1: RSSI ── */
+    /* ── 서브플롯 1: RSSI ──
+     * STA 와 AP 둘 다 표시. 양쪽의 송신 frame에 대한 monitor adapter 수신 세기.
+     * STA: 파란 계열, AP: 초록 계열로 색을 분리해 한눈에 구분.
+     */
+    const staColors = ['#3b82f6', '#60a5fa', '#a78bfa', '#8b5cf6'];  // 파란~보라
+    const apColors  = ['#10b981', '#34d399', '#fbbf24', '#f59e0b'];  // 초록~노랑
     const staNames = Object.keys(signal.stas || {});
-    const colors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
-    staNames.forEach((name, i) => {
-        const sta = signal.stas[name];
-        const raw = (sta.rssi_timeline || []).map(p => ({ x: p.epoch, y: p.rssi }));
+    const apNames  = Object.keys(signal.aps  || {});
+    function rssiTrace(node, name, color) {
+        const raw = (node.rssi_timeline || []).map(p => ({ x: p.epoch, y: p.rssi }));
         const sampled = downsample(raw, 2000);
-        traces.push({
+        return {
             x: sampled.map(p => epochToDate(p.x)),
             y: sampled.map(p => p.y),
             type: 'scatter', mode: 'lines',
             name: name + ' RSSI',
-            line: { color: colors[i % colors.length], width: 1 },
+            line: { color: color, width: 1 },
             xaxis: 'x', yaxis: 'y',
             hovertemplate: '%{x|%H:%M:%S} · %{y:.0f} dBm<extra></extra>',
             _panel: 'rssi',
-        });
+        };
+    }
+    staNames.forEach((name, i) => {
+        traces.push(rssiTrace(signal.stas[name], name, staColors[i % staColors.length]));
+    });
+    apNames.forEach((name, i) => {
+        traces.push(rssiTrace(signal.aps[name], name, apColors[i % apColors.length]));
     });
 
     /* ── 서브플롯 2: Retry/sec ── */
@@ -121,28 +131,22 @@
             _panel: 'rtt',
         });
     }
-    // Ping loss 마커
+    // Ping loss 마커 — 항상 × 마커로 표시 (막대는 저-RTT pair 영역을 가려 오해 유발)
+    // 손실 위치는 차트 상단(rtt_max * 1.1)에 찍어 RTT trace 위에 떠 있게 함.
     const losses = downsampleStep(ping.losses || [], 1000);
     if (losses.length > 0) {
-        // 시간 bucket(60초)으로 묶어 'loss 농도 막대'로 표시 — 7K초 캡처에 수백 건이라도
-        // 시각적으로 농도 분포가 보이고 가로띠로 보이지 않음
-        const BUCKET_SEC = 60;
-        const buckets = new Map();
-        losses.forEach(p => {
-            const ts = Math.floor(p.epoch / BUCKET_SEC) * BUCKET_SEC;
-            buckets.set(ts, (buckets.get(ts) || 0) + 1);
-        });
-        const bucketEntries = Array.from(buckets.entries()).sort((a, b) => a[0] - b[0]);
+        const rttMax = rttsSorted.length > 0 ? rttsSorted[rttsSorted.length - 1] : 1;
+        const lossY = rttMax > 0 ? rttMax * 1.1 : 1;
         traces.push({
-            x: bucketEntries.map(b => epochToDate(b[0] + BUCKET_SEC / 2)),  // bucket 중앙
-            y: bucketEntries.map(b => b[1]),
-            type: 'bar',
-            name: `Ping Loss (${losses.length}건 / ${BUCKET_SEC}초당)`,
-            marker: { color: 'rgba(239,68,68,0.55)' },
+            x: losses.map(p => epochToDate(p.epoch)),
+            y: losses.map(() => lossY),
+            type: 'scatter', mode: 'markers',
+            name: `Ping Loss (${losses.length}건)`,
+            marker: { symbol: 'x', color: '#ef4444', size: 10, line: { width: 2 } },
             xaxis: 'x3', yaxis: 'y3',
-            hovertemplate: '%{x|%H:%M:%S} · %{y}건 손실<extra></extra>',
+            hovertemplate: '%{x|%H:%M:%S} · loss seq=%{customdata}<extra></extra>',
+            customdata: losses.map(p => p.seq || '?'),
             _panel: 'rtt',
-            width: BUCKET_SEC * 1000 * 0.85,
         });
     }
 

@@ -86,7 +86,7 @@
             labels: order.map(k => CAT_LABELS[k]),
             values: order.map(k => totals[k]),
             marker: { colors: order.map(k => CAT_COLORS[k]) },
-            textinfo: 'percent', textposition: 'inside',
+            textinfo: 'percent', textposition: 'auto',
             insidetextorientation: 'horizontal',
             hovertemplate: '%{label}: %{value:,} (%{percent})<extra></extra>',
             sort: false,
@@ -142,7 +142,7 @@
             labels: order.map(k => PROTO_CAT_LABELS[k]),
             values: order.map(k => totals[k]),
             marker: { colors: order.map(k => PROTO_CAT_COLORS[k]) },
-            textinfo: 'percent', textposition: 'inside',
+            textinfo: 'percent', textposition: 'auto',
             insidetextorientation: 'horizontal',
             hovertemplate: '%{label}: %{value:,} (%{percent})<extra></extra>',
             sort: false,
@@ -172,7 +172,8 @@
             type: 'bar', orientation: 'h', x: values, y: labels,
             marker: { color: PROTO_CAT_COLORS[cat] },
             text: values.map(v => `${v.toLocaleString()} (${(v / total * 100).toFixed(1)}%)`),
-            textposition: 'outside',
+            textposition: 'auto',
+            constraintext: 'none',
             hovertemplate: '%{y}: %{x:,}<extra></extra>',
         }], {
             ...DARK,
@@ -219,7 +220,8 @@
             type: 'bar', orientation: 'h', x: values, y: labels,
             marker: { color: CAT_COLORS[cat] },
             text: values.map(v => `${v.toLocaleString()} (${(v / total * 100).toFixed(1)}%)`),
-            textposition: 'outside',
+            textposition: 'auto',
+            constraintext: 'none',
             hovertemplate: '%{y}: %{x:,}<extra></extra>',
         }], {
             ...DARK,
@@ -246,19 +248,40 @@
     /* ── 디바이스 테이블 ── */
     const devTable = document.querySelector('#device-table tbody');
     if (devTable && ov.devices && ov.devices.length > 0) {
-        devTable.innerHTML = ov.devices.map(d =>
-            `<tr class="border-b border-gray-700/50">
+        devTable.innerHTML = ov.devices.map(d => {
+            // ips는 빈도순. 첫번째 = 가장 신뢰할 만한 self IP. 나머지는 보조 관찰.
+            let ipCell;
+            if (!d.ips || d.ips.length === 0) {
+                ipCell = '<span class="text-gray-600">-</span>';
+            } else {
+                const primary = `<span class="text-white">${d.ips[0]}</span>`;
+                const secondary = d.ips.length > 1
+                    ? ` <span class="text-gray-500 text-xs" title="추가 관찰된 IP (broadcast/forwarded 가능)">+${d.ips.length - 1}</span>`
+                    : '';
+                ipCell = primary + secondary;
+            }
+            return `<tr class="border-b border-gray-700/50">
                 <td class="py-2 font-mono">${d.name}</td>
                 <td class="py-2 text-gray-400 font-mono text-xs">${d.mac}</td>
+                <td class="py-2 font-mono text-xs" title="${(d.ips || []).join(', ')}">${ipCell}</td>
                 <td class="py-2"><span class="px-2 py-0.5 rounded text-xs ${d.role === 'AP' ? 'bg-green-900 text-green-300' : 'bg-blue-900 text-blue-300'}">${d.role}</span></td>
                 <td class="py-2 text-right">${d.count.toLocaleString()}</td>
-            </tr>`
-        ).join('');
+            </tr>`;
+        }).join('');
     }
 
     /* ── 로밍 Gap 바 차트 ── */
     const roaming = DATA.roaming || {};
-    if (roaming.sequences && roaming.sequences.length > 0) {
+    const roamingChartEl = document.getElementById('chart-roaming-gap');
+    const roamingTableEl = document.getElementById('roaming-table');
+    if (!roaming.sequences || roaming.sequences.length === 0) {
+        if (roamingChartEl) {
+            roamingChartEl.style.height = 'auto';
+            roamingChartEl.innerHTML = '<div class="text-center text-gray-500 text-sm py-12">로밍 이벤트가 감지되지 않았습니다.<br><span class="text-xs text-gray-600">단일 AP 환경이거나 캡처 구간 내 AP 전환 없음</span></div>';
+        }
+        if (roamingTableEl) roamingTableEl.style.display = 'none';
+    } else if (roaming.sequences && roaming.sequences.length > 0) {
+        if (roamingTableEl) roamingTableEl.style.display = '';
         const seqs = roaming.sequences;
         Plotly.newPlot('chart-roaming-gap', [{
             type: 'bar',
@@ -651,8 +674,8 @@
             { label: 'Ping 응답', value: s.count + '건', color: '' },
             { label: 'Ping Loss', value: s.loss_count + '건 (' + s.loss_pct + '%)',
               color: s.loss_count > 0 ? 'text-red-400' : '' },
-            { label: '평균 RTT', value: s.avg + 'ms', color: '' },
-            { label: 'P95 RTT', value: s.p95 + 'ms', color: s.p95 > 10 ? 'text-yellow-400' : '' },
+            { label: '평균 RTT', value: s.avg != null ? s.avg + 'ms' : '—', color: s.avg == null ? 'text-gray-500' : '' },
+            { label: 'P95 RTT', value: s.p95 != null ? s.p95 + 'ms' : '—', color: s.p95 == null ? 'text-gray-500' : (s.p95 > 10 ? 'text-yellow-400' : '') },
         ].map(k =>
             `<div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
                 <p class="text-xs text-gray-500">${k.label}</p>
@@ -661,7 +684,34 @@
         ).join('');
     }
 
-    // Ping RTT 시계열 (큰 차트)
+    // Ping RTT 시계열 (큰 차트) — pairs가 없어도 losses만 있으면 마커로 표시
+    const pingRttEl = document.getElementById('chart-ping-rtt');
+    if (pingRttEl && pairs.length === 0 && losses.length === 0) {
+        pingRttEl.style.height = 'auto';
+        pingRttEl.innerHTML = '<div class="text-center text-gray-500 text-sm py-12">매칭된 RTT 페어가 없습니다.<br><span class="text-xs text-gray-600">단방향 캡처(STA 다운링크만 보임)이거나 ICMP 트래픽이 없는 캡처</span></div>';
+    } else if (pingRttEl && pairs.length === 0 && losses.length > 0) {
+        // 단방향 캡처에서 seq gap loss만 있는 경우 — 마커만 표시
+        Plotly.newPlot('chart-ping-rtt', [{
+            x: losses.map(p => new Date(p.epoch * 1000)),
+            y: losses.map(() => 1),
+            type: 'scatter', mode: 'markers',
+            name: 'LOSS (seq gap)',
+            marker: { color: '#ef4444', size: 12, symbol: 'x', line: { width: 2 } },
+            text: losses.map(p => 'Seq ' + p.seq + ' LOSS  ' + p.src + '→' + p.dst),
+            hovertemplate: '%{text}<extra></extra>',
+        }], {
+            ...DARK,
+            xaxis: { title: { text: '시간', font: { size: 12 } }, gridcolor: '#374151' },
+            yaxis: { title: { text: 'Loss', font: { size: 12 } }, gridcolor: '#374151', range: [0, 2], tickvals: [1], ticktext: ['loss'] },
+            legend: { orientation: 'h', x: 0, y: 1.12, font: { size: 12 } },
+            margin: { t: 60, r: 20, b: 50, l: 60 },
+            annotations: [{
+                xref: 'paper', yref: 'paper', x: 0.5, y: 0.92, showarrow: false,
+                text: 'RTT 측정 불가 (단방향 캡처) — 손실 발생 시점만 표시',
+                font: { size: 11, color: '#9ca3af' },
+            }],
+        }, { responsive: true, displayModeBar: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d', 'select2d'] });
+    }
     if (pairs.length > 0 && document.getElementById('chart-ping-rtt')) {
         const normalPairs = pairs.filter(p => !p.has_retry);
         const retryPairs = pairs.filter(p => p.has_retry);
@@ -697,7 +747,7 @@
                 type: 'scattergl', mode: 'markers',
                 name: 'LOSS (미응답)',
                 marker: { color: '#ef4444', size: 10, symbol: 'x', line: { width: 2 } },
-                text: losses.map(p => 'Seq ' + p.seq + ' LOSS  #' + p.req_num + '  ' + p.src + '\u2192' + p.dst),
+                text: losses.map(p => 'Seq ' + p.seq + (p.status === 'loss_gap' ? ' LOSS (seq gap)  ' : ' LOSS  ' + (p.req_num != null ? '#' + p.req_num + '  ' : '')) + p.src + '\u2192' + p.dst),
                 hovertemplate: '%{text}<extra></extra>',
             });
         }
@@ -716,6 +766,11 @@
     }
 
     // RTT 히스토그램
+    const pingHistEl = document.getElementById('chart-ping-hist');
+    if (pingHistEl && pairs.length === 0) {
+        pingHistEl.style.height = 'auto';
+        pingHistEl.innerHTML = '<div class="text-center text-gray-500 text-sm py-12">RTT 데이터 없음</div>';
+    }
     if (pairs.length > 0 && document.getElementById('chart-ping-hist')) {
         Plotly.newPlot('chart-ping-hist', [{
             x: pairs.map(p => p.rtt_ms), type: 'histogram',
@@ -731,7 +786,37 @@
 
     // Ping 통계 (서버에서 계산된 값 사용)
     const pingStats = document.getElementById('ping-stats');
-    if (pingStats && pingStatsData.count) {
+    // Phase 2b 교차 검증 요약 (양방향 흐름에 의미 있음)
+    function crossValidationRows(s) {
+        const verified = s.verified_cycle ?? 0;
+        const replyMissing = s.reply_missing ?? 0;
+        const reqMissing = s.request_missing ?? 0;
+        const fullyUnobs = s.fully_unobserved ?? 0;
+        if (verified + replyMissing + reqMissing + fullyUnobs === 0) return '';
+        return `
+            <tr class="border-t border-gray-700"><td class="text-gray-400 py-1" colspan="2"><span class="text-xs text-gray-500">— 교차 검증 (seq 집합 분석) —</span></td></tr>
+            <tr><td class="text-gray-400 py-1">검증된 사이클</td><td class="text-right text-green-400" title="req와 reply 둘 다 같은 seq로 관측 — 무선 손실 없음">${verified.toLocaleString()}건</td></tr>
+            <tr><td class="text-gray-400 py-1">확정 무선 손실 후보</td><td class="text-right ${replyMissing > 0 ? 'text-red-400 font-bold' : 'text-gray-300'}" title="req는 보였는데 같은 seq의 reply가 캡처 어디에도 없음">${replyMissing.toLocaleString()}건</td></tr>
+            <tr><td class="text-gray-400 py-1">캡처 누락 (request만 미관측)</td><td class="text-right text-yellow-400" title="reply는 보였는데 같은 seq의 request가 캡처 안 됨 — 무선은 OK, 캡처 품질 이슈">${reqMissing.toLocaleString()}건</td></tr>
+            <tr><td class="text-gray-400 py-1">양쪽 미관측 (seq gap)</td><td class="text-right text-gray-400" title="seq 범위에 둘 다 안 보이는 갭 — 캡처 누락 또는 무선 손실 (구분 불가)">${fullyUnobs.toLocaleString()}건</td></tr>
+        `;
+    }
+
+    if (pingStats && !pingStatsData.count) {
+        // 매칭된 RTT 페어가 없을 때 — 캡처 모드 + 손실 요약 안내
+        const mode = pingStatsData.capture_mode || 'none';
+        const modeLabel = { bidirectional: '양방향', unidirectional: '단방향', mixed: '혼합', none: '없음' }[mode] || mode;
+        pingStats.innerHTML = `<div class="text-sm text-gray-400 leading-relaxed">
+            <p class="mb-2">매칭된 RTT 페어가 없어 통계를 계산할 수 없습니다.</p>
+            <table class="w-full text-sm">
+                <tr><td class="text-gray-400 py-1">캡처 모드</td><td class="text-right text-white font-mono">${modeLabel}</td></tr>
+                ${crossValidationRows(pingStatsData)}
+                <tr class="border-t border-gray-700"><td class="text-gray-400 py-1">측정 불가 (unmeasurable)</td><td class="text-right text-gray-500">${pingStatsData.unmeasurable_count ?? 0}건</td></tr>
+                <tr><td class="text-gray-400 py-1">전체 request</td><td class="text-right text-white">${pingStatsData.req_total_raw ?? 0}건</td></tr>
+                <tr><td class="text-gray-400 py-1">전체 reply</td><td class="text-right text-white">${pingStatsData.reply_total_raw ?? 0}건</td></tr>
+            </table>
+        </div>`;
+    } else if (pingStats && pingStatsData.count) {
         const s = pingStatsData;
         const reqRaw = s.req_total_raw ?? 0;
         const reqRetryBit = s.req_retry_bit ?? 0;
@@ -748,9 +833,9 @@
                 <tr><td class="text-gray-400 py-1">미응답 (Loss)</td><td class="text-right text-red-400">${s.loss_count.toLocaleString()}건 (${s.loss_pct}%)</td></tr>
                 <tr class="border-t border-gray-700"><td class="text-gray-400 py-1">Min RTT</td><td class="text-right text-white">${s.min}ms</td></tr>
                 <tr><td class="text-gray-400 py-1">Max RTT</td><td class="text-right text-white">${s.max}ms</td></tr>
-                <tr><td class="text-gray-400 py-1">Avg RTT</td><td class="text-right text-white font-bold">${s.avg}ms</td></tr>
+                <tr><td class="text-gray-400 py-1">Avg RTT</td><td class="text-right text-white font-bold">${s.avg != null ? s.avg + 'ms' : '—'}</td></tr>
                 <tr class="border-t border-gray-700"><td class="text-gray-400 py-1">P50 (중앙값)</td><td class="text-right text-white">${s.p50}ms</td></tr>
-                <tr><td class="text-gray-400 py-1">P95</td><td class="text-right ${s.p95 > 10 ? 'text-yellow-400' : 'text-white'}">${s.p95}ms</td></tr>
+                <tr><td class="text-gray-400 py-1">P95</td><td class="text-right ${s.p95 == null ? 'text-gray-500' : (s.p95 > 10 ? 'text-yellow-400' : 'text-white')}">${s.p95 != null ? s.p95 + 'ms' : '—'}</td></tr>
                 <tr><td class="text-gray-400 py-1">P99</td><td class="text-right ${s.p99 > 20 ? 'text-red-400' : 'text-white'}">${s.p99}ms</td></tr>
                 <tr class="border-t border-gray-700"><td class="text-gray-400 py-1" colspan="2"><span class="text-xs text-gray-500">— Raw 캡처 카운트 (모니터 sniffer 기준) —</span></td></tr>
                 <tr><td class="text-gray-400 py-1">Request 캡처 (raw)</td><td class="text-right text-white">${reqRaw.toLocaleString()}건</td></tr>
@@ -761,28 +846,64 @@
                 <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ retry 비트 O</td><td class="text-right text-yellow-400 text-xs">${replyRetryBit.toLocaleString()}건</td></tr>
                 <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ unique seq</td><td class="text-right text-gray-300 text-xs">${replyUnique.toLocaleString()}건</td></tr>
                 <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ 다중 캡처 중복</td><td class="text-right text-gray-500 text-xs">${replyDup.toLocaleString()}건</td></tr>
+                ${crossValidationRows(s)}
             </table>`;
+    }
+
+    // 관찰된 ICMP 프레임 (RTT 측정 불가, 단방향 캡처에서만)
+    const observations = ping.observations || [];
+    const obsDetails = document.getElementById('ping-observations-details');
+    const obsTable = document.querySelector('#ping-observations-table tbody');
+    const obsCount = document.getElementById('ping-observations-count');
+    if (obsDetails && observations.length > 0) {
+        obsDetails.style.display = '';
+        if (obsCount) obsCount.textContent = `(${observations.length}건)`;
+        if (obsTable) {
+            obsTable.innerHTML = observations.map((o, i) => {
+                const dirBadge = o.direction === 'request'
+                    ? '<span class="bg-blue-900 text-blue-300 px-1.5 py-0.5 rounded text-xs">req</span>'
+                    : '<span class="bg-purple-900 text-purple-300 px-1.5 py-0.5 rounded text-xs">reply</span>';
+                const typeBadge = o.icmp_type === '8' ? 'type=8 (echo req)' : (o.icmp_type === '0' ? 'type=0 (echo reply)' : 'type=' + o.icmp_type);
+                return `<tr class="border-b border-gray-700/30 text-gray-400 hover:bg-gray-700/30">
+                    <td class="py-1 px-1">${i + 1}</td>
+                    <td class="py-1 px-1">${dirBadge}</td>
+                    <td class="py-1 px-1 text-xs text-gray-500">${typeBadge}</td>
+                    <td class="py-1 px-1">${o.seq || '-'}</td>
+                    <td class="py-1 px-1 text-gray-500">${o.ident || '-'}</td>
+                    <td class="py-1 px-1">#${o.frame_num}</td>
+                    <td class="py-1 px-1">${o.time || ''}</td>
+                    <td class="py-1 px-1">${o.src} → ${o.dst}</td>
+                    <td class="py-1 px-1">${o.has_retry ? 'R' : ''}</td>
+                </tr>`;
+            }).join('');
+        }
+    } else if (obsDetails) {
+        obsDetails.style.display = 'none';
     }
 
     // Ping 전수검사 테이블
     const pingFullTable = document.querySelector('#ping-full-table tbody');
     if (pingFullTable && fullList.length > 0) {
         pingFullTable.innerHTML = fullList.map((p, i) => {
-            const isLoss = p.status === 'loss';
+            const isLoss = p.status === 'loss' || p.status === 'loss_gap';
+            const isGap = p.status === 'loss_gap';
             const rowClass = isLoss ? 'text-red-400 bg-red-900/20' : (p.has_retry ? 'text-yellow-400' : '');
             const statusBadge = isLoss
-                ? '<span class="bg-red-900 text-red-300 px-1.5 py-0.5 rounded text-xs font-bold">LOSS</span>'
+                ? (isGap
+                    ? '<span class="bg-red-900 text-red-300 px-1.5 py-0.5 rounded text-xs font-bold" title="seq \uac2d\uc73c\ub85c \uac80\ucd9c\ub41c \uc9c4\uc9dc \ubb34\uc120 \uc190\uc2e4">LOSS (seq gap)</span>'
+                    : '<span class="bg-red-900 text-red-300 px-1.5 py-0.5 rounded text-xs font-bold">LOSS</span>')
                 : (p.has_retry
                     ? '<span class="bg-yellow-900 text-yellow-300 px-1.5 py-0.5 rounded text-xs">RETRY</span>'
                     : '<span class="bg-green-900 text-green-300 px-1.5 py-0.5 rounded text-xs">OK</span>');
             const rttStr = p.rtt_ms !== null ? p.rtt_ms.toFixed(2) : '-';
-            const replyStr = p.reply_num !== null ? '#' + p.reply_num : '-';
+            const reqStr = p.req_num != null ? '#' + p.req_num : '-';
+            const replyStr = p.reply_num != null ? '#' + p.reply_num : '-';
             const replyTime = p.reply_time || '-';
             return `<tr class="border-b border-gray-700/30 ${rowClass} hover:bg-gray-700/30">
                 <td class="py-1 px-1">${i + 1}</td>
                 <td class="py-1 px-1">${p.seq || '-'}</td>
                 <td class="py-1 px-1">${statusBadge}</td>
-                <td class="py-1 px-1">#${p.req_num}</td>
+                <td class="py-1 px-1">${reqStr}</td>
                 <td class="py-1 px-1">${p.req_time || ''}</td>
                 <td class="py-1 px-1">${replyStr}</td>
                 <td class="py-1 px-1">${replyTime}</td>
@@ -924,5 +1045,17 @@
             </div>`;
         }).join('');
     }
+
+    /* ── 접이식 <details>가 펼쳐질 때 Plotly 차트 리사이즈 ──
+     * <details>가 닫힌 상태에서 Plotly.newPlot이 호출되면 컨테이너 폭이
+     * 0이므로 차트가 깨진다. open 이벤트에서 내부 모든 차트를 리사이즈. */
+    document.querySelectorAll('#tab-devices details').forEach(d => {
+        d.addEventListener('toggle', () => {
+            if (!d.open) return;
+            d.querySelectorAll('.js-plotly-plot').forEach(el => {
+                try { Plotly.Plots.resize(el); } catch (_) { /* ignore */ }
+            });
+        });
+    });
 })();
 

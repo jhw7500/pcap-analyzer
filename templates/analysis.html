@@ -78,6 +78,7 @@
         <table class="w-full text-sm" id="device-table">
             <thead class="text-gray-400 border-b border-gray-700">
                 <tr><th class="text-left py-2">이름</th><th class="text-left py-2">MAC</th>
+                    <th class="text-left py-2">IP</th>
                     <th class="text-left py-2">역할</th><th class="text-right py-2">프레임 수</th></tr>
             </thead>
             <tbody></tbody>
@@ -192,65 +193,131 @@
             </table>
         </div>
     </div>
+
+    <!-- 관찰된 ICMP 프레임 (RTT 측정 불가) — 단방향 캡처에서만 표시 -->
+    <details class="bg-gray-800 rounded-lg border border-gray-700 mt-4 group" id="ping-observations-details" style="display:none">
+        <summary class="cursor-pointer select-none p-4 text-sm font-semibold text-gray-300 hover:text-white flex items-center gap-2">
+            <span class="text-gray-500 group-open:rotate-90 inline-block transition-transform">▶</span>
+            관찰된 ICMP 프레임 (RTT 측정 불가) <span id="ping-observations-count" class="text-gray-500 font-normal"></span>
+        </summary>
+        <div class="px-4 pb-4">
+            <p class="text-xs text-gray-500 mb-2">단방향 캡처라 짝꿍 frame이 안 보이는 ICMP 요청/응답들. 캡처된 시점·방향·seq는 있으나 RTT 계산 불가.</p>
+            <div class="overflow-x-auto max-h-[600px] overflow-y-auto">
+                <table class="w-full text-xs font-mono" id="ping-observations-table">
+                    <thead class="text-gray-400 border-b border-gray-700 sticky top-0 bg-gray-800">
+                        <tr>
+                            <th class="text-left py-2 px-1">#</th>
+                            <th class="text-left py-2 px-1">방향</th>
+                            <th class="text-left py-2 px-1">Type</th>
+                            <th class="text-left py-2 px-1">Seq</th>
+                            <th class="text-left py-2 px-1">Ident</th>
+                            <th class="text-left py-2 px-1">Frame</th>
+                            <th class="text-left py-2 px-1">시간</th>
+                            <th class="text-left py-2 px-1">Src → Dst</th>
+                            <th class="text-left py-2 px-1">Retry</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </details>
 </div>
 
 <!-- 장치별 탭 -->
 <div class="tab-content hidden" id="tab-devices">
-    <!-- 개별 장치 상세 (가장 위로) -->
+    <!-- 장치 선택 (항상 보임) -->
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4">
         <h3 class="text-sm font-semibold text-gray-400 mb-2">장치 상세 분석</h3>
         <select id="device-select" class="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm mb-4"></select>
-        <div id="device-detail-stats" class="mb-4"></div>
-        <div class="grid grid-cols-2 gap-4 mb-4">
-            <div>
-                <h4 class="text-xs text-gray-500 mb-1">프레임 타입</h4>
-                <div id="chart-device-type" style="height:250px"></div>
-            </div>
-            <div>
-                <h4 class="text-xs text-gray-500 mb-1">서브타입 Top 10</h4>
-                <div id="chart-device-subtype" style="height:250px"></div>
-            </div>
-        </div>
-        <div>
-            <h4 class="text-xs text-gray-500 mb-1">MCS / 레거시 레이트 (PHY 모드별)</h4>
-            <div id="chart-device-mcs" style="height:420px"></div>
-        </div>
-        <div class="mt-4">
-            <h4 class="text-xs text-gray-500 mb-1">PHY 모드 시간 분포 + Retry율 (10초 단위)</h4>
-            <p class="text-xs text-gray-500 mb-1">x축 시간대별 송신 PHY 모드 stacked + Retry율 라인 overlay</p>
-            <div id="chart-device-mcs-time" style="height:320px"></div>
-        </div>
-        <div class="mt-4">
-            <h4 class="text-xs text-gray-500 mb-1">구간별 프레임 수 (10초 단위)</h4>
-            <div id="chart-device-frames" style="height:280px"></div>
-        </div>
-        <div class="mt-4">
-            <h4 class="text-xs text-gray-500 mb-1">구간별 Retry율 추이 (10초 단위)</h4>
-            <div id="chart-device-timeline" style="height:280px"></div>
-        </div>
-        <div class="mt-4">
-            <h4 class="text-xs text-gray-500 mb-1">Retry 피크 구간 — 1초 세분화 (자동 검출 top 3)</h4>
-            <p class="text-xs text-gray-500 mb-1">retry율 높은 10초 bucket을 1초 단위로 세분화해 MCS 분포와 함께 표시</p>
-            <div id="chart-device-retry-peaks" class="space-y-3"></div>
-        </div>
+        <div id="device-detail-stats" class="mb-2"></div>
     </div>
 
-    <!-- 전체 장치 비교 (페이지 끝) -->
-    <h3 class="text-base font-semibold text-gray-300 mb-2 mt-6">전체 장치 비교</h3>
-    <div class="grid grid-cols-2 gap-4 mb-4">
-        <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-            <h3 class="text-sm font-semibold text-gray-400 mb-2">AP별 총 프레임 비교</h3>
-            <div id="chart-ap-compare" style="height:250px"></div>
+    <!-- 핵심 지표: 프레임 분포 (기본 펼침) -->
+    <details open class="bg-gray-800 rounded-lg border border-gray-700 mb-4 group">
+        <summary class="cursor-pointer select-none p-4 text-sm font-semibold text-gray-300 hover:text-white flex items-center gap-2">
+            <span class="text-gray-500 group-open:rotate-90 inline-block transition-transform">▶</span>
+            프레임 분포 (타입 / 서브타입)
+        </summary>
+        <div class="px-4 pb-4">
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <h4 class="text-xs text-gray-500 mb-1">프레임 타입</h4>
+                    <div id="chart-device-type" style="height:250px"></div>
+                </div>
+                <div>
+                    <h4 class="text-xs text-gray-500 mb-1">서브타입 Top 10</h4>
+                    <div id="chart-device-subtype" style="height:250px"></div>
+                </div>
+            </div>
         </div>
-        <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-            <h3 class="text-sm font-semibold text-gray-400 mb-2">STA별 총 프레임 비교</h3>
-            <div id="chart-sta-compare" style="height:250px"></div>
+    </details>
+
+    <!-- MCS / PHY 모드 (접힘) -->
+    <details class="bg-gray-800 rounded-lg border border-gray-700 mb-4 group">
+        <summary class="cursor-pointer select-none p-4 text-sm font-semibold text-gray-300 hover:text-white flex items-center gap-2">
+            <span class="text-gray-500 group-open:rotate-90 inline-block transition-transform">▶</span>
+            MCS / PHY 모드 분석
+        </summary>
+        <div class="px-4 pb-4">
+            <div>
+                <h4 class="text-xs text-gray-500 mb-1">MCS / 레거시 레이트 (PHY 모드별)</h4>
+                <div id="chart-device-mcs" style="height:420px"></div>
+            </div>
+            <div class="mt-4">
+                <h4 class="text-xs text-gray-500 mb-1">PHY 모드 시간 분포 + Retry율 (10초 단위)</h4>
+                <p class="text-xs text-gray-500 mb-1">x축 시간대별 송신 PHY 모드 stacked + Retry율 라인 overlay</p>
+                <div id="chart-device-mcs-time" style="height:320px"></div>
+            </div>
         </div>
-    </div>
-    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-        <h3 class="text-sm font-semibold text-gray-400 mb-2">장치별 Retry율 + RSSI 비교</h3>
-        <div id="chart-device-retry-compare" style="height:300px"></div>
-    </div>
+    </details>
+
+    <!-- 시간대별 통계 (접힘) -->
+    <details class="bg-gray-800 rounded-lg border border-gray-700 mb-4 group">
+        <summary class="cursor-pointer select-none p-4 text-sm font-semibold text-gray-300 hover:text-white flex items-center gap-2">
+            <span class="text-gray-500 group-open:rotate-90 inline-block transition-transform">▶</span>
+            시간대별 통계 (프레임 수 / Retry율 / 피크)
+        </summary>
+        <div class="px-4 pb-4">
+            <div>
+                <h4 class="text-xs text-gray-500 mb-1">구간별 프레임 수 (10초 단위)</h4>
+                <div id="chart-device-frames" style="height:280px"></div>
+            </div>
+            <div class="mt-4">
+                <h4 class="text-xs text-gray-500 mb-1">구간별 Retry율 추이 (10초 단위)</h4>
+                <div id="chart-device-timeline" style="height:280px"></div>
+            </div>
+            <div class="mt-4">
+                <h4 class="text-xs text-gray-500 mb-1">Retry 피크 구간 — 1초 세분화 (자동 검출 top 3)</h4>
+                <p class="text-xs text-gray-500 mb-1">retry율 높은 10초 bucket을 1초 단위로 세분화해 MCS 분포와 함께 표시</p>
+                <div id="chart-device-retry-peaks" class="space-y-3"></div>
+            </div>
+        </div>
+    </details>
+
+    <!-- 전체 장치 비교 (접힘) -->
+    <details class="bg-gray-800 rounded-lg border border-gray-700 mb-4 group">
+        <summary class="cursor-pointer select-none p-4 text-sm font-semibold text-gray-300 hover:text-white flex items-center gap-2">
+            <span class="text-gray-500 group-open:rotate-90 inline-block transition-transform">▶</span>
+            전체 장치 비교
+        </summary>
+        <div class="px-4 pb-4">
+            <div class="grid grid-cols-2 gap-4 mb-4">
+                <div>
+                    <h4 class="text-xs text-gray-500 mb-1">AP별 총 프레임 비교</h4>
+                    <div id="chart-ap-compare" style="height:250px"></div>
+                </div>
+                <div>
+                    <h4 class="text-xs text-gray-500 mb-1">STA별 총 프레임 비교</h4>
+                    <div id="chart-sta-compare" style="height:250px"></div>
+                </div>
+            </div>
+            <div>
+                <h4 class="text-xs text-gray-500 mb-1">장치별 Retry율 + RSSI 비교</h4>
+                <div id="chart-device-retry-compare" style="height:300px"></div>
+            </div>
+        </div>
+    </details>
 </div>
 
 <!-- 종합 진단 탭 -->

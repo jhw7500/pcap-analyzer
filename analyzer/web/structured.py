@@ -24,6 +24,54 @@ def _structured_overview(
     subtype_counts = Counter(f.subtype for f in frames)
     retry_count = sum(1 for f in frames if f.retry)
 
+    # MAC ↔ IP 매핑 — 관찰된 IP 양측 추출:
+    #   송신(TA=mac)의 ip.src + 수신(RA=mac)의 ip.dst
+    # 단방향 캡처에서 한 쪽만 잡히는 케이스를 보완하기 위해 양쪽 모두 본다.
+    # broadcast/multicast/unspecified는 제외
+    def _is_special_ip(ip: str) -> bool:
+        if ip in ("", "0.0.0.0", "255.255.255.255", "::"):
+            return True
+        if ip.lower().startswith("ff") and ":" in ip:  # IPv6 multicast
+            return True
+        try:
+            first = int(ip.split(".")[0])
+            if 224 <= first <= 239:  # IPv4 multicast
+                return True
+        except (ValueError, IndexError):
+            pass
+        return False
+
+    def _split_ips(raw: str):
+        # tshark는 같은 필드의 multi-value를 콤마로 join해서 반환할 수 있음
+        for ip in raw.split(","):
+            ip = ip.strip()
+            if ip and not _is_special_ip(ip):
+                yield ip
+
+    # 빈도 기반 IP 후보 수집:
+    #   TA=mac frame의 ip.src   → 송신측 자기 IP (가장 신뢰) — 가중치 2
+    #   RA=mac frame의 ip.dst   → 수신측 자기 IP (보조 신호) — 가중치 1
+    # 빈도 ↓ 정렬 후 상위 N개만 노출. forwarded/broadcast 잔재 제거 효과.
+    from collections import Counter
+    dev_ip_counts: Dict[str, "Counter[str]"] = {}
+    for f in frames:
+        if f.ta and f.ip_src:
+            for ip in _split_ips(f.ip_src):
+                dev_ip_counts.setdefault(f.ta, Counter())[ip] += 2
+        if f.ra and f.ip_dst:
+            for ip in _split_ips(f.ip_dst):
+                dev_ip_counts.setdefault(f.ra, Counter())[ip] += 1
+
+    # 상위 후보 선별: 가장 빈도 높은 IP의 5% 미만은 노이즈로 간주해 제외
+    dev_ips: Dict[str, list] = {}
+    for mac, ctr in dev_ip_counts.items():
+        if not ctr:
+            continue
+        top = ctr.most_common(1)[0][1]
+        threshold = max(2, top * 0.05)
+        kept = [ip for ip, cnt in ctr.most_common() if cnt >= threshold]
+        dev_ips[mac] = kept[:5]  # 안전 상한 5개
+
     devices = []
     for mac, info in sorted(roles.items(), key=lambda x: x[1]["name"]):
         devices.append(
@@ -32,6 +80,7 @@ def _structured_overview(
                 "role": info["role"],
                 "name": info["name"],
                 "count": info["count"],
+                "ips": dev_ips.get(mac, []),  # 빈도순 (가장 자주 보이는 IP가 첫번째)
             }
         )
 
@@ -51,26 +100,33 @@ def _structured_overview(
 def _structured_signal(
     frames: List[Frame], roles: Dict[str, Dict[str, Any]], index
 ) -> Dict[str, Any]:
-    """signal_quality + per_second 데이터를 시계열용으로 구조화."""
-    sta_macs = [m for m, r in roles.items() if r["role"] == "STA"]
-    result: Dict[str, Any] = {"stas": {}}
+    """signal_quality + per_second 데이터를 시계열용으로 구조화.
 
-    for sta in sta_macs:
-        name = roles[sta]["name"]
+    STA와 AP를 모두 포함한다. monitor adapter가 받은 각 노드 송신 프레임의
+    radiotap RSSI = "그 노드가 송신한 신호의 (캡처 위치 기준) 수신 세기".
+    AP가 송신한 다운링크 frame의 RSSI도 의미가 있어 별도 버킷 `aps`에 저장.
+    """
+    result: Dict[str, Any] = {"stas": {}, "aps": {}}
+
+    for mac, info in roles.items():
+        role = info.get("role")
+        if role not in ("STA", "AP"):
+            continue
+        name = info["name"]
         if index:
             tx_frames = [
-                f for f in index.by_ta.get(sta, []) if f.rssi_first is not None
+                f for f in index.by_ta.get(mac, []) if f.rssi_first is not None
             ]
         else:
-            tx_frames = [f for f in frames if f.ta == sta and f.rssi_first is not None]
+            tx_frames = [f for f in frames if f.ta == mac and f.rssi_first is not None]
 
         rssi_timeline = [
             {"epoch": f.epoch, "rssi": f.rssi_first, "mcs": f.mcs_int}
             for f in tx_frames
         ]
         rssi_values = [f.rssi_first for f in tx_frames if f.rssi_first is not None]
-        result["stas"][name] = {
-            "mac": sta,
+        entry = {
+            "mac": mac,
             "rssi_timeline": rssi_timeline,
             "rssi_min": min(rssi_values, default=None),
             "rssi_max": max(rssi_values, default=None),
@@ -79,6 +135,8 @@ def _structured_signal(
             else None,
             "frame_count": len(tx_frames),
         }
+        bucket = "stas" if role == "STA" else "aps"
+        result[bucket][name] = entry
 
     return result
 
