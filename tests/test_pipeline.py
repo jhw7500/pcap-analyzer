@@ -84,7 +84,9 @@ class TestStructuredPing:
         assert len(result["losses"]) == 0
         assert result["stats"]["count"] == 1
 
-    def test_loss(self):
+    def test_unmeasurable_when_unidirectional(self):
+        # 단방향 캡처: request만 있고 짝꿍 reply 흐름이 없음 → 무선 손실로 단정 불가
+        # → losses=0, unmeasurable=1 로 분류 (loss로 보고하지 않음)
         frames = [
             make_frame(
                 number=1,
@@ -98,8 +100,80 @@ class TestStructuredPing:
             ),
         ]
         result = _structured_ping(frames, SAMPLE_ROLES)
+        assert len(result["losses"]) == 0
+        assert len(result["pairs"]) == 0
+        assert result["stats"]["unmeasurable_count"] == 1
+        assert result["stats"]["capture_mode"] == "unidirectional"
+
+    def test_loss_when_bidirectional_unmatched(self):
+        # 양방향 캡처에서 reply 없는 request → 확정 loss
+        frames = [
+            make_frame(
+                number=1, epoch=1000, icmp_type="8",
+                ip_src="10.0.0.1", ip_dst="10.0.0.2",
+                icmp_seq="1", ta=STA1, ra=AP1,
+            ),
+            # 같은 흐름(=swap된 src/dst + 같은 ident)에 reply가 하나라도 있으면 양방향 인식
+            make_frame(
+                number=2, epoch=1000.5, icmp_type="0",
+                ip_src="10.0.0.2", ip_dst="10.0.0.1",
+                icmp_seq="2", ta=AP1, ra=STA1,
+            ),
+            # seq=1에 대한 reply는 없음 → 확정 loss
+        ]
+        result = _structured_ping(frames, SAMPLE_ROLES)
         assert len(result["losses"]) == 1
         assert len(result["pairs"]) == 0
+        assert result["stats"]["capture_mode"] == "bidirectional"
+
+    def test_bidi_reply_missing_is_confirmed_loss(self):
+        # 양방향 흐름에서 req(seq=1)는 있고 같은 seq의 reply는 없음 → 확정 무선 손실
+        frames = [
+            make_frame(number=1, epoch=1000, icmp_type="8",
+                       ip_src="10.0.0.1", ip_dst="10.0.0.2", icmp_seq="1"),
+            make_frame(number=2, epoch=1001, icmp_type="8",
+                       ip_src="10.0.0.1", ip_dst="10.0.0.2", icmp_seq="2"),
+            make_frame(number=3, epoch=1001.01, icmp_type="0",
+                       ip_src="10.0.0.2", ip_dst="10.0.0.1", icmp_seq="2"),
+        ]
+        result = _structured_ping(frames, SAMPLE_ROLES)
+        assert result["stats"]["reply_missing"] == 1  # seq=1
+        assert result["stats"]["verified_cycle"] == 1  # seq=2
+        assert len(result["pairs"]) == 1  # seq=2 매칭됨
+        # losses 에는 seq=1의 req entry가 들어가야 함
+        assert any(L["seq"] == "1" for L in result["losses"])
+
+    def test_bidi_request_missing_is_capture_issue_not_loss(self):
+        # reply(seq=1)만 보이고 같은 seq의 req가 없음 → 캡처 누락 (무선 OK)
+        # 양방향으로 인식되려면 같은 흐름에 req 1건 이상 필요
+        frames = [
+            make_frame(number=1, epoch=1000, icmp_type="8",
+                       ip_src="10.0.0.1", ip_dst="10.0.0.2", icmp_seq="2"),
+            make_frame(number=2, epoch=1000.01, icmp_type="0",
+                       ip_src="10.0.0.2", ip_dst="10.0.0.1", icmp_seq="2"),
+            # seq=1 reply만 있고 그에 대응하는 req는 캡처에 없음
+            make_frame(number=3, epoch=999.5, icmp_type="0",
+                       ip_src="10.0.0.2", ip_dst="10.0.0.1", icmp_seq="1"),
+        ]
+        result = _structured_ping(frames, SAMPLE_ROLES)
+        assert result["stats"]["request_missing"] == 1
+        assert result["stats"]["reply_missing"] == 0
+        # 캡처 누락된 reply는 observations로 노출
+        assert any(o["seq"] == "1" and o["direction"] == "reply" for o in result["observations"])
+
+    def test_seq_gap_detected_as_loss_in_unidirectional(self):
+        # 단방향이라도 흐름 안의 seq 갭은 진짜 무선 손실로 잡힘 (seq=2 누락)
+        frames = [
+            make_frame(number=1, epoch=1000, icmp_type="8",
+                       ip_src="10.0.0.1", ip_dst="10.0.0.2", icmp_seq="1"),
+            make_frame(number=2, epoch=1001, icmp_type="8",
+                       ip_src="10.0.0.1", ip_dst="10.0.0.2", icmp_seq="3"),
+        ]
+        result = _structured_ping(frames, SAMPLE_ROLES)
+        assert result["stats"]["seq_gap_losses"] == 1
+        assert len(result["losses"]) == 1
+        assert result["losses"][0]["seq"] == "2"
+        assert result["losses"][0]["status"] == "loss_gap"
 
     def test_empty(self):
         result = _structured_ping([], SAMPLE_ROLES)
@@ -158,33 +232,29 @@ class TestStructuredPing:
         assert rtts[0] == 5.0
         assert rtts[1] == 10.0
 
-    def test_request_outside_window_treated_as_loss(self):
-        # req와 reply가 30초 초과 떨어짐 → 매칭 안 됨 (loss)
+    def test_request_outside_window_no_rtt_but_not_loss(self):
+        # req와 reply가 30초 초과 떨어짐 → RTT 매칭은 실패하지만
+        # 양쪽 seq=99가 모두 관측됐으므로 무선 손실은 아님 (verified_cycle).
+        # Phase 2b 교차 검증의 핵심 의미: "reply가 시간상 너무 늦게 와도
+        # 캡처에는 존재함" 은 진짜 무선 손실로 단정할 수 없음.
         frames = [
             make_frame(
-                number=1,
-                epoch=1000,
-                icmp_type="8",
-                ip_src="10.0.0.1",
-                ip_dst="10.0.0.2",
-                icmp_seq="99",
-                ta=STA1,
-                ra=AP1,
+                number=1, epoch=1000, icmp_type="8",
+                ip_src="10.0.0.1", ip_dst="10.0.0.2",
+                icmp_seq="99", ta=STA1, ra=AP1,
             ),
             make_frame(
-                number=2,
-                epoch=1031,
-                icmp_type="0",
-                ip_src="10.0.0.2",
-                ip_dst="10.0.0.1",
-                icmp_seq="99",
-                ta=AP1,
-                ra=STA1,
+                number=2, epoch=1031, icmp_type="0",
+                ip_src="10.0.0.2", ip_dst="10.0.0.1",
+                icmp_seq="99", ta=AP1, ra=STA1,
             ),
         ]
         result = _structured_ping(frames, SAMPLE_ROLES)
-        assert len(result["pairs"]) == 0
-        assert len(result["losses"]) == 1
+        assert len(result["pairs"]) == 0  # RTT 매칭은 윈도우 초과로 실패
+        assert len(result["losses"]) == 0  # 무선 손실 아님 (양쪽 다 관측됨)
+        assert result["stats"]["verified_cycle"] == 1
+        assert result["stats"]["reply_missing"] == 0
+        assert result["stats"]["capture_mode"] == "bidirectional"
 
     def test_duplicate_reply_only_first_matches(self):
         # 하나의 req에 reply 2개 → 첫 번째만 매칭

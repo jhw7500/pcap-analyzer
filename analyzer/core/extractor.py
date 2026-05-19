@@ -48,6 +48,7 @@ TSHARK_FIELDS = [
     "wlan_radio.11be.mcs",        # cols[22]
     "radiotap.he.data_3.data_mcs",  # cols[23] — 802.11ax (HE) MCS
     "wlan_radio.data_rate",       # cols[24] — Mbps (legacy 폴백 표시용)
+    "icmp.ident",                 # cols[25] — ICMP echo identifier (흐름 분리용)
 ]
 
 
@@ -261,6 +262,7 @@ def parse_tsv_line(line: str) -> Optional[FrameType]:
             icmp_seq=cols[19] if len(cols) > 19 else "",
             mcs_phy=mcs_phy,
             data_rate=data_rate,
+            icmp_ident=cols[25] if len(cols) > 25 else "",
         )
     except (ValueError, IndexError):
         return None
