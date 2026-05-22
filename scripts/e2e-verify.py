@@ -151,7 +151,7 @@ def main():
                 continue
             print(f"  {k}: {v}")
         print(f"  screenshots: {len(r['shots'])} ({list(r['shots'].keys())})")
-        print(f"  key text lines:")
+        print("  key text lines:")
         for s in r["summary"]["snippets"]:
             print(f"    | {s}")
 
