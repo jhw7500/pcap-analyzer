@@ -102,13 +102,18 @@ def ping_loss_evidence(
 ) -> Tuple[List[int], Optional[Dict[str, float]]]:
     """손실 ping의 request frame.number + epoch 범위를 근거로 추출.
 
-    loss_gap(가상 추정 손실)은 실제 frame이 없어 req_num이 None이므로 frame_refs로
-    쓰지 못한다. epoch은 anchor에서 추정되므로 time_window 산정에는 포함한다.
+    loss_gap(가상 추정 손실)은 실제 손실 frame이 없어 req_num이 None이지만,
+    추정의 시간 근거가 된 anchor 프레임 번호(anchor_num)를 frame_ref로 사용한다.
+    모든 손실이 loss_gap인 단방향 캡처에서도 ping loss 결론이 근거 없음으로
+    드롭되지 않도록 한다. epoch은 anchor에서 추정되므로 time_window에 포함한다.
     """
     nums: List[int] = []
     epochs: List[float] = []
     for item in losses:
         n = item.get("req_num")
+        if not isinstance(n, int):
+            # loss_gap: req_num이 없으면 anchor 프레임을 근거로 대체.
+            n = item.get("anchor_num")
         if isinstance(n, int):
             nums.append(n)
         e = item.get("epoch")
@@ -122,13 +127,16 @@ def retry_bucket_evidence(
 ) -> Tuple[List[int], Optional[Dict[str, float]]]:
     """STA의 retry 프레임 중 가장 retry가 많은 10초 버킷의 프레임을 근거로 추출.
 
-    index.by_ta로 그 STA 송신 프레임을 받아 10초 버킷으로 묶고, retry 건수가 가장
+    retry_pct 메트릭은 by_ta(TX)+by_ra(RX, 다운링크 재전송 포함) 양쪽으로
+    계산되므로(structured._structured_device_stats), 근거도 같은 프레임 집합에서
+    소싱한다. by_ta(TX)만 보면 다운링크 retry가 지배적인 STA의 retry 결론이
+    근거 없음으로 드롭된다. 합친 프레임을 10초 버킷으로 묶고 retry 건수가 가장
     많은 버킷의 retry 프레임 frame.number와 그 버킷 epoch 범위를 반환한다.
     """
     if index is None:
         return [], None
-    tx = index.by_ta.get(sta_mac, [])
-    retry_frames = [f for f in tx if f.retry]
+    sta_frames = index.by_ta.get(sta_mac, []) + index.by_ra.get(sta_mac, [])
+    retry_frames = [f for f in sta_frames if f.retry]
     if not retry_frames:
         return [], None
     from collections import defaultdict
@@ -260,9 +268,13 @@ def build_debug_block(
                 "ap": s.get("ap"),
             })
 
+    # retry 시계열은 per-frame 단위로 투영한다. per_second 집계(초당 1 dict)를
+    # project_retry_series(per-frame 가정)에 그대로 넣으면 bin의 total이 '프레임
+    # 수'가 아니라 '초 수'로 집계돼 retry_pct가 수천 %까지 왜곡된다.
+    retry_frame_samples = [{"epoch": f.epoch, "retry": f.retry} for f in frames]
     series = {
         "rssi": project_rssi_series(rssi_samples, axis),
-        "retry": project_retry_series(per_sec_timeline, axis),
+        "retry": project_retry_series(retry_frame_samples, axis),
         "ping": project_ping_series(ping_full, axis),
         "roaming": project_roaming_markers(roam_events, axis),
     }
@@ -307,11 +319,22 @@ def build_debug_block(
                 if len(chosen) >= DEBUG_FRAME_CAP:
                     break
 
-    ordered = sorted(chosen.values(), key=lambda f: (f.epoch, f.number))
-    if len(ordered) > DEBUG_FRAME_CAP:
-        step = len(ordered) / DEBUG_FRAME_CAP
-        sampled = [ordered[int(i * step)] for i in range(DEBUG_FRAME_CAP)]
-        ordered = sampled
+    # cited 근거 프레임(ref_set)은 절대 드롭하지 않는다 — finding의 '증거 보기'가
+    # 가리키는 frame_ref가 표에서 사라지면 grounding 불변식이 깨지고 하이라이트가
+    # 아무것도 못 찾는다. 따라서 맥락(padding) 프레임만 다운샘플해 전체를
+    # DEBUG_FRAME_CAP 이하로 맞춘다(근거가 cap을 넘으면 근거 보존을 우선한다).
+    evidence_frames = [f for n, f in chosen.items() if n in ref_set]
+    padding_frames = [f for n, f in chosen.items() if n not in ref_set]
+    budget = max(0, DEBUG_FRAME_CAP - len(evidence_frames))
+    if len(padding_frames) > budget:
+        if budget > 0:
+            step = len(padding_frames) / budget
+            padding_frames = [padding_frames[int(i * step)] for i in range(budget)]
+        else:
+            padding_frames = []
+    ordered = sorted(
+        evidence_frames + padding_frames, key=lambda f: (f.epoch, f.number)
+    )
 
     # frame_to_row는 표시용 8개 컬럼만 담는다. 타임라인↔표 시간 동기화를 위해
     # 행마다 epoch을 부가(표에는 렌더되지 않는 보조 키)한다.

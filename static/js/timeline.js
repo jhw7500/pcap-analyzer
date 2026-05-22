@@ -516,6 +516,8 @@
         // Plotly date axis는 ms 문자열/Date → epoch(초)로 변환
         const s = new Date(r0).getTime() / 1000;
         const e = new Date(r1).getTime() / 1000;
+        // invalid range(예: new Date(undefined) → NaN)는 표 필터를 깨뜨리므로 방어
+        if (isNaN(s) || isNaN(e)) return;
         if (startInput) startInput.value = s.toFixed(1);
         if (endInput) endInput.value = e.toFixed(1);
         renderFrameTable(s, e);

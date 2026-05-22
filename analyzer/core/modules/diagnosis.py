@@ -285,6 +285,10 @@ def _diagnose_sta(sta_frames: List[Frame], sta: str, matched_set, loss_set):
 
     # 현장 제안 — 모든 제안은 근거(frame_refs) 동반, punt 표현 금지
     suggestions: List[Conclusion] = []
+    # ping loss 원인이 복합적일 수 있으므로(예: retry 폭증 + 잦은 로밍 동시)
+    # 해당하는 구체적 제안을 모두 출력하고, 구체적 제안이 하나도 없을 때만
+    # 일반 점검 제안으로 대체한다.
+    specific_suggestion = False
     if ping_lost > 0 and retry_pct > 30:
         evid = ping_lost_frames + retry_frames
         suggestions.append(Conclusion(
@@ -296,7 +300,8 @@ def _diagnose_sta(sta_frames: List[Frame], sta: str, matched_set, loss_set):
             frame_refs=_bounded_refs(evid),
             time_window=_window_for(evid),
         ))
-    elif ping_lost > 0 and auth_count > 2:
+        specific_suggestion = True
+    if ping_lost > 0 and auth_count > 2:
         evid = ping_lost_frames + auth_frames
         suggestions.append(Conclusion(
             level="WARNING",
@@ -306,7 +311,8 @@ def _diagnose_sta(sta_frames: List[Frame], sta: str, matched_set, loss_set):
             frame_refs=_bounded_refs(evid),
             time_window=_window_for(evid),
         ))
-    elif ping_lost > 0:
+        specific_suggestion = True
+    if ping_lost > 0 and not specific_suggestion:
         # (구) "ping loss 원인 추가 조사 필요" punt 제거 →
         # 손실 ICMP request 프레임 자체를 근거로 직접 점검을 권고한다.
         suggestions.append(Conclusion(

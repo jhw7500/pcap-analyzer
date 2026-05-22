@@ -633,7 +633,10 @@ def _structured_diagnosis(
         dz_window = ev._window(dz_epochs)
         dz_refs, _ = ev.ping_loss_evidence(ping_losses)
         if not dz_refs:
-            dz_refs, _ = ev.roaming_evidence(roam_seqs)
+            # ping loss 근거가 없으면 로밍을 fallback으로 쓰되, refs와 window를
+            # 함께 받아 일치시킨다. 로밍 프레임의 epoch은 지연 구간 window 밖일 수
+            # 있어, window를 교체하지 않으면 '증거 보기' 줌 범위에서 필터링돼 안 보인다.
+            dz_refs, dz_window = ev.roaming_evidence(roam_seqs)
         _add_net_issue(
             {
                 "severity": "medium",

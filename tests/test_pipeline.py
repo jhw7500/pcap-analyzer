@@ -506,6 +506,95 @@ class TestStructuredDiagnosis:
                 f"근거 프레임이 debug 블록에 누락: {iss['msg']!r}"
             )
 
+    def test_retry_evidence_includes_downlink_retries(self):
+        """U1 회귀: retry_pct는 by_ta(TX)+by_ra(RX) 양쪽으로 계산되므로,
+        다운링크(by_ra) retry만 있는 STA도 retry_bucket_evidence가 근거를
+        반환해야 한다. by_ta만 보면 결론이 근거 없음으로 드롭됐다(regression)."""
+        from analyzer.web.evidence import retry_bucket_evidence
+
+        # STA1은 송신(by_ta) retry 0건; AP가 STA1에게 보낸(by_ra) retry만 존재
+        frames = [
+            make_frame(number=i + 1, epoch=2000.0 + i, ta=AP1, ra=STA1,
+                       subtype="40", retry=True)
+            for i in range(10)
+        ]
+        index = FrameIndex(frames, SAMPLE_ROLES)
+        refs, window = retry_bucket_evidence(STA1, index)
+        assert refs, "다운링크 retry 프레임이 근거로 잡혀야 한다"
+        assert window is not None and window["end_epoch"] >= window["start_epoch"]
+
+    def test_ping_loss_evidence_uses_anchor_for_loss_gap(self):
+        """U4 회귀: loss_gap(req_num=None)도 anchor_num을 frame_ref로 사용해
+        ping loss 결론이 근거 없음으로 드롭되지 않아야 한다(regression)."""
+        from analyzer.web.evidence import ping_loss_evidence
+
+        losses = [
+            {"req_num": None, "anchor_num": 77, "epoch": 1000.0,
+             "status": "loss_gap"},
+        ]
+        refs, window = ping_loss_evidence(losses)
+        assert refs == [77]
+        assert window is not None and window["start_epoch"] == 1000.0
+
+    def test_debug_block_preserves_all_cited_frames_over_cap(self):
+        """U3 회귀: cited 근거 frame(ref_set)이 DEBUG_FRAME_CAP을 넘어도
+        다운샘플로 드롭되지 않아야 한다. 모든 finding이 최소 1개 근거를 보존해
+        '증거 보기' grounding 불변식을 지킨다."""
+        from analyzer.web.evidence import build_debug_block, DEBUG_FRAME_CAP
+
+        total = DEBUG_FRAME_CAP + 500
+        frames = [make_frame(number=i + 1, epoch=1000.0 + i) for i in range(total)]
+        index = FrameIndex(frames, SAMPLE_ROLES)
+        issues = []
+        for start in range(0, total, 100):  # finding당 100 refs → ref_set > cap
+            chunk = frames[start:start + 100]
+            issues.append({
+                "severity": "high", "category": "test",
+                "msg": f"issue {start}", "action": "x",
+                "frame_refs": [f.number for f in chunk],
+                "time_window": {"start_epoch": chunk[0].epoch,
+                                "end_epoch": chunk[-1].epoch},
+            })
+        structured = {
+            "diagnosis": {"issues": issues, "sta_diags": []},
+            "signal": {"stas": {}, "aps": {}},
+            "ping": {"full_list": []},
+            "roaming": {"sequences": []},
+            "per_second": {"timeline": []},
+        }
+        debug = build_debug_block(structured, frames, index)
+        debug_nums = {row["number"] for row in debug["frames"]}
+        for iss in issues:
+            assert set(iss["frame_refs"]) & debug_nums, (
+                f"cited frame 전부 드롭됨: {iss['msg']!r}"
+            )
+
+    def test_debug_block_retry_series_is_per_frame(self):
+        """U2 회귀: retry series는 per-frame으로 집계되어 retry_pct가 정상
+        범위(≤100)여야 한다. per_second 집계를 per-frame 함수에 그대로 넣던
+        버그에선 retry_pct가 수천 %까지 치솟았다."""
+        from analyzer.web.evidence import build_debug_block
+
+        frames = [
+            make_frame(number=i + 1, epoch=1000.0 + i * 0.1, ta=STA1, ra=AP1,
+                       subtype="40", retry=(i % 2 == 0))
+            for i in range(100)
+        ]
+        index = FrameIndex(frames, SAMPLE_ROLES)
+        structured = {
+            "diagnosis": {"issues": [], "sta_diags": []},
+            "signal": {"stas": {}, "aps": {}},
+            "ping": {"full_list": []},
+            "roaming": {"sequences": []},
+            # per_second 집계가 있어도 retry series는 per-frame을 써야 한다
+            "per_second": {"timeline": [{"epoch": 1000, "total": 100, "retry": 50}]},
+        }
+        debug = build_debug_block(structured, frames, index)
+        assert debug["series"]["retry"], "retry series가 생성되어야 한다"
+        for pt in debug["series"]["retry"]:
+            assert pt["retry_pct"] <= 100.0, f"retry_pct 왜곡: {pt['retry_pct']}"
+            assert pt["total"] >= pt["retry"]
+
 
 class TestCasefileBuilder:
     def test_casefile_ping_parity_exact(self):
