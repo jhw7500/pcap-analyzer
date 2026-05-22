@@ -1,7 +1,6 @@
 """AI 프로바이더 — Claude API, Claude CLI(구독), OpenAI API 호출."""
 import asyncio
 import shutil
-from typing import Optional
 
 import httpx
 
