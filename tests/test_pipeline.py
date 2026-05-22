@@ -1,6 +1,6 @@
 """pipeline 구조화 함수 테스트."""
 
-from tests.conftest import make_frame, AP1, STA1, STA2, SAMPLE_ROLES
+from tests.conftest import make_frame, AP1, STA1, SAMPLE_ROLES
 from analyzer.core.indexer import FrameIndex
 from analyzer.pipeline import (
     _structured_overview,

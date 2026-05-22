@@ -319,7 +319,7 @@ def _diagnose_sta(sta_frames: List[Frame], sta: str, matched_set, loss_set):
             level="WARNING",
             message=(
                 f"Ping loss {ping_lost}건 — 손실 ICMP request 프레임 "
-                f"직접 점검 권장 (retry/로밍 임계 미달)"
+                "직접 점검 권장 (retry/로밍 임계 미달)"
             ),
             frame_refs=_bounded_refs(ping_lost_frames),
             time_window=_window_for(ping_lost_frames),

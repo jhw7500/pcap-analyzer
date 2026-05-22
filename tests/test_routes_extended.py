@@ -1,7 +1,6 @@
 """라우트 추가 테스트 — 분석 결과가 있는 시나리오."""
 
 import json
-from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app import app

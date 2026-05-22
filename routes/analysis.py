@@ -119,7 +119,7 @@ async def analysis_text(analysis_id: str):
         return error
     assert result is not None
     sections = result.get("text_sections", [])
-    lines = [f"WLAN Pcap 종합 분석 리포트", f"파일: {result.get('pcap_name', '?')}", ""]
+    lines = ["WLAN Pcap 종합 분석 리포트", f"파일: {result.get('pcap_name', '?')}", ""]
     for sec in sections:
         lines.append(f"{'=' * 60}")
         lines.append(sec["title"])

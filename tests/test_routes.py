@@ -1,6 +1,5 @@
 """FastAPI 라우트 테스트."""
 
-import json
 from fastapi.testclient import TestClient
 
 from app import app

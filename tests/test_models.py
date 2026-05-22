@@ -1,5 +1,5 @@
 """Frame 데이터클래스 프로퍼티 테스트."""
-from analyzer.core.models import AnalysisSection, SUBTYPE_NAMES
+from analyzer.core.models import AnalysisSection
 from tests.conftest import make_frame as _make_frame
 
 

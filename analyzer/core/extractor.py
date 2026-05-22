@@ -428,11 +428,11 @@ def extract_frames(
             file=sys.stderr,
         )
         if stderr_content.strip():
-            print(f"[ERROR] tshark stderr:", file=sys.stderr)
+            print("[ERROR] tshark stderr:", file=sys.stderr)
             for line in stderr_content.splitlines()[-30:]:
                 print(f"  {line}", file=sys.stderr)
         else:
-            print(f"[ERROR] tshark stderr (empty)", file=sys.stderr)
+            print("[ERROR] tshark stderr (empty)", file=sys.stderr)
         print(f"[ERROR] 호출 명령: {' '.join(cmd)}", file=sys.stderr)
         _cleanup_stderr_file(stderr_file)
         return []
