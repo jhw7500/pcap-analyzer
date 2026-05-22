@@ -44,6 +44,7 @@ class Frame:
     mcs_phy: str = ""  # "HT" | "VHT" | "HE" | "EHT" | "Legacy" — mcs 값 출처
     data_rate: str = ""  # Mbps (legacy 송신 식별용)
     icmp_ident: str = ""  # ICMP echo identifier — 같은 src/dst 안의 흐름 구분용
+    reason_code: str = ""  # wlan.fixed.reason_code — Deauth/Disassoc 사유 코드 (디버그 증거용)
 
     @property
     def subtype_name(self) -> str:
