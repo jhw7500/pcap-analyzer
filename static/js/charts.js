@@ -987,11 +987,22 @@
                 };
                 const style = sevStyle[iss.severity] || sevStyle.low;
                 const badge = sevBadge[iss.severity] || sevBadge.low;
+                const refs = iss.frame_refs || [];
+                const tw = iss.time_window;
+                // 근거가 있으면 "증거 보기" 버튼 — 타임라인 탭으로 점프 + 하이라이트
+                const evidenceBtn = (refs.length && tw)
+                    ? `<button type="button"
+                            class="evidence-jump ml-auto text-xs px-2 py-0.5 rounded bg-gray-700 hover:bg-blue-600 text-gray-200 hover:text-white border border-gray-600"
+                            data-start="${tw.start_epoch}" data-end="${tw.end_epoch}"
+                            data-refs="${refs.join(',')}"
+                            title="통합 타임라인에서 증거 프레임 ${refs.length}건 보기">\u{1F50D} 증거 보기 (${refs.length})</button>`
+                    : '';
                 return `<div class="rounded-lg p-3 border ${style}">
                     <div class="flex items-center gap-2 mb-1">
                         ${badge}
                         <span class="text-xs text-gray-400">${iss.category}</span>
                         <span class="text-sm font-medium">${iss.msg}</span>
+                        ${evidenceBtn}
                     </div>
                     <div class="text-xs text-gray-400 ml-16">\u{1F527} 조치: ${iss.action}</div>
                 </div>`;
@@ -1022,7 +1033,16 @@
 
             const issueHtml = (sd.issues || []).map(iss => {
                 const ic = iss.severity === 'high' ? 'text-red-400' : 'text-yellow-400';
-                return `<div class="${ic} text-xs">\u26A0 ${iss.msg}</div>`;
+                const refs = iss.frame_refs || [];
+                const tw = iss.time_window;
+                const evidenceBtn = (refs.length && tw)
+                    ? `<button type="button"
+                            class="evidence-jump ml-1 text-[10px] px-1.5 py-0.5 rounded bg-gray-700 hover:bg-blue-600 text-gray-300 hover:text-white border border-gray-600"
+                            data-start="${tw.start_epoch}" data-end="${tw.end_epoch}"
+                            data-refs="${refs.join(',')}"
+                            title="증거 프레임 ${refs.length}건 보기">\u{1F50D}</button>`
+                    : '';
+                return `<div class="${ic} text-xs flex items-center gap-1">\u26A0 <span>${iss.msg}</span>${evidenceBtn}</div>`;
             }).join('') || '<div class="text-green-400 text-xs">\u2713 정상</div>';
 
             return `<div class="bg-gray-800 rounded-lg p-4 border ${borderC}">
@@ -1049,6 +1069,19 @@
     /* ── 접이식 <details>가 펼쳐질 때 Plotly 차트 리사이즈 ──
      * <details>가 닫힌 상태에서 Plotly.newPlot이 호출되면 컨테이너 폭이
      * 0이므로 차트가 깨진다. open 이벤트에서 내부 모든 차트를 리사이즈. */
+    document.addEventListener('click', (e) => {
+        const btn = e.target.closest('.evidence-jump');
+        if (!btn) return;
+        e.preventDefault();
+        const start = parseFloat(btn.dataset.start);
+        const end = parseFloat(btn.dataset.end);
+        const refs = (btn.dataset.refs || '')
+            .split(',').map(s => parseInt(s, 10)).filter(n => !isNaN(n));
+        if (window.TimelineDebug && typeof window.TimelineDebug.focus === 'function') {
+            window.TimelineDebug.focus({ start, end, frameRefs: refs });
+        }
+    });
+
     document.querySelectorAll('#tab-devices details').forEach(d => {
         d.addEventListener('toggle', () => {
             if (!d.open) return;
