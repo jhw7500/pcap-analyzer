@@ -429,6 +429,9 @@ def _record_phantom_loss(
         "epoch": anchor.epoch,
         "rtt_ms": None,
         "req_num": None,
+        # 추정 손실은 실제 손실 프레임이 없으므로, 시간 근거가 된 anchor 프레임
+        # 번호를 남겨 증거 소싱(ping_loss_evidence)이 frame_ref로 쓸 수 있게 한다.
+        "anchor_num": anchor.number,
         "req_time": anchor.time_short,
         "reply_num": None,
         "reply_time": None,

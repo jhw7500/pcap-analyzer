@@ -140,7 +140,7 @@ def _build_ping_section(ping: dict) -> list:
             )
     # loss 패턴: 시간대별로 묶기
     if losses:
-        epochs = [l.get("epoch") for l in losses if l.get("epoch")]
+        epochs = [loss.get("epoch") for loss in losses if loss.get("epoch")]
         if epochs:
             # burst 감지: 연속 1초 내
             epochs_sorted = sorted(epochs)

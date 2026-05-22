@@ -407,8 +407,18 @@ def _structured_device_stats(
     return result
 
 
-def _structured_diagnosis(structured: Dict[str, Any]) -> Dict[str, Any]:
-    """구조화된 종합 진단 — 네트워크 건강도 + STA별 상세 + 문제점 목록."""
+def _structured_diagnosis(
+    structured: Dict[str, Any], frames: List[Frame] = None, index=None
+) -> Dict[str, Any]:
+    """구조화된 종합 진단 — 네트워크 건강도 + STA별 상세 + 문제점 목록.
+
+    각 issue/sta_diag issue에는 실제 증거에서 소싱한 frame_refs(stable tshark
+    frame.number)와 time_window를 부착한다(근거 없는 결론 0건). frames/index가
+    제공되지 않으면 retry 버킷·약신호 프레임 근거를 소싱할 수 없으므로, 해당
+    issue는 근거를 댈 수 없으면 드롭한다(근거 없는 결론 금지).
+    """
+    from . import evidence as ev
+
     ov = structured.get("overview", {})
     ping = structured.get("ping", {})
     roaming = structured.get("roaming", {})
@@ -416,6 +426,9 @@ def _structured_diagnosis(structured: Dict[str, Any]) -> Dict[str, Any]:
     device_stats = structured.get("device_stats", {})
     delays = structured.get("delay_zones", {})
     anomalies = structured.get("anomaly_frames", {})
+
+    frames = frames or []
+    ping_losses = ping.get("losses", [])
 
     total_frames = ov.get("total_frames", 0)
     retry_pct = ov.get("retry_pct", 0)
@@ -466,53 +479,71 @@ def _structured_diagnosis(structured: Dict[str, Any]) -> Dict[str, Any]:
         s_overall = round(s_retry * 0.35 + s_rssi * 0.35 + s_roam * 0.3)
 
         issues = []
+
+        def _add_issue(issue, refs, window):
+            # 근거(frame_refs+time_window)를 댈 수 있을 때만 issue 채택.
+            if ev._attach(issue, refs, window):
+                issues.append(issue)
+
         if sta_retry > 25:
-            issues.append(
+            refs, window = ev.retry_bucket_evidence(mac, index)
+            _add_issue(
                 {
                     "severity": "high",
                     "msg": f"Retry율 {sta_retry}% (임계치 25% 초과)",
                     "action": "TX power 또는 안테나 확인, 로밍 임계값 조정",
-                }
+                },
+                refs, window,
             )
         elif sta_retry > 15:
-            issues.append(
+            refs, window = ev.retry_bucket_evidence(mac, index)
+            _add_issue(
                 {
                     "severity": "medium",
                     "msg": f"Retry율 {sta_retry}%",
                     "action": "채널 혼잡도 확인",
-                }
+                },
+                refs, window,
             )
         if rssi_avg is not None and rssi_avg < -70:
-            issues.append(
+            refs, window = ev.weak_rssi_evidence(mac, -70, frames, index)
+            _add_issue(
                 {
                     "severity": "high",
                     "msg": f"RSSI 평균 {rssi_avg}dBm (약함)",
                     "action": "AP 위치 조정 또는 TX power 증가",
-                }
+                },
+                refs, window,
             )
         elif rssi_avg is not None and rssi_avg < -60:
-            issues.append(
+            refs, window = ev.weak_rssi_evidence(mac, -60, frames, index)
+            _add_issue(
                 {
                     "severity": "medium",
                     "msg": f"RSSI 평균 {rssi_avg}dBm",
                     "action": "AP 커버리지 확인",
-                }
+                },
+                refs, window,
             )
         if len(sta_slow_roams) > 2:
-            issues.append(
+            refs, window = ev.slow_roaming_evidence(roam_seqs, mac)
+            _add_issue(
                 {
                     "severity": "high",
                     "msg": f"느린 로밍 {len(sta_slow_roams)}회 (>100ms)",
                     "action": "802.11r/k/v 설정 확인, 로밍 히스테리시스 조정",
-                }
+                },
+                refs, window,
             )
         elif len(sta_roams) > 10:
-            issues.append(
+            refs, window = ev.roaming_evidence(roam_seqs, mac)
+            _add_issue(
                 {
                     "severity": "medium",
                     "msg": f"잦은 로밍 {len(sta_roams)}회",
                     "action": "로밍 트리거 RSSI 임계값 재설정",
-                }
+                },
+                refs, window,
             )
 
         sta_diags.append(
@@ -538,61 +569,94 @@ def _structured_diagnosis(structured: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     all_issues = []
+
+    def _add_net_issue(issue, refs, window):
+        # 네트워크 레벨 issue도 근거를 댈 수 있을 때만 채택.
+        if ev._attach(issue, refs, window):
+            all_issues.append(issue)
+
     if retry_pct > 15:
-        all_issues.append(
+        refs, window = ev.network_retry_evidence(frames, index)
+        _add_net_issue(
             {
                 "severity": "high",
                 "category": "Retry",
                 "msg": f"네트워크 전체 Retry율 {retry_pct}%",
                 "action": "채널 간섭 또는 AP 과부하 확인",
-            }
+            },
+            refs, window,
         )
     if loss_pct > 5:
-        all_issues.append(
+        refs, window = ev.ping_loss_evidence(ping_losses)
+        _add_net_issue(
             {
                 "severity": "high",
                 "category": "Ping",
                 "msg": f"Ping Loss {loss_pct}%",
                 "action": "네트워크 안정성 점검, 로밍 구간 확인",
-            }
+            },
+            refs, window,
         )
     if len(slow_roams) > 5:
-        all_issues.append(
+        refs, window = ev.slow_roaming_evidence(roam_seqs)
+        _add_net_issue(
             {
                 "severity": "high",
                 "category": "로밍",
                 "msg": f"느린 로밍 {len(slow_roams)}회",
                 "action": "802.11r Fast BSS Transition 활성화",
-            }
+            },
+            refs, window,
         )
     anom_events = anomalies.get("anomalies", [])
     for a in anom_events:
-        all_issues.append(
+        # 이상 프레임은 집계 카운트만 가지므로 같은 종류 프레임을 직접 근거로 소싱.
+        refs, window = ev.anomaly_evidence(a.get("type", ""), frames)
+        _add_net_issue(
             {
                 "severity": a.get("severity", "medium"),
                 "category": a.get("type", ""),
                 "msg": a.get("description", ""),
                 "action": a.get("recommendation", ""),
-            }
+            },
+            refs, window,
         )
     delay_zones = delays.get("delay_zones", [])
     if len(delay_zones) > 3:
-        all_issues.append(
+        # 지연 구간들의 epoch 범위 + 그 안의 ping loss request 프레임을 근거로.
+        dz_epochs = []
+        for z in delay_zones:
+            for k in ("start_epoch", "end_epoch", "epoch"):
+                v = z.get(k)
+                if isinstance(v, (int, float)):
+                    dz_epochs.append(float(v))
+        dz_window = ev._window(dz_epochs)
+        dz_refs, _ = ev.ping_loss_evidence(ping_losses)
+        if not dz_refs:
+            # ping loss 근거가 없으면 로밍을 fallback으로 쓰되, refs와 window를
+            # 함께 받아 일치시킨다. 로밍 프레임의 epoch은 지연 구간 window 밖일 수
+            # 있어, window를 교체하지 않으면 '증거 보기' 줌 범위에서 필터링돼 안 보인다.
+            dz_refs, dz_window = ev.roaming_evidence(roam_seqs)
+        _add_net_issue(
             {
                 "severity": "medium",
                 "category": "지연",
                 "msg": f"지연 구간 {len(delay_zones)}건 탐지",
                 "action": "로밍/retry 상관관계 확인",
-            }
+            },
+            dz_refs, dz_window,
         )
     for sd in sta_diags:
         for issue in sd["issues"]:
+            # STA issue는 이미 frame_refs/time_window를 동반 — 그대로 승격.
             all_issues.append(
                 {
                     "severity": issue["severity"],
                     "category": sd["name"],
                     "msg": issue["msg"],
                     "action": issue["action"],
+                    "frame_refs": issue.get("frame_refs", []),
+                    "time_window": issue.get("time_window"),
                 }
             )
 

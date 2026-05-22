@@ -22,6 +22,16 @@ except (ImportError, ValueError):
 
 SLOW_THRESHOLD_MS = 100
 
+# 로밍 이벤트로 추출할 mgmt 서브타입 → 이벤트 종류(kind).
+#   "11" Auth, "0" AssocReq, "2" ReassocReq — analyze()의 시퀀스 탐지 규칙과 동일.
+# 디버그 타임라인의 roaming 마커는 이 규칙으로 탐지된 이벤트만 재사용한다(신규
+# 탐지 없음). Auth/Reassoc/Assoc 각각을 공유 시간축 위 개별 마커로 투영한다.
+ROAMING_EVENT_KINDS = {
+    "11": "auth",
+    "0": "assoc",
+    "2": "reassoc",
+}
+
 
 @dataclass
 class SequenceInfo:
@@ -42,6 +52,60 @@ class StaSummary:
     slow: int = 0
 
 
+def extract_roaming_events(
+    frames: List[FrameType], roles: Dict[str, Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """STA가 송신한 Auth/Assoc/Reassoc 로밍 이벤트를 구조화해 추출한다.
+
+    `analyze`의 시퀀스 탐지와 **동일한 규칙**(roaming-related 프레임, STA 송신,
+    서브타입 11/0/2 = `ROAMING_EVENT_KINDS`)을 사용한다 — 신규 로밍 탐지를 만들지
+    않고 roaming.py의 탐지 결과를 재사용하기 위한 단일 소스. 디버그 타임라인은
+    이 이벤트들을 공유 시간축 위 개별 마커로 투영한다(`timeline_series`).
+
+    Args:
+        frames: 전체 프레임(캡처 시간순). roaming-related가 아니거나 STA 송신이
+            아닌 프레임, Auth/Assoc/Reassoc 외 서브타입은 건너뛴다.
+        roles: MAC → 역할 dict. role == "STA"인 MAC의 송신만 이벤트로 본다.
+
+    Returns:
+        캡처 순서를 보존한 이벤트 dict 리스트. 각 이벤트:
+        {
+            "kind": str,          # "auth" | "assoc" | "reassoc"
+            "epoch": float,       # 이벤트 발생 시각(공유 시간축 정렬용)
+            "frame_number": int,  # tshark frame.number (증거용 canonical frame id)
+            "sta": str,           # 송신 STA MAC
+            "ap": str,            # 대상 AP MAC (frame.ra)
+            "subtype": str,       # 원본 mgmt 서브타입 코드
+            "subtype_name": str,  # 사람이 읽는 서브타입 이름(Auth/ReassocReq 등)
+            "time_short": str,    # HH:MM:SS.mmm 표기(마커 라벨/툴팁용)
+        }
+    """
+    sta_macs = {mac for mac, role in roles.items() if role.get("role") == "STA"}
+
+    events: List[Dict[str, Any]] = []
+    for frame in frames:
+        if not frame.is_roaming_related:
+            continue
+        if frame.ta not in sta_macs:
+            continue
+        kind = ROAMING_EVENT_KINDS.get(frame.subtype)
+        if kind is None:
+            continue
+        events.append(
+            {
+                "kind": kind,
+                "epoch": frame.epoch,
+                "frame_number": frame.number,
+                "sta": frame.ta,
+                "ap": frame.ra,
+                "subtype": frame.subtype,
+                "subtype_name": frame.subtype_name,
+                "time_short": frame.time_short,
+            }
+        )
+    return events
+
+
 def analyze(
     frames: List[FrameType], roles: Dict[str, Dict[str, Any]], index: Any = None
 ) -> AnalysisSectionType:
@@ -54,26 +118,25 @@ def analyze(
             title="4. 로밍 이벤트", lines=["로밍 관련 프레임 없음"], summary="로밍 없음"
         )
 
-    sta_macs = {mac for mac, role in roles.items() if role.get("role") == "STA"}
-
+    # 시퀀스 탐지는 roaming 이벤트 추출(단일 소스)을 재사용한다.
     sequences: List[SequenceInfo] = []
-    auth_events: Dict[str, FrameType] = {}
-    for frame in roaming_frames:
-        if frame.subtype == "11" and frame.ta in sta_macs:
-            auth_events[frame.ta] = frame
-        elif frame.subtype in ("0", "2") and frame.ta in sta_macs:
-            auth_frame = auth_events.get(frame.ta)
-            if auth_frame is None:
+    auth_events: Dict[str, Dict[str, Any]] = {}
+    for event in extract_roaming_events(roaming_frames, roles):
+        if event["kind"] == "auth":
+            auth_events[event["sta"]] = event
+        else:  # assoc / reassoc
+            auth_event = auth_events.get(event["sta"])
+            if auth_event is None:
                 continue
             sequences.append(
                 SequenceInfo(
-                    sta=frame.ta,
-                    ap=frame.ra,
-                    auth_fnum=auth_frame.number,
-                    assoc_fnum=frame.number,
-                    auth_ts=auth_frame.time_short,
-                    assoc_type=frame.subtype_name,
-                    gap_ms=(frame.epoch - auth_frame.epoch) * 1000,
+                    sta=event["sta"],
+                    ap=event["ap"],
+                    auth_fnum=auth_event["frame_number"],
+                    assoc_fnum=event["frame_number"],
+                    auth_ts=auth_event["time_short"],
+                    assoc_type=event["subtype_name"],
+                    gap_ms=(event["epoch"] - auth_event["epoch"]) * 1000,
                 )
             )
 

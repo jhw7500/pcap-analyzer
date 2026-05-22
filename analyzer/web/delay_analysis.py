@@ -1,6 +1,6 @@
 """통신 지연 패턴 분석 모듈 — ping RTT/loss 데이터에서 지연 구간을 탐지한다."""
 import math
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 
 def _moving_avg_std(values: List[float], window: int = 10):

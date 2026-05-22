@@ -1,5 +1,5 @@
 """분석 모듈 11개 + compare_ap 단위 테스트."""
-from tests.conftest import make_frame, AP1, STA1, STA2, SAMPLE_ROLES
+from tests.conftest import make_frame, AP1, STA1, SAMPLE_ROLES
 from analyzer.core.indexer import FrameIndex
 from analyzer.core.modules import (
     overview, retry_mcs, retry_burst, roaming, ping_rtt,

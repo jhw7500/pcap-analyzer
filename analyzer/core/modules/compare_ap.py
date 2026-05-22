@@ -59,7 +59,7 @@ def analyze(frames: List[Frame], roles: Dict, index=None) -> AnalysisSection:
         lines.append(f"!! {worst['name']}의 retry rate({worst['retry_pct']:.1f}%)가 "
                      f"{best['name']}({best['retry_pct']:.1f}%)보다 현저히 높음")
     else:
-        lines.append(f"AP 간 retry rate 차이 미미 "
+        lines.append("AP 간 retry rate 차이 미미 "
                      f"({best['retry_pct']:.1f}% ~ {worst['retry_pct']:.1f}%)")
 
     # --- 신규: BSSID 기반 프레임 분포 ---

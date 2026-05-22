@@ -1,5 +1,5 @@
 """RSSI 급변(cliff) 탐지 + 이동 평균."""
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 
 def analyze_signal_cliffs(signal_data: Dict[str, Any]) -> Dict[str, Any]:

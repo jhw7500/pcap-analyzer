@@ -49,6 +49,7 @@ TSHARK_FIELDS = [
     "radiotap.he.data_3.data_mcs",  # cols[23] — 802.11ax (HE) MCS
     "wlan_radio.data_rate",       # cols[24] — Mbps (legacy 폴백 표시용)
     "icmp.ident",                 # cols[25] — ICMP echo identifier (흐름 분리용)
+    "wlan.fixed.reason_code",     # cols[26] — Deauth/Disassoc 사유 코드 (디버그 증거용)
 ]
 
 
@@ -263,6 +264,7 @@ def parse_tsv_line(line: str) -> Optional[FrameType]:
             mcs_phy=mcs_phy,
             data_rate=data_rate,
             icmp_ident=cols[25] if len(cols) > 25 else "",
+            reason_code=cols[26] if len(cols) > 26 else "",
         )
     except (ValueError, IndexError):
         return None
@@ -426,11 +428,11 @@ def extract_frames(
             file=sys.stderr,
         )
         if stderr_content.strip():
-            print(f"[ERROR] tshark stderr:", file=sys.stderr)
+            print("[ERROR] tshark stderr:", file=sys.stderr)
             for line in stderr_content.splitlines()[-30:]:
                 print(f"  {line}", file=sys.stderr)
         else:
-            print(f"[ERROR] tshark stderr (empty)", file=sys.stderr)
+            print("[ERROR] tshark stderr (empty)", file=sys.stderr)
         print(f"[ERROR] 호출 명령: {' '.join(cmd)}", file=sys.stderr)
         _cleanup_stderr_file(stderr_file)
         return []

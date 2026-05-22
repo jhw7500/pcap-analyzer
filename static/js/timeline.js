@@ -418,4 +418,182 @@
             if (diag) diagEl.textContent = diag.lines.join('\n');
         }
     }
+
+    /* ══════════════════════════════════════════════════════════════════
+     * 증거 프레임 테이블 + 타임라인 양방향 동기화 (디버그 모드)
+     *
+     * - structured.debug.frames(8개 컬럼)로 표를 채운다.
+     * - 타임라인 x축 범위가 바뀌면(드래그/휠/relayout) 표를 그 epoch 범위로 필터.
+     * - 표 상단 시간범위 입력을 적용하면 타임라인 x축을 그 범위로 줌(역방향).
+     * - 진단 탭의 "증거 보기" 점프(window.TimelineDebug.focus)는 타임라인을
+     *   time_window로 줌 + 해당 frame_refs를 표에서 하이라이트.
+     * ════════════════════════════════════════════════════════════════ */
+    const debug = DATA.debug || {};
+    const debugFrames = debug.frames || [];
+    const tbody = document.querySelector('#debug-frames-table tbody');
+    const countEl = document.getElementById('debug-frames-count');
+    const startInput = document.getElementById('debug-range-start');
+    const endInput = document.getElementById('debug-range-end');
+
+    // frame.number → epoch 매핑 (필터/하이라이트용). debug.axis로 epoch 추정 불가한
+    // 행은 timestamp 문자열만 있고 epoch이 없을 수 있어, ping/roaming series의 epoch도
+    // 참고하지 않고 frame_to_row의 timestamp는 표시용으로만 쓴다. 필터는 행의 epoch이
+    // 필요하므로 debug.frames 각 행에 epoch을 함께 싣지 않은 경우 전체만 보여준다.
+    let highlightSet = new Set();
+
+    function escapeHtml(s) {
+        return String(s == null ? '' : s).replace(/[<&>]/g, c => (
+            { '<': '&lt;', '&': '&amp;', '>': '&gt;' }[c]
+        ));
+    }
+
+    function rowEpoch(row) {
+        // frame_to_row는 epoch을 직접 싣지 않지만, pipeline이 debug.frames에 epoch을
+        // 부가하면 사용. 없으면 null(필터 시 항상 포함).
+        return (typeof row.epoch === 'number') ? row.epoch : null;
+    }
+
+    function renderFrameTable(rangeStart, rangeEnd) {
+        if (!tbody) return;
+        let rows = debugFrames;
+        if (rangeStart != null && rangeEnd != null) {
+            rows = debugFrames.filter(r => {
+                const e = rowEpoch(r);
+                if (e == null) return true;  // epoch 미상 행은 항상 표시
+                return e >= rangeStart && e <= rangeEnd;
+            });
+        }
+        if (countEl) {
+            countEl.textContent = `${rows.length.toLocaleString()} / ${debugFrames.length.toLocaleString()} 프레임`
+                + (highlightSet.size ? ` · 증거 ${highlightSet.size}건` : '');
+        }
+        if (rows.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="8" class="text-gray-500 text-center py-6">선택 구간에 프레임이 없습니다.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(r => {
+            const hl = highlightSet.has(r.number);
+            const retry = r.retry ? '<span class="text-red-400">R</span>' : '';
+            const mcs = (r.mcs == null) ? '' : r.mcs;
+            const rssi = (r.rssi == null) ? '' : r.rssi;
+            const reason = r.reason_code ? escapeHtml(r.reason_code) : '';
+            const cls = hl
+                ? 'bg-yellow-900/40 border-l-2 border-yellow-500'
+                : 'hover:bg-gray-700/40';
+            return `<tr class="${cls}" data-fnum="${r.number}">
+                <td class="py-1 px-1">${r.number}</td>
+                <td class="py-1 px-1 text-gray-400">${escapeHtml(r.timestamp)}</td>
+                <td class="py-1 px-1">${escapeHtml(r.type_subtype)}</td>
+                <td class="py-1 px-1 text-center">${retry}</td>
+                <td class="py-1 px-1 text-right">${mcs}</td>
+                <td class="py-1 px-1 text-right ${rssi !== '' && rssi < -70 ? 'text-orange-400' : ''}">${rssi}</td>
+                <td class="py-1 px-1">${reason}</td>
+                <td class="py-1 px-1 text-gray-400">${escapeHtml(r.seq)}</td>
+            </tr>`;
+        }).join('');
+    }
+    renderFrameTable(null, null);
+
+    /* ── 타임라인 x축 범위 변경 → 표 필터 (브러시/줌/팬) ── */
+    let _syncingFromTable = false;
+    timelineEl.on && timelineEl.on('plotly_relayout', (ev) => {
+        if (_syncingFromTable) return;
+        let r0, r1;
+        if (ev['xaxis.range[0]'] != null && ev['xaxis.range[1]'] != null) {
+            r0 = ev['xaxis.range[0]'];
+            r1 = ev['xaxis.range[1]'];
+        } else if (ev['xaxis.range'] && ev['xaxis.range'].length === 2) {
+            r0 = ev['xaxis.range'][0];
+            r1 = ev['xaxis.range'][1];
+        } else if (ev['xaxis.autorange']) {
+            renderFrameTable(null, null);
+            if (startInput) startInput.value = '';
+            if (endInput) endInput.value = '';
+            return;
+        } else {
+            return;
+        }
+        // Plotly date axis는 ms 문자열/Date → epoch(초)로 변환
+        const s = new Date(r0).getTime() / 1000;
+        const e = new Date(r1).getTime() / 1000;
+        // invalid range(예: new Date(undefined) → NaN)는 표 필터를 깨뜨리므로 방어
+        if (isNaN(s) || isNaN(e)) return;
+        if (startInput) startInput.value = s.toFixed(1);
+        if (endInput) endInput.value = e.toFixed(1);
+        renderFrameTable(s, e);
+    });
+
+    /* ── 표 상단 시간범위 입력 → 타임라인 줌 (역방향) ── */
+    function applyRangeToTimeline(s, e) {
+        if (s == null || e == null || isNaN(s) || isNaN(e)) return;
+        _syncingFromTable = true;
+        Plotly.relayout(timelineEl, {
+            'xaxis.range': [epochToDate(s), epochToDate(e)],
+        }).then(() => { _syncingFromTable = false; });
+        renderFrameTable(s, e);
+    }
+    const applyBtn = document.getElementById('debug-range-apply');
+    if (applyBtn) {
+        applyBtn.addEventListener('click', () => {
+            const s = parseFloat(startInput.value);
+            const e = parseFloat(endInput.value);
+            applyRangeToTimeline(s, e);
+        });
+    }
+    const clearBtn = document.getElementById('debug-range-clear');
+    if (clearBtn) {
+        clearBtn.addEventListener('click', () => {
+            highlightSet = new Set();
+            if (startInput) startInput.value = '';
+            if (endInput) endInput.value = '';
+            _syncingFromTable = true;
+            Plotly.relayout(timelineEl, { 'xaxis.autorange': true })
+                .then(() => { _syncingFromTable = false; });
+            renderFrameTable(null, null);
+        });
+    }
+
+    /* ── 진단 탭 → 타임라인 점프 API (cross-tab) ──
+     * window.TimelineDebug.focus({start, end, frameRefs}) 호출 시:
+     *   1) 통합 타임라인 탭으로 전환
+     *   2) 타임라인 x축을 time_window로 줌 (±패딩)
+     *   3) frame_refs를 표에서 하이라이트 + 그 구간으로 필터
+     */
+    window.TimelineDebug = {
+        focus(opts) {
+            opts = opts || {};
+            const refs = opts.frameRefs || [];
+            highlightSet = new Set(refs);
+
+            // 탭 전환
+            const tabBtn = document.querySelector('.tab-btn[data-tab="timeline"]');
+            if (tabBtn) tabBtn.click();
+
+            let s = opts.start, e = opts.end;
+            if (s == null || e == null) {
+                // window가 없으면 frame_refs의 행 epoch로 대체
+                const eps = debugFrames
+                    .filter(r => highlightSet.has(r.number))
+                    .map(rowEpoch).filter(v => v != null);
+                if (eps.length) { s = Math.min(...eps); e = Math.max(...eps); }
+            }
+            if (s != null && e != null) {
+                const pad = Math.max((e - s) * 0.25, 1.0);  // 가독성 ±패딩
+                const ps = s - pad, pe = e + pad;
+                if (startInput) startInput.value = ps.toFixed(1);
+                if (endInput) endInput.value = pe.toFixed(1);
+                // 탭 전환 직후 차트 resize 타이밍을 고려해 다음 프레임에 적용
+                requestAnimationFrame(() => applyRangeToTimeline(ps, pe));
+                // 하이라이트는 줌과 무관하게 전체 범위에서도 보이도록 즉시 렌더
+                renderFrameTable(ps, pe);
+            } else {
+                renderFrameTable(null, null);
+            }
+            // 증거 행으로 스크롤
+            requestAnimationFrame(() => {
+                const first = tbody && tbody.querySelector('tr.bg-yellow-900\\/40');
+                if (first) first.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            });
+        },
+    };
 })();

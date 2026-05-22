@@ -117,3 +117,40 @@ class TestParseTsvLine:
         assert frame is not None
         assert frame.ta == ""
         assert frame.ip_src == ""
+
+    def test_all_eight_debug_fields_populated(self):
+        # 27 fields incl. wlan.fixed.reason_code at cols[26].
+        # 디버그 뷰 frame_row의 8개 핵심 필드가 모두 채워지는지 확인:
+        # number, timestamp, subtype, retry, mcs, rssi, reason_code, seq
+        fields = [
+            "42",                 # 0 frame.number
+            "1000.5",             # 1 frame.time_epoch
+            "Jan 1 00:00:00.500", # 2 frame.time
+            "1",                  # 3 wlan.fc.retry
+            "0x000c",             # 4 wlan.fc.type_subtype (DeAuth = 12)
+            "802.11",             # 5 _ws.col.Protocol
+            "120",                # 6 frame.len
+            "7",                  # 7 radiotap.mcs.index
+            "-55",                # 8 radiotap.dbm_antsignal
+            "aa:bb:cc:dd:ee:01",  # 9 wlan.ta
+            "aa:bb:cc:dd:ee:02",  # 10 wlan.ra
+            "aa:bb:cc:dd:ee:03",  # 11 wlan.bssid
+            "", "",               # 12-13 ip.src/dst
+            "", "",               # 14-15 icmp.type/arp.opcode
+            "", "",               # 16-17 tcp.len/flags
+            "1234",               # 18 wlan.seq
+            "",                   # 19 icmp.seq
+            "", "", "", "",       # 20-23 wlan_radio MCS variants / HE
+            "", "",               # 24-25 data_rate / icmp.ident
+            "7",                  # 26 wlan.fixed.reason_code
+        ]
+        frame = parse_tsv_line("\t".join(fields))
+        assert frame is not None
+        assert frame.number == 42
+        assert frame.timestamp == "Jan 1 00:00:00.500"
+        assert frame.subtype == "12"  # 0x000c = 12
+        assert frame.retry is True
+        assert frame.mcs == "7"
+        assert frame.rssi == "-55"
+        assert frame.reason_code == "7"
+        assert frame.seq == "1234"

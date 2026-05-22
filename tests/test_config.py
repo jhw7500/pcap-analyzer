@@ -1,7 +1,5 @@
 """config 모듈 테스트."""
-import json
 import os
-import tempfile
 from unittest import mock
 
 import config

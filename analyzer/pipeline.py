@@ -16,6 +16,7 @@ from .core.modules import (
 from .web.delay_analysis import analyze_delays
 from .web.anomaly_frames import detect_anomalies
 from .web.signal_cliff import analyze_signal_cliffs
+from .web.evidence import build_debug_block
 from .web.structured import (
     PING_MATCH_WINDOW_SEC,
     _structured_overview,
@@ -174,7 +175,10 @@ def run_analysis(
     structured["signal_cliffs"] = analyze_signal_cliffs(structured["signal"])
 
     _progress("종합 진단 생성 중...", 99)
-    structured["diagnosis"] = _structured_diagnosis(structured)
+    structured["diagnosis"] = _structured_diagnosis(structured, frames, index)
+
+    # 디버그 타임라인용 증거 블록 (공유 시간축 + 다운샘플 시계열 + 근거 프레임)
+    structured["debug"] = build_debug_block(structured, frames, index)
 
     # 텍스트 리포트 (호환용)
     text_report = []

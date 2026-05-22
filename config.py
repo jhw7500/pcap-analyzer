@@ -1,8 +1,10 @@
 """설정 관리 — JSON 파일 + 환경변수 폴백."""
 import json
 import os
+import platform
 import shutil
 from pathlib import Path
+from typing import Optional
 
 CONFIG_PATH = Path(__file__).parent / "config.local.json"
 DATA_DIR = Path(__file__).parent / "data" / "analyses"
@@ -40,9 +42,6 @@ def set_value(key: str, value: str) -> None:
 def get_all() -> dict:
     return _load_file()
 
-
-import platform
-from typing import Optional
 
 # Windows에서 Wireshark 기본 설치 경로
 _WIN_TSHARK_PATHS = [
