@@ -114,6 +114,10 @@ tests/        pytest (fixtures/ 포함)
 
 자세한 내부 구조는 각 디렉토리의 `AGENTS.md` 참조.
 
+## 기여
+
+커밋 메시지는 Conventional Commits 규약을 따른다 (`.github/commitlint.config.mjs` 참조).
+
 ## 라이선스
 
 내부 도구. 외부 배포는 별도 협의.
