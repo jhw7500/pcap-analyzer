@@ -239,6 +239,26 @@ class TestCorrelationsInPrompt:
         assert "Valid1" in prompt and "Valid2" in prompt
         assert "stale-string-not-a-dict" not in prompt
 
+    def test_cap_applied_after_non_dict_filter(self):
+        """`[:5]` cap은 non-dict 필터 후 적용 — stale 항목 때문에 valid 5건이
+        4건으로 줄어드는 silent loss 방지. 정확히 5개 valid가 렌더돼야."""
+        mixed = [
+            "stale1",
+            "stale2",
+            *[
+                {"title": f"V{i}", "confidence": 0.5, "sta_name": "STA",
+                 "time_window": {"start_epoch": i*10, "end_epoch": i*10+5},
+                 "frame_refs": [i], "signals": [{"type": "high_retry"}],
+                 "explanation": "x"}
+                for i in range(1, 8)  # 7 dict, total 9 items
+            ],
+        ]
+        prompt = build_review_prompt(self._structured(mixed))
+        # raw cap 정책이면 V1-V3만 렌더, filter-first면 V1-V5
+        assert "V1" in prompt and "V5" in prompt
+        assert "V6" not in prompt  # cap에 의해 자름
+        assert "V3" in prompt  # 이전 버그였다면 V3까지만 → 검증
+
     def test_c_numbering_has_no_gap_when_non_dict_items_present(self):
         """non-dict 항목이 list 첫 위치에 있어도 C-numbering은 C1부터 시작.
 

@@ -254,14 +254,12 @@ def _build_diagnosis_section(diagnosis: Any) -> list:
             "confidence는 distinct 신호 수와 윈도우 겹침으로 산출(룰 기반, "
             "사용자 환경 가정 없음)."
         )
-        # C-numbering은 렌더된 항목 수 기준 — non-dict가 섞여 skip되면 enumerate
-        # 위치 인덱스로 매기면 C1이 빠지는 갭이 발생해 LLM이 SYSTEM의 ### C{n}
-        # 답변 헤더와 짝짓기 어려워진다. 별도 rendered 카운터로 1, 2, 3, ... 연속.
-        rendered = 0
-        for c in correlations[:5]:
-            if not isinstance(c, dict):
-                continue
-            rendered += 1
+        # cap은 filter 후에 적용 — non-dict 항목을 먼저 거른 뒤 상위 5건만 렌더.
+        # raw [:5]를 먼저 자르면 [stale, stale, dict, dict, ...]에서 valid 항목이
+        # 5개 미만으로 줄어드는 silent loss가 발생한다. C-numbering은 enumerate
+        # start=1로 1, 2, 3, ... 연속 보장 (SYSTEM의 ### C{n} 답변 헤더와 짝).
+        valid_corrs = [c for c in correlations if isinstance(c, dict)][:5]
+        for rendered, c in enumerate(valid_corrs, start=1):
             try:
                 conf = float(c.get("confidence", 0))
             except (TypeError, ValueError):
@@ -363,9 +361,8 @@ def build_review_prompt(structured: dict) -> str:
     # 종합 결론(correlation)이 실제 있을 때만 항목 0을 emit — 없는 캡처에서는
     # 진단 요청에 죽은 지시문이 들어가 token만 소모하고 LLM이 헤더만 빈 채로
     # 출력하는 false-positive 위험도 있음. 진단 섹션의 gating과 동일하게 처리.
-    # diagnosis dict 검사는 _build_diagnosis_section이 이미 수행 — 여기서는 항목 0
-    # 활성화만을 위한 가벼운 .get만 사용해 중복 가드 surface를 줄인다.
-    diag_corrs = (diagnosis or {}).get("correlations") if hasattr(diagnosis, "get") else None
+    # diagnosis는 line 282에서 structured.get("diagnosis", {})로 항상 dict 보장.
+    diag_corrs = diagnosis.get("correlations")
     if diag_corrs and isinstance(diag_corrs, list):
         out.append(
             "0. **종합 결론(correlation)별 가설** — 위 종합 결론 섹션의 각 항목"
