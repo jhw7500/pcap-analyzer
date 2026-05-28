@@ -117,19 +117,13 @@ async def analysis_report_markdown(analysis_id: str):
     """분석 결과를 외부 공유용 마크다운으로 export.
 
     구성: 메타 + 건강도 + 종합 결론(correlations) + 단일 진단(issues) +
-    STA별 진단 + AI 가설. 표준 GFM이라 pandoc/typora/gstack 등으로
-    PDF·HTML 추가 변환 가능. 본 PR(단계 1)은 마크다운까지만 — PDF export는
-    후속 PR(Playwright headless).
+    STA별 진단 + AI 가설. 표준 GFM이라 pandoc/typora 등으로 PDF·HTML
+    추가 변환 가능.
     """
     result, error = _load_result_checked(analysis_id)
     if error is not None:
         return error
-    # `python -O` 플래그에서 assert가 stripped될 위험을 피해 명시적 가드.
-    # 기존 endpoint들의 assert 패턴은 본 PR 범위 외라 그대로 둠.
-    if result is None:
-        return JSONResponse(
-            error_payload(ErrorCode.ANALYSIS_NOT_FOUND), status_code=404
-        )
+    assert result is not None
     md = build_report_markdown(result)
     safe_id = "".join(c for c in analysis_id if c.isalnum() or c in "_-")[:64] or "analysis"
     return PlainTextResponse(

@@ -314,3 +314,47 @@ def test_issues_table_strips_newlines_in_cells():
     assert "line1\nline2" not in md
     assert "line1 line2" in md
     assert "do1\r" not in md and "do2" in md
+
+
+def test_issues_table_sanitises_severity_and_category():
+    """severity/category에 pipe/newline이 와도 표 layout 무결성 유지."""
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {"issues": [{
+            "severity": "hi|gh",
+            "category": "Re\ntry",
+            "msg": "ok", "action": "do",
+        }]},
+    }))
+    assert "hi\\|gh" in md
+    assert "Re try" in md
+    assert "Re\ntry" not in md
+
+
+def test_issues_action_falls_back_to_recommendation_field():
+    """action 누락 시 recommendation 필드를 fallback으로 사용."""
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {"issues": [{
+            "severity": "high", "category": "X",
+            "msg": "문제 메시지",
+            "recommendation": "조치 권고만 있는 경우",
+        }]},
+    }))
+    assert "조치 권고만 있는 경우" in md
+
+
+# ── backtick injection 방어 (claude low) ──────────────────────────────────
+
+def test_pcap_name_backtick_does_not_break_code_span():
+    md = build_report_markdown(_result(pcap_name="bad`name.pcap"))
+    assert "`badname.pcap`" in md
+    assert "bad`name.pcap" not in md
+
+
+def test_sta_mac_backtick_sanitised():
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {"sta_diags": [{
+            "name": "STA1", "mac": "AA:`evil:01", "score": 70,
+        }]},
+    }))
+    assert "AA:`evil:01" not in md
+    assert "AA:evil:01" in md
