@@ -294,6 +294,29 @@ class TestCorrelationsInPrompt:
         # confidence는 0.00으로 fallback
         assert "conf=0.00" in prompt
 
+    def test_build_review_prompt_handles_none_diagnosis(self):
+        """structured = {'diagnosis': None}에서도 AttributeError 없이 진행.
+
+        dict.get(k, default)는 키가 있고 value가 None이면 default를 무시하고
+        None을 반환하므로 `or {}` 폴백이 필요. 이 보호가 없으면 line 332에서
+        diagnosis.get('correlations') 호출이 AttributeError 발생.
+        """
+        structured = {
+            "overview": {"total_frames": 100, "duration_sec": 10, "retry_pct": 0,
+                         "devices": []},
+            "ping": {"pairs": [], "losses": []},
+            "roaming": {"sequences": []},
+            "signal": {"stas": {}},
+            "delay_zones": {"delay_zones": []},
+            "anomaly_frames": {"anomalies": []},
+            "diagnosis": None,  # ← 외부 캐시/직렬화 라운드트립 후 발생 가능
+        }
+        prompt = build_review_prompt(structured)  # AttributeError 없이 완료해야
+        assert "분석 개요" in prompt
+        # 종합 결론 섹션과 item 0은 None diagnosis라 emit 안 됨
+        assert "종합 결론(다중 신호 결합" not in prompt
+        assert "종합 결론(correlation)별 가설" not in prompt
+
     def test_correlation_with_non_dict_time_window_does_not_crash(self):
         """time_window가 dict 아닌 경우(예: 잘못된 캐시) AttributeError 없이 진행."""
         bad = [{

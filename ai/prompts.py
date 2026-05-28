@@ -329,7 +329,9 @@ def build_review_prompt(structured: dict) -> str:
     delays = structured.get("delay_zones", {})
     anomalies = structured.get("anomaly_frames", {})
     cliffs = structured.get("signal_cliffs", {})
-    diagnosis = structured.get("diagnosis", {})
+    # `or {}`는 키가 있고 value가 None인 케이스 방어 — dict.get(k, default)는 키
+    # 존재 시 default를 무시하므로 {"diagnosis": None} 입력에서 None을 반환한다.
+    diagnosis = structured.get("diagnosis", {}) or {}
 
     out = []
     out.append("## 분석 개요")
