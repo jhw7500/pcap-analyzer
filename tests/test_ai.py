@@ -104,6 +104,14 @@ class TestSystemPrompt:
         assert "대안 해석" in SYSTEM_PROMPT
         assert "추가 검증" in SYSTEM_PROMPT
 
+    def test_system_prompt_conf_format_matches_user_prompt(self):
+        """SYSTEM의 conf 표기는 user prompt 헤더(`conf=...`)와 일치한다.
+
+        formatting 불일치(conf= vs conf )는 LLM이 답변 헤더를 user 측 형식과
+        다르게 만들 가능성을 키운다.
+        """
+        assert "conf={confidence}" in SYSTEM_PROMPT
+
     def test_system_prompt_warns_against_chipset_assumption(self):
         """88Q9098도 사용자 설정으로 동작이 바뀌므로 단일 칩셋 가정을 피하라는 가이드 필수."""
         assert "사용자 설정" in SYSTEM_PROMPT or "사용자 측 설정" in SYSTEM_PROMPT
@@ -230,6 +238,28 @@ class TestCorrelationsInPrompt:
         prompt = build_review_prompt(self._structured(mixed))
         assert "Valid1" in prompt and "Valid2" in prompt
         assert "stale-string-not-a-dict" not in prompt
+
+    def test_c_numbering_has_no_gap_when_non_dict_items_present(self):
+        """non-dict 항목이 list 첫 위치에 있어도 C-numbering은 C1부터 시작.
+
+        enumerate 위치 인덱스로 매기던 이전 버전은 [str, dict]에서 C2부터 시작해
+        SYSTEM의 ### C{n} 답변 형식과 짝짓기 어려웠다. rendered counter로 갭 없음.
+        """
+        mixed = [
+            "stale-leading",
+            {"title": "FirstValid", "confidence": 0.8, "sta_name": "STA",
+             "time_window": {"start_epoch": 0, "end_epoch": 5},
+             "frame_refs": [1], "signals": [{"type": "high_retry"}],
+             "explanation": "x"},
+            {"title": "SecondValid", "confidence": 0.7, "sta_name": "STA",
+             "time_window": {"start_epoch": 10, "end_epoch": 15},
+             "frame_refs": [2], "signals": [{"type": "weak_rssi"}],
+             "explanation": "y"},
+        ]
+        prompt = build_review_prompt(self._structured(mixed))
+        assert "C1: FirstValid" in prompt
+        assert "C2: SecondValid" in prompt
+        assert "C3:" not in prompt
 
     def test_correlation_with_non_numeric_confidence_does_not_crash(self):
         """confidence가 문자열/None이어도 prompt 생성이 ValueError 없이 진행된다."""

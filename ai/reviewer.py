@@ -24,7 +24,7 @@ SYSTEM_PROMPT = (
     "## 종합 결론(correlation) 응답 형식\n"
     "USER 프롬프트에 `### 종합 결론(다중 신호 결합...)` 섹션이 있으면, 각 항목\n"
     "(`#### C1`, `#### C2` ...)에 대해 아래 헤더 형식으로 답하세요:\n\n"
-    "### C{n}: {title} (conf {confidence})\n"
+    "### C{n}: {title} (conf={confidence})\n"
     "- **가능한 가설**: 결합 신호 패턴에서 추정되는 원인 1~2가지. 단정 X, 측정치 인용 O.\n"
     "- **대안 해석**: 이 패턴이 사용자 측 설정(bgscan threshold, mlan/mwifiex 파라미터,\n"
     "  wpa_supplicant 옵션 등)이나 환경(혼잡, 간섭) 변화로 발생했을 가능성.\n"
