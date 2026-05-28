@@ -545,10 +545,7 @@
         const retryMax = retryPts.reduce((m, p) => Math.max(m, p.retry_pct || 0), 0);
         const lossMax = pingPts.reduce((m, p) => Math.max(m, p.loss_pct || 0), 0);
 
-        // 빈 panel 자동 collapse — 데이터가 0인 metric의 subplot이 빈 공간을 차지하지
-        // 않도록 활성 panel에만 도메인을 분배. 메인 차트의 applyPanelLayout과 동일 패턴
-        // (visible:false + 작은 domain). trace는 이미 panel 활성 시에만 push되므로
-        // 비활성 yaxis로 trace가 들어가지 않는다.
+        // 빈 panel 자동 collapse — 활성 panel만 도메인 분배 (메인 applyPanelLayout 패턴).
         const panelSpecs = [
             { xaxis: 'xaxis',  yaxis: 'yaxis',  yAnchor: 'y',  has: rssiPts.length > 0,
               yspec: { title: 'RSSI (dBm)' } },
@@ -556,13 +553,23 @@
               yspec: { title: 'Retry %', range: [0, Math.max(10, retryMax * 1.1)] } },
             { xaxis: 'xaxis3', yaxis: 'yaxis3', yAnchor: 'y3', has: pingPts.length > 0,
               yspec: { title: 'Loss %',  range: [0, Math.max(10, lossMax * 1.1)] } },
-            { xaxis: 'xaxis4', yaxis: 'yaxis4', yAnchor: 'y4', has: roamingPts.length > 0,
+            // roaming panel은 auth/assoc trace 둘 다 비면 라벨만 떠 있는 빈 띠가 되므로
+            // 실제 trace 생성 조건(roamTrace)과 동일하게 kind 필터로 has 판정.
+            { xaxis: 'xaxis4', yaxis: 'yaxis4', yAnchor: 'y4',
+              has: roamingPts.some(p => p.kind === 'auth' || p.kind === 'assoc'),
               yspec: { title: 'Roam', showticklabels: false, range: [0.4, 2.6] } },
         ];
         const activePanels = panelSpecs.filter(p => p.has);
         const N = activePanels.length;
         const gap = 0.04;
-        const each = N > 0 ? (1 - gap * Math.max(0, N - 1)) / N : 1;
+        const each = N > 0 ? (1 - gap * (N - 1)) / N : 1;
+
+        // master x-axis = 첫 번째 활성 panel의 xaxis. 다른 활성 panel은 이 master를
+        // matches로 참조한다. RSSI(첫 spec)가 비활성이면 xaxis가 visible:false라
+        // matches:'x' 고정은 hidden 축 참조로 zoom/팬 동기화가 깨진다 — gemini high.
+        const masterX = N > 0
+            ? (activePanels[0].xaxis === 'xaxis' ? 'x' : activePanels[0].xaxis.replace('xaxis', 'x'))
+            : 'x';
 
         const dLayout = {
             paper_bgcolor: 'rgba(0,0,0,0)',
@@ -577,7 +584,6 @@
             margin: { t: 30, r: 20, b: 30, l: 60 },
         };
 
-        // 활성 panel: top→bottom 순서로 도메인 분배. 마지막 활성 panel만 시간축 라벨 노출.
         let top = 1.0;
         activePanels.forEach((p, idx) => {
             const bot = top - each;
@@ -589,7 +595,7 @@
                 gridcolor: GRID,
                 ...SPIKE,
                 ...HOVER_X,
-                ...(p.xaxis !== 'xaxis' ? { matches: 'x' } : {}),
+                ...(p.xaxis !== activePanels[0].xaxis ? { matches: masterX } : {}),
             };
             dLayout[p.yaxis] = {
                 ...p.yspec,
@@ -599,13 +605,9 @@
             top = bot - gap;
         });
 
-        // 비활성 panel: visible:false + 작은 domain. trace가 어차피 안 들어가지만
-        // layout 키 누락은 Plotly 경고를 일으킬 수 있어 명시적으로 등록.
+        // 비활성 panel: visible:false + 작은 domain. matches 지정 없음(보이지 않으므로).
         panelSpecs.filter(p => !p.has).forEach(p => {
-            dLayout[p.xaxis] = {
-                visible: false, domain: [0, 0.001],
-                ...(p.xaxis !== 'xaxis' ? { matches: 'x' } : {}),
-            };
+            dLayout[p.xaxis] = { visible: false, domain: [0, 0.001] };
             dLayout[p.yaxis] = { visible: false, domain: [0, 0.001] };
         });
         Plotly.newPlot(debugMiniEl, dTraces, dLayout, {
