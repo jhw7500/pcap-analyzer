@@ -240,6 +240,50 @@ def _build_diagnosis_section(diagnosis: Any) -> list:
                     if sd.get(k) is not None:
                         parts.append(f"{k}={sd[k]}")
                 lines.append(f"- {sta_name}: {', '.join(parts)}")
+
+    # 종합 결론(correlation) — 단일 이슈들이 같은 시간 구간에 동시 관찰돼
+    # build_correlations가 묶은 결합 결론. AI가 이 결합 컨텍스트를 보고
+    # 사용자 환경(설정·튜닝·간섭)을 가설로 추정할 수 있도록 명시적으로 노출.
+    correlations = diagnosis.get("correlations") or []
+    if correlations and isinstance(correlations, list):
+        lines.append("")
+        lines.append(
+            f"### 종합 결론(다중 신호 결합, {len(correlations)}건)"
+        )
+        lines.append(
+            "위 단일 이슈들이 같은 STA·같은 시간 구간에 동시 관찰돼 결합된 결론. "
+            "confidence는 distinct 신호 수와 윈도우 겹침으로 산출(룰 기반, "
+            "사용자 환경 가정 없음)."
+        )
+        for ci, c in enumerate(correlations[:5]):
+            if not isinstance(c, dict):
+                continue
+            conf = c.get("confidence", 0)
+            title = c.get("title", "?")
+            sta = c.get("sta_name") or c.get("sta_mac") or "?"
+            sigs = ", ".join(
+                s.get("type", "?")
+                for s in (c.get("signals") or [])
+                if isinstance(s, dict)
+            )
+            tw = c.get("time_window") or {}
+            dur_str = ""
+            try:
+                s_ep = float(tw.get("start_epoch"))
+                e_ep = float(tw.get("end_epoch"))
+                dur_str = f", duration={e_ep - s_ep:.1f}s"
+            except (TypeError, ValueError):
+                pass
+            n_evidence = len(c.get("frame_refs") or [])
+            explanation = (c.get("explanation") or "").strip()
+            lines.append("")
+            lines.append(
+                f"#### C{ci+1}: {title} (conf={conf:.2f}, STA={sta}{dur_str})"
+            )
+            lines.append(f"- 결합 신호: {sigs}")
+            lines.append(f"- 증거 프레임: {n_evidence}건")
+            if explanation:
+                lines.append(f"- 단일 결론 요약: {explanation}")
     return lines
 
 
@@ -308,6 +352,13 @@ def build_review_prompt(structured: dict) -> str:
         "위 자동차 WiFi(88Q9098 칩셋) 캡처 분석 결과를 검토하고 다음을 제시하세요:"
     )
     out.append("")
+    # 종합 결론(correlation)이 존재할 때만 항목 0을 활성화하라고 명시 — LLM이
+    # correlation 없는 캡처에서 헤더만 빈 채로 출력하는 false-positive를 피한다.
+    out.append(
+        "0. **종합 결론(correlation)별 가설** — 위에 종합 결론 섹션이 있으면 "
+        "각각에 대해 SYSTEM 규칙의 `### C{n}: ...` 헤더 형식으로 (가능한 가설 / "
+        "대안 해석 / 추가 검증)을 작성하세요. correlation이 0건이면 이 항목 생략."
+    )
     out.append("1. **가장 심각한 문제 3개** (우선순위 순) — 각각 근거 데이터를 인용")
     out.append("2. **원인 추정** — PHY/MAC/네트워크 어느 계층 문제인지, 측정치 기반으로")
     out.append(

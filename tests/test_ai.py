@@ -96,3 +96,94 @@ class TestSystemPrompt:
     def test_system_prompt_content(self):
         assert "WiFi" in SYSTEM_PROMPT or "802.11" in SYSTEM_PROMPT
         assert "한국어" in SYSTEM_PROMPT
+
+    def test_system_prompt_has_correlation_format_guidance(self):
+        """SYSTEM_PROMPT는 종합 결론(correlation) 응답 형식을 정의해야 한다."""
+        assert "C{n}" in SYSTEM_PROMPT
+        assert "가능한 가설" in SYSTEM_PROMPT
+        assert "대안 해석" in SYSTEM_PROMPT
+        assert "추가 검증" in SYSTEM_PROMPT
+
+    def test_system_prompt_warns_against_chipset_assumption(self):
+        """88Q9098도 사용자 설정으로 동작이 바뀌므로 단일 칩셋 가정을 피하라는 가이드 필수."""
+        assert "사용자 설정" in SYSTEM_PROMPT or "사용자 측 설정" in SYSTEM_PROMPT
+
+
+class TestCorrelationsInPrompt:
+    """진단 결과의 correlations 필드가 prompt에 명시적으로 포함되는지 검증.
+
+    PR #5에서 추가된 다중 신호 결합 결론을 AI가 활용하도록 _build_diagnosis_section
+    이 correlations 섹션을 노출한다.
+    """
+    def _structured(self, correlations):
+        return {
+            "overview": {"total_frames": 100, "duration_sec": 10, "retry_pct": 5,
+                         "devices": []},
+            "ping": {"pairs": [], "losses": []},
+            "roaming": {"sequences": []},
+            "signal": {"stas": {}},
+            "delay_zones": {"delay_zones": []},
+            "anomaly_frames": {"anomalies": []},
+            "diagnosis": {"correlations": correlations} if correlations is not None else {},
+        }
+
+    def test_correlations_section_included_when_present(self):
+        correlations = [{
+            "title": "약전계로 인한 multi-symptom (느린 로밍 동반)",
+            "confidence": 0.87,
+            "sta_name": "STA1", "sta_mac": "AA:BB:CC:DD:EE:01",
+            "time_window": {"start_epoch": 1000.0, "end_epoch": 1010.0},
+            "frame_refs": [1, 2, 3, 4, 5],
+            "signals": [
+                {"type": "weak_rssi"}, {"type": "high_retry"},
+                {"type": "slow_roaming"},
+            ],
+            "explanation": "RSSI -65dBm · Retry 27% · 느린 로밍 3회",
+        }]
+        prompt = build_review_prompt(self._structured(correlations))
+        assert "종합 결론" in prompt
+        assert "C1:" in prompt
+        assert "약전계로 인한 multi-symptom" in prompt
+        assert "0.87" in prompt
+        assert "STA1" in prompt
+        assert "weak_rssi" in prompt
+        assert "high_retry" in prompt
+        assert "duration=10.0s" in prompt
+        assert "5건" in prompt  # frame_refs 개수
+        assert "RSSI -65dBm" in prompt  # explanation
+
+    def test_correlations_section_omitted_when_empty(self):
+        """correlations가 빈 리스트면 종합 결론 섹션 자체가 prompt에 없어야."""
+        prompt = build_review_prompt(self._structured([]))
+        assert "종합 결론(다중 신호 결합" not in prompt
+
+    def test_correlations_section_omitted_when_missing(self):
+        """correlations 키 자체가 없어도 (구버전 데이터) 에러 없이 처리."""
+        structured = self._structured(None)
+        prompt = build_review_prompt(structured)
+        assert "종합 결론(다중 신호 결합" not in prompt
+
+    def test_multiple_correlations_listed_in_order(self):
+        correlations = [
+            {"title": "혼잡으로 인한 로밍 영향", "confidence": 0.9,
+             "sta_name": "STA1", "sta_mac": "AA",
+             "time_window": {"start_epoch": 100, "end_epoch": 110},
+             "frame_refs": [1], "signals": [{"type": "high_retry"}],
+             "explanation": "ex1"},
+            {"title": "약전계로 인한 retry 폭증", "confidence": 0.65,
+             "sta_name": "STA2", "sta_mac": "BB",
+             "time_window": {"start_epoch": 200, "end_epoch": 210},
+             "frame_refs": [2], "signals": [{"type": "weak_rssi"}],
+             "explanation": "ex2"},
+        ]
+        prompt = build_review_prompt(self._structured(correlations))
+        assert "C1:" in prompt and "C2:" in prompt
+        # C1이 C2보다 먼저 등장하는 순서 보장(높은 confidence 우선 — caller가 정렬해서 전달)
+        assert prompt.index("C1:") < prompt.index("C2:")
+
+    def test_review_request_includes_correlation_item(self):
+        """진단 요청 항목 0번에 correlation별 가설 작성 지시가 포함돼야 한다."""
+        prompt = build_review_prompt(self._structured([]))
+        assert "0." in prompt
+        assert "종합 결론(correlation)별 가설" in prompt
+        assert "C{n}" in prompt
