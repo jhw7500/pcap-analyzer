@@ -920,6 +920,67 @@
     const compScores = diag.component_scores || {};
     const stadiags = diag.sta_diags || [];
     const issues = diag.issues || [];
+    const correlations = diag.correlations || [];
+
+    // 종합 진단 (다중 신호 결합 결론) — 단일 결론은 그대로 두고 추가 표시
+    const SIGNAL_TYPE_LABEL = {
+        weak_rssi: '약신호',
+        high_retry: 'retry 폭증',
+        slow_roaming: '슬로우 로밍',
+        frequent_roaming: '잦은 로밍',
+        high_loss: 'Ping Loss',
+        delay_zone: '지연 구간',
+        anomaly: '이상 프레임',
+    };
+    const corrCountEl = document.getElementById('correlations-count');
+    if (corrCountEl) {
+        corrCountEl.textContent = correlations.length
+            ? `${correlations.length}건`
+            : '결합 결론 없음';
+    }
+    const corrListEl = document.getElementById('correlations-list');
+    if (corrListEl) {
+        if (correlations.length === 0) {
+            corrListEl.innerHTML =
+                '<div class="text-gray-500 text-xs text-center py-3">' +
+                '단일 결론이 시간적으로 결합되지 않았습니다. 아래 단일 결론을 독립적으로 확인하세요.' +
+                '</div>';
+        } else {
+            corrListEl.innerHTML = correlations.map(c => {
+                const confPct = Math.round((c.confidence || 0) * 100);
+                const confColor = confPct >= 80 ? 'bg-red-700'
+                    : confPct >= 60 ? 'bg-yellow-700' : 'bg-blue-700';
+                const confBadge = `<span class="${confColor} text-white px-2 py-0.5 rounded text-xs font-bold tabular-nums" title="결합 신호 수와 시간 윈도우 겹침으로 산출한 신뢰도">${confPct}% conf</span>`;
+                const sigChips = (c.signals || []).map(s => {
+                    const label = SIGNAL_TYPE_LABEL[s.type] || s.type;
+                    return `<span class="inline-block bg-purple-900/60 border border-purple-700 text-purple-200 text-xs px-2 py-0.5 rounded">${label}</span>`;
+                }).join(' ');
+                const refs = c.frame_refs || [];
+                const tw = c.time_window;
+                const evidenceBtn = (refs.length && tw)
+                    ? `<button type="button"
+                            class="evidence-jump ml-auto text-xs px-2 py-0.5 rounded bg-purple-700 hover:bg-purple-600 text-white"
+                            data-start="${tw.start_epoch}" data-end="${tw.end_epoch}"
+                            data-refs="${refs.join(',')}"
+                            title="결합된 모든 신호의 증거 프레임 ${refs.length}건">\u{1F50D} 증거 보기 (${refs.length})</button>`
+                    : '';
+                const staLabel = c.sta_name || c.sta_mac || '?';
+                return `<div class="bg-slate-800 rounded-lg p-3 border border-purple-800/50">
+                    <div class="flex items-center gap-2 mb-2 flex-wrap">
+                        ${confBadge}
+                        <span class="text-sm font-medium text-purple-100">${c.title}</span>
+                        <span class="text-xs text-gray-500">STA ${staLabel}</span>
+                        ${evidenceBtn}
+                    </div>
+                    <div class="flex items-center gap-1.5 flex-wrap text-xs ml-1 mb-1">
+                        <span class="text-gray-500">결합 신호:</span>
+                        ${sigChips}
+                    </div>
+                    <div class="text-xs text-gray-400 ml-1">${c.explanation || ''}</div>
+                </div>`;
+            }).join('');
+        }
+    }
 
     // 원본 텍스트 (접이식)
     const diagEl = document.getElementById('diagnosis-text');
