@@ -665,7 +665,7 @@
             // 메인이 autorange면 미니차트도 같이 풀어준다 (양방향 동기화).
             if (debugMiniEl && debugMiniEl.data) {
                 Plotly.relayout(debugMiniEl, { 'xaxis.autorange': true })
-                    .catch(e => console.debug('[debug-mini]', e));
+                    .catch(err => console.debug('[debug-mini]', err));
             }
             return;
         } else {
@@ -683,7 +683,7 @@
         // (applyRangeToTimeline 경로와는 별개 — 이 핸들러는 메인→미니 단방향 동기화 담당)
         if (debugMiniEl && debugMiniEl.data) {
             Plotly.relayout(debugMiniEl, { 'xaxis.range': [r0, r1] })
-                .catch(e => console.debug('[debug-mini]', e));
+                .catch(err => console.debug('[debug-mini]', err));
         }
     });
 
@@ -699,7 +699,7 @@
         // 디버그 미니차트도 같은 범위로 줌 (Plotly.newPlot 호출됐는지 확인)
         if (debugMiniEl && debugMiniEl.data) {
             Plotly.relayout(debugMiniEl, { 'xaxis.range': range })
-                .catch(e => console.debug('[debug-mini]', e));
+                .catch(err => console.debug('[debug-mini]', err));
         }
         renderFrameTable(s, e);
     }
@@ -722,7 +722,7 @@
                 .finally(() => { _syncingFromTable = false; });
             if (debugMiniEl && debugMiniEl.data) {
                 Plotly.relayout(debugMiniEl, { 'xaxis.autorange': true })
-                    .catch(e => console.debug('[debug-mini]', e));
+                    .catch(err => console.debug('[debug-mini]', err));
             }
             renderFrameTable(null, null);
         });
