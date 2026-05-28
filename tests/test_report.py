@@ -3,7 +3,11 @@
 build_report_markdown은 외부 공유용 산출물의 안정성과 표준 GFM 사양 준수가
 중요하므로 섹션별 누락·중복·오류 케이스를 명시적으로 핀.
 """
-from analyzer.web.report import build_report_markdown, SIGNAL_TYPE_LABEL
+from analyzer.web.report import (
+    build_report_markdown,
+    SIGNAL_TYPE_LABEL,
+    _format_epoch,
+)
 
 
 def _result(**kw):
@@ -219,3 +223,94 @@ def test_report_ends_with_footer_note():
     md = build_report_markdown(_result())
     assert "pcap-analyzer가 생성" in md
     assert "pandoc" in md  # 변환 가이드 한 줄
+
+
+# ── _format_epoch ───────────────────────────────────────────────────────────
+
+def test_format_epoch_uses_utc_for_determinism():
+    """UTC 고정 — 호스트 timezone에 영향받지 않아 같은 분석이 어디서나 같은 출력."""
+    out = _format_epoch(1700000000)  # 2023-11-14 22:13:20 UTC
+    assert "UTC" in out
+    assert "2023-11-14 22:13:20" in out
+
+
+def test_format_epoch_handles_overflow_without_crashing():
+    """매우 큰 epoch이 OverflowError를 일으켜도 빈 문자열 fallback."""
+    huge = 10**18  # year 31e10+ — OverflowError 영역
+    assert _format_epoch(huge) == ""
+
+
+def test_format_epoch_handles_invalid_input():
+    for bad in (None, "not-a-number", [], {}):
+        assert _format_epoch(bad) == ""
+
+
+# ── isinstance 가드 (gemini medium) ────────────────────────────────────────
+
+def test_correlations_handles_non_list_signals_field():
+    """signals가 list 아닌 비정상 입력에서도 crash 없이 라인 생략."""
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {"correlations": [{
+            "title": "X", "confidence": 0.5, "sta_name": "S",
+            "signals": "not-a-list",  # ← 잘못된 type
+            "frame_refs": [1],
+            "explanation": "y",
+        }]},
+    }))
+    assert "X" in md
+    assert "결합 신호:" not in md  # signals 라인 자체가 emit 안 됨
+
+
+def test_correlations_handles_non_list_frame_refs():
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {"correlations": [{
+            "title": "X", "confidence": 0.5, "sta_name": "S",
+            "signals": [{"type": "high_retry"}],
+            "frame_refs": "not-a-list",
+            "explanation": "y",
+        }]},
+    }))
+    assert "X" in md
+    assert "증거 프레임:" not in md
+
+
+def test_health_section_handles_non_dict_input():
+    """health/component_scores가 dict 아닌 비정상 입력에서도 crash 없이 누락."""
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {
+            "health": "not-a-dict",
+            "component_scores": "not-a-dict",
+        },
+    }))
+    # 둘 다 비dict라 섹션 자체가 누락
+    assert "## 네트워크 건강도" not in md
+
+
+def test_sta_diags_handles_non_dict_metrics_and_issues():
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {"sta_diags": [{
+            "name": "STA1", "mac": "AA", "score": 70,
+            "metrics": "not-a-dict",
+            "issues": "not-a-list",
+        }]},
+    }))
+    assert "### STA1" in md
+    assert "**70**/100" in md
+    # metrics/issues는 비정상이라 해당 라인 자체가 emit 안 됨 — crash 없음이 핵심
+    assert "메트릭:" not in md
+    assert "결론:" not in md
+
+
+# ── 표 셀 newline escape (gemini medium) ───────────────────────────────────
+
+def test_issues_table_strips_newlines_in_cells():
+    """표 셀 안 줄바꿈은 GFM 표 row를 두 row로 분할시키므로 공백으로 치환."""
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {"issues": [{
+            "severity": "high", "category": "X",
+            "msg": "line1\nline2", "action": "do1\r\ndo2",
+        }]},
+    }))
+    assert "line1\nline2" not in md
+    assert "line1 line2" in md
+    assert "do1\r" not in md and "do2" in md

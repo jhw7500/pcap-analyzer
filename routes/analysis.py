@@ -124,7 +124,12 @@ async def analysis_report_markdown(analysis_id: str):
     result, error = _load_result_checked(analysis_id)
     if error is not None:
         return error
-    assert result is not None
+    # `python -O` 플래그에서 assert가 stripped될 위험을 피해 명시적 가드.
+    # 기존 endpoint들의 assert 패턴은 본 PR 범위 외라 그대로 둠.
+    if result is None:
+        return JSONResponse(
+            error_payload(ErrorCode.ANALYSIS_NOT_FOUND), status_code=404
+        )
     md = build_report_markdown(result)
     safe_id = "".join(c for c in analysis_id if c.isalnum() or c in "_-")[:64] or "analysis"
     return PlainTextResponse(
