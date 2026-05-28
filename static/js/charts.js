@@ -920,6 +920,80 @@
     const compScores = diag.component_scores || {};
     const stadiags = diag.sta_diags || [];
     const issues = diag.issues || [];
+    const correlations = diag.correlations || [];
+
+    // 종합 진단 (다중 신호 결합 결론) — 단일 결론은 그대로 두고 추가 표시.
+    //
+    // 키 동기화: analyzer/core/modules/causality.py 의 SIG_* 상수와
+    // 1:1 매핑돼야 한다. 새 signal_type을 추가할 때 이 맵을 함께 갱신하지
+    // 않으면 미등록 key는 raw 영문 키(escapeHtml 처리)로 fallback 노출돼
+    // UI에서 어색하게 보인다. (PR #5 검토: claude info-level 권고)
+    const SIGNAL_TYPE_LABEL = {
+        weak_rssi: '약신호',
+        high_retry: 'retry 폭증',
+        slow_roaming: '슬로우 로밍',
+        frequent_roaming: '잦은 로밍',
+        high_loss: 'Ping Loss',
+        delay_zone: '지연 구간',
+        anomaly: '이상 프레임',
+    };
+    // pcap에서 파싱된 문자열(sta_name, title, explanation 등)을 innerHTML로
+    // 주입하기 전 HTML 특수문자 escape. 현재 분석 파이프라인에서는 안전한
+    // 값만 흘러오지만, 악의적 pcap이 만든 문자열이 들어와도 XSS로 번지지
+    // 않도록 boundary에서 방어. (gemini security-high 권고 반영)
+    const escapeHtml = (str) => String(str == null ? '' : str)
+        .replace(/[&<>"']/g, m => (
+            { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]
+        ));
+    const corrCountEl = document.getElementById('correlations-count');
+    if (corrCountEl) {
+        corrCountEl.textContent = correlations.length
+            ? `${correlations.length}건`
+            : '결합 결론 없음';
+    }
+    const corrListEl = document.getElementById('correlations-list');
+    if (corrListEl) {
+        if (correlations.length === 0) {
+            corrListEl.innerHTML =
+                '<div class="text-gray-500 text-xs text-center py-3">' +
+                '단일 결론이 시간적으로 결합되지 않았습니다. 아래 단일 결론을 독립적으로 확인하세요.' +
+                '</div>';
+        } else {
+            corrListEl.innerHTML = correlations.map(c => {
+                const confPct = Math.round((c.confidence || 0) * 100);
+                const confColor = confPct >= 80 ? 'bg-red-700'
+                    : confPct >= 60 ? 'bg-yellow-700' : 'bg-blue-700';
+                const confBadge = `<span class="${confColor} text-white px-2 py-0.5 rounded text-xs font-bold tabular-nums" title="결합 신호 수와 시간 윈도우 겹침으로 산출한 신뢰도">${confPct}% conf</span>`;
+                const sigChips = (c.signals || []).map(s => {
+                    const label = SIGNAL_TYPE_LABEL[s.type] || escapeHtml(s.type);
+                    return `<span class="inline-block bg-purple-900/60 border border-purple-700 text-purple-200 text-xs px-2 py-0.5 rounded">${label}</span>`;
+                }).join(' ');
+                const refs = c.frame_refs || [];
+                const tw = c.time_window;
+                const evidenceBtn = (refs.length && tw)
+                    ? `<button type="button"
+                            class="evidence-jump ml-auto text-xs px-2 py-0.5 rounded bg-purple-700 hover:bg-purple-600 text-white"
+                            data-start="${tw.start_epoch}" data-end="${tw.end_epoch}"
+                            data-refs="${refs.join(',')}"
+                            title="결합된 모든 신호의 증거 프레임 ${refs.length}건">\u{1F50D} 증거 보기 (${refs.length})</button>`
+                    : '';
+                const staLabel = escapeHtml(c.sta_name || c.sta_mac || '?');
+                return `<div class="bg-slate-800 rounded-lg p-3 border border-purple-800/50">
+                    <div class="flex items-center gap-2 mb-2 flex-wrap">
+                        ${confBadge}
+                        <span class="text-sm font-medium text-purple-100">${escapeHtml(c.title)}</span>
+                        <span class="text-xs text-gray-500">STA ${staLabel}</span>
+                        ${evidenceBtn}
+                    </div>
+                    <div class="flex items-center gap-1.5 flex-wrap text-xs ml-1 mb-1">
+                        <span class="text-gray-500">결합 신호:</span>
+                        ${sigChips}
+                    </div>
+                    <div class="text-xs text-gray-400 ml-1">${escapeHtml(c.explanation)}</div>
+                </div>`;
+            }).join('');
+        }
+    }
 
     // 원본 텍스트 (접이식)
     const diagEl = document.getElementById('diagnosis-text');

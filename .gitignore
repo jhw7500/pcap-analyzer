@@ -9,6 +9,9 @@ config.local.json
 !tests/fixtures/*.pcapng
 tmp/
 .omc/
+.venv/
+.ouroboros/
+.ouroboros_eval_artifact.md
 static/vendor/
 htmlcov/
 .coverage

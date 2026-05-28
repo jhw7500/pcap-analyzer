@@ -480,9 +480,13 @@ def _structured_diagnosis(
 
         issues = []
 
-        def _add_issue(issue, refs, window):
+        def _add_issue(issue, refs, window, signal_type=None):
             # 근거(frame_refs+time_window)를 댈 수 있을 때만 issue 채택.
+            # signal_type은 causality.build_correlations가 종합 결론을
+            # 만들 때 신호 분류 키로 사용한다(기존 소비자는 무시 가능).
             if ev._attach(issue, refs, window):
+                if signal_type:
+                    issue["signal_type"] = signal_type
                 issues.append(issue)
 
         if sta_retry > 25:
@@ -493,7 +497,7 @@ def _structured_diagnosis(
                     "msg": f"Retry율 {sta_retry}% (임계치 25% 초과)",
                     "action": "TX power 또는 안테나 확인, 로밍 임계값 조정",
                 },
-                refs, window,
+                refs, window, signal_type="high_retry",
             )
         elif sta_retry > 15:
             refs, window = ev.retry_bucket_evidence(mac, index)
@@ -503,7 +507,7 @@ def _structured_diagnosis(
                     "msg": f"Retry율 {sta_retry}%",
                     "action": "채널 혼잡도 확인",
                 },
-                refs, window,
+                refs, window, signal_type="high_retry",
             )
         if rssi_avg is not None and rssi_avg < -70:
             refs, window = ev.weak_rssi_evidence(mac, -70, frames, index)
@@ -513,7 +517,7 @@ def _structured_diagnosis(
                     "msg": f"RSSI 평균 {rssi_avg}dBm (약함)",
                     "action": "AP 위치 조정 또는 TX power 증가",
                 },
-                refs, window,
+                refs, window, signal_type="weak_rssi",
             )
         elif rssi_avg is not None and rssi_avg < -60:
             refs, window = ev.weak_rssi_evidence(mac, -60, frames, index)
@@ -523,7 +527,7 @@ def _structured_diagnosis(
                     "msg": f"RSSI 평균 {rssi_avg}dBm",
                     "action": "AP 커버리지 확인",
                 },
-                refs, window,
+                refs, window, signal_type="weak_rssi",
             )
         if len(sta_slow_roams) > 2:
             refs, window = ev.slow_roaming_evidence(roam_seqs, mac)
@@ -533,7 +537,7 @@ def _structured_diagnosis(
                     "msg": f"느린 로밍 {len(sta_slow_roams)}회 (>100ms)",
                     "action": "802.11r/k/v 설정 확인, 로밍 히스테리시스 조정",
                 },
-                refs, window,
+                refs, window, signal_type="slow_roaming",
             )
         elif len(sta_roams) > 10:
             refs, window = ev.roaming_evidence(roam_seqs, mac)
@@ -543,7 +547,7 @@ def _structured_diagnosis(
                     "msg": f"잦은 로밍 {len(sta_roams)}회",
                     "action": "로밍 트리거 RSSI 임계값 재설정",
                 },
-                refs, window,
+                refs, window, signal_type="frequent_roaming",
             )
 
         sta_diags.append(
@@ -570,9 +574,13 @@ def _structured_diagnosis(
 
     all_issues = []
 
-    def _add_net_issue(issue, refs, window):
-        # 네트워크 레벨 issue도 근거를 댈 수 있을 때만 채택.
+    def _add_net_issue(issue, refs, window, signal_type=None):
+        # 네트워크 레벨 issue도 근거를 댈 수 있을 때만 채택. signal_type은
+        # causality.build_correlations가 STA cluster에 cross-attach할 신호
+        # 종류를 식별하는 키로 사용한다(기존 소비자는 무시 가능).
         if ev._attach(issue, refs, window):
+            if signal_type:
+                issue["signal_type"] = signal_type
             all_issues.append(issue)
 
     if retry_pct > 15:
@@ -584,7 +592,7 @@ def _structured_diagnosis(
                 "msg": f"네트워크 전체 Retry율 {retry_pct}%",
                 "action": "채널 간섭 또는 AP 과부하 확인",
             },
-            refs, window,
+            refs, window, signal_type="high_retry",
         )
     if loss_pct > 5:
         refs, window = ev.ping_loss_evidence(ping_losses)
@@ -595,7 +603,7 @@ def _structured_diagnosis(
                 "msg": f"Ping Loss {loss_pct}%",
                 "action": "네트워크 안정성 점검, 로밍 구간 확인",
             },
-            refs, window,
+            refs, window, signal_type="high_loss",
         )
     if len(slow_roams) > 5:
         refs, window = ev.slow_roaming_evidence(roam_seqs)
@@ -606,12 +614,11 @@ def _structured_diagnosis(
                 "msg": f"느린 로밍 {len(slow_roams)}회",
                 "action": "802.11r Fast BSS Transition 활성화",
             },
-            refs, window,
+            refs, window, signal_type="slow_roaming",
         )
     anom_events = anomalies.get("anomalies", [])
     for a in anom_events:
         # 이상 프레임은 집계 카운트만 가지므로 같은 종류 프레임을 직접 근거로 소싱.
-        refs, window = ev.anomaly_evidence(a.get("type", ""), frames)
         _add_net_issue(
             {
                 "severity": a.get("severity", "medium"),
@@ -619,7 +626,8 @@ def _structured_diagnosis(
                 "msg": a.get("description", ""),
                 "action": a.get("recommendation", ""),
             },
-            refs, window,
+            *ev.anomaly_evidence(a.get("type", ""), frames),
+            signal_type="anomaly",
         )
     delay_zones = delays.get("delay_zones", [])
     if len(delay_zones) > 3:
@@ -644,7 +652,7 @@ def _structured_diagnosis(
                 "msg": f"지연 구간 {len(delay_zones)}건 탐지",
                 "action": "로밍/retry 상관관계 확인",
             },
-            dz_refs, dz_window,
+            dz_refs, dz_window, signal_type="delay_zone",
         )
     for sd in sta_diags:
         for issue in sd["issues"]:
@@ -663,7 +671,7 @@ def _structured_diagnosis(
     severity_order = {"high": 0, "medium": 1, "low": 2}
     all_issues.sort(key=lambda x: severity_order.get(x["severity"], 3))
 
-    return {
+    result = {
         "health": {"score": health_score, "grade": health_grade, "color": health_color},
         "component_scores": {
             "retry": round(retry_score),
@@ -682,3 +690,24 @@ def _structured_diagnosis(
         "sta_diags": sta_diags,
         "issues": all_issues,
     }
+    # 다중 신호 종합 결론(추가형) — 기존 issues/sta_diags는 그대로 두고
+    # 시간 동기 결합 결론만 새 키로 노출. 소비자가 모르면 그냥 무시한다.
+    # 함수 안에서 import: 모듈 top-level은 analyzer.core.modules → analyzer.web
+    # 순서로 evaluate되는데 causality는 analyzer.core.modules 아래에 있어
+    # 패키지 초기화 시점 순환 위험이 있는 위치. 함수 호출 시점 import로
+    # 측면 의존만 유지(런타임 비용 무시 가능). build_correlations가 어떤
+    # 이유로든 실패해도 핵심 진단(issues/sta_diags)은 그대로 반환되도록
+    # 빈 리스트 fallback으로 isolate.
+    try:
+        from analyzer.core.modules.causality import build_correlations
+        result["correlations"] = build_correlations(result)
+    except Exception as exc:
+        # 핵심 진단을 보호하기 위해 bare-except로 흡수하되, 무음 실패는 디버깅을
+        # 어렵게 만든다 — WARN 레벨로 traceback과 함께 남겨 회귀 발견 가능하게.
+        import logging
+        logging.getLogger(__name__).warning(
+            "build_correlations failed; correlations 빈 리스트로 fallback: %s",
+            exc, exc_info=True,
+        )
+        result["correlations"] = []
+    return result

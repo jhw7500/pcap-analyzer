@@ -380,6 +380,18 @@
             <div id="health-bars" class="space-y-3"></div>
         </div>
     </div>
+    <!-- 종합 진단 (다중 신호 결합 결론) — 단일 진단 카드와 별도로 시간 동기 결합 결론을 보여줌 -->
+    <details class="bg-slate-900 rounded-lg p-4 border border-purple-900/50 mb-4" id="correlations-panel" open>
+        <summary class="cursor-pointer flex items-center justify-between gap-3 flex-wrap">
+            <div>
+                <h3 class="text-sm font-semibold text-purple-300 mb-1">📊 종합 진단 <span class="text-gray-500 font-normal">(다중 신호 시간 동기 결합)</span></h3>
+                <p class="text-xs text-gray-500">같은 STA의 여러 단일 결론이 같은 시간 구간에 동시 관찰되면 종합 결론으로 묶어 confidence를 표시합니다. 단일 결론은 아래에 그대로 유지됩니다.</p>
+            </div>
+            <span id="correlations-count" class="text-xs text-gray-500 tabular-nums"></span>
+        </summary>
+        <div id="correlations-list" class="space-y-2 mt-3"></div>
+    </details>
+
     <!-- 문제점 우선순위 -->
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4">
         <h3 class="text-sm font-semibold text-gray-400 mb-3">문제점 및 조치 방안 (우선순위 순)</h3>
