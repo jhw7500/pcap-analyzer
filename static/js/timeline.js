@@ -434,9 +434,18 @@
     const debugSeries = debug.series || {};
     const debugMiniEl = document.getElementById('chart-debug-mini');
     const debugMetaEl = document.getElementById('debug-series-meta');
+    // sync 호출이 타겟할 master x-axis 키. buildDebugMini에서 활성 panel 첫 번째의
+    // xaxis 키로 갱신된다. RSSI가 비활성이면 'xaxis2' 등이 되며, 그래야 zoom sync가
+    // 보이는 축을 타겟해 동작한다.
+    let debugMiniMasterKey = 'xaxis';
 
     function buildDebugMini() {
         if (!debugMiniEl) return;
+        // 매 빌드 시작 시 안전한 기본값으로 리셋. early-return으로 차트가 비어
+        // 그려지지 못해도, 이전 빌드의 masterKey가 stale로 남아 sync 호출이
+        // 사라진 축을 타겟하는 일을 막는다. innerHTML='...' 후에도 Plotly가
+        // 노드에 저장한 .data 프로퍼티가 truthy로 살아남을 수 있음에 유의.
+        debugMiniMasterKey = 'xaxis';
         if (!debugAxis.bin_count || debugAxis.empty) {
             debugMiniEl.innerHTML = '<p class="text-gray-500 text-center py-12 text-xs">디버그 시계열 데이터 없음 (공유 시간축 비어있음).</p>';
             if (debugMetaEl) debugMetaEl.textContent = '';
@@ -544,6 +553,35 @@
 
         const retryMax = retryPts.reduce((m, p) => Math.max(m, p.retry_pct || 0), 0);
         const lossMax = pingPts.reduce((m, p) => Math.max(m, p.loss_pct || 0), 0);
+
+        // 빈 panel 자동 collapse — 활성 panel만 도메인 분배 (메인 applyPanelLayout 패턴).
+        // roaming has: roamingPts.length > 0이어도 모든 kind가 unknown이면 trace가 안
+        // 생성되므로 실제 roamTrace 생성 조건과 일치시킴.
+        const panelSpecs = [
+            { xaxis: 'xaxis', yaxis: 'yaxis', yAnchor: 'y', has: rssiPts.length > 0,
+              yspec: { title: 'RSSI (dBm)' } },
+            { xaxis: 'xaxis2', yaxis: 'yaxis2', yAnchor: 'y2', has: retryPts.length > 0,
+              yspec: { title: 'Retry %', range: [0, Math.max(10, retryMax * 1.1)] } },
+            { xaxis: 'xaxis3', yaxis: 'yaxis3', yAnchor: 'y3', has: pingPts.length > 0,
+              yspec: { title: 'Loss %', range: [0, Math.max(10, lossMax * 1.1)] } },
+            { xaxis: 'xaxis4', yaxis: 'yaxis4', yAnchor: 'y4',
+              has: roamingPts.some(p => p.kind === 'auth' || p.kind === 'assoc'),
+              yspec: { title: 'Roam', showticklabels: false, range: [0.4, 2.6] } },
+        ];
+        const activePanels = panelSpecs.filter(p => p.has);
+        const N = activePanels.length;
+        // !dTraces.length 조기 return으로 N >= 1 보장됨.
+        const gap = 0.04;
+        const each = (1 - gap * (N - 1)) / N;
+
+        // master x-axis = 첫 번째 활성 panel. RSSI가 비활성이면 xaxis가 visible:false라
+        // 다른 활성 panel이 matches:'x' 고정하면 hidden 축 참조로 동기화가 깨진다.
+        // sync 호출도 같은 키를 타겟해야 메인↔미니 zoom이 유지된다.
+        const masterKey = activePanels[0].xaxis;
+        // 'xaxis' → 'x', 'xaxis2' → 'x2' (xaxis 케이스도 replace 결과가 'x'라 분기 불필요).
+        const masterX = masterKey.replace('xaxis', 'x');
+        debugMiniMasterKey = masterKey;
+
         const dLayout = {
             paper_bgcolor: 'rgba(0,0,0,0)',
             plot_bgcolor: 'rgba(0,0,0,0)',
@@ -554,16 +592,35 @@
             hovermode: 'x unified',
             hoverlabel: HOVERLABEL,
             uirevision: 'keep-debug',
-            xaxis:  { anchor: 'y',  domain: [0, 1], showticklabels: false, gridcolor: GRID, ...SPIKE, ...HOVER_X },
-            xaxis2: { anchor: 'y2', domain: [0, 1], showticklabels: false, matches: 'x', gridcolor: GRID, ...SPIKE, ...HOVER_X },
-            xaxis3: { anchor: 'y3', domain: [0, 1], showticklabels: false, matches: 'x', gridcolor: GRID, ...SPIKE, ...HOVER_X },
-            xaxis4: { anchor: 'y4', domain: [0, 1], matches: 'x', gridcolor: GRID, ...SPIKE, ...HOVER_X },
-            yaxis:  { title: 'RSSI (dBm)', domain: [0.62, 1.0], gridcolor: GRID },
-            yaxis2: { title: 'Retry %',    domain: [0.40, 0.58], gridcolor: GRID, range: [0, Math.max(10, retryMax * 1.1)] },
-            yaxis3: { title: 'Loss %',     domain: [0.18, 0.36], gridcolor: GRID, range: [0, Math.max(10, lossMax * 1.1)] },
-            yaxis4: { title: 'Roam',       domain: [0.0, 0.12], gridcolor: GRID, showticklabels: false, range: [0.4, 2.6] },
             margin: { t: 30, r: 20, b: 30, l: 60 },
         };
+
+        let top = 1.0;
+        activePanels.forEach((p, idx) => {
+            const bot = top - each;
+            const isLast = idx === activePanels.length - 1;
+            dLayout[p.xaxis] = {
+                anchor: p.yAnchor,
+                domain: [0, 1],
+                showticklabels: isLast,
+                gridcolor: GRID,
+                ...SPIKE,
+                ...HOVER_X,
+                ...(p.xaxis !== activePanels[0].xaxis ? { matches: masterX } : {}),
+            };
+            dLayout[p.yaxis] = {
+                ...p.yspec,
+                domain: [Math.max(0, +bot.toFixed(4)), +top.toFixed(4)],
+                gridcolor: GRID,
+            };
+            top = bot - gap;
+        });
+
+        // 비활성 panel: visible:false + 작은 domain. matches 지정 없음(보이지 않으므로).
+        panelSpecs.filter(p => !p.has).forEach(p => {
+            dLayout[p.xaxis] = { visible: false, domain: [0, 0.001] };
+            dLayout[p.yaxis] = { visible: false, domain: [0, 0.001] };
+        });
         Plotly.newPlot(debugMiniEl, dTraces, dLayout, {
             responsive: true,
             displayModeBar: false,
@@ -664,7 +721,7 @@
             if (endInput) endInput.value = '';
             // 메인이 autorange면 미니차트도 같이 풀어준다 (양방향 동기화).
             if (debugMiniEl && debugMiniEl.data) {
-                Plotly.relayout(debugMiniEl, { 'xaxis.autorange': true })
+                Plotly.relayout(debugMiniEl, { [`${debugMiniMasterKey}.autorange`]: true })
                     .catch(err => console.debug('[debug-mini]', err));
             }
             return;
@@ -682,7 +739,7 @@
         // 메인 차트를 마우스로 직접 줌/팬할 때도 미니차트가 같이 움직이도록 동기화.
         // (applyRangeToTimeline 경로와는 별개 — 이 핸들러는 메인→미니 단방향 동기화 담당)
         if (debugMiniEl && debugMiniEl.data) {
-            Plotly.relayout(debugMiniEl, { 'xaxis.range': [r0, r1] })
+            Plotly.relayout(debugMiniEl, { [`${debugMiniMasterKey}.range`]: [r0, r1] })
                 .catch(err => console.debug('[debug-mini]', err));
         }
     });
@@ -698,7 +755,7 @@
             .finally(() => { _syncingFromTable = false; });
         // 디버그 미니차트도 같은 범위로 줌 (Plotly.newPlot 호출됐는지 확인)
         if (debugMiniEl && debugMiniEl.data) {
-            Plotly.relayout(debugMiniEl, { 'xaxis.range': range })
+            Plotly.relayout(debugMiniEl, { [`${debugMiniMasterKey}.range`]: range })
                 .catch(err => console.debug('[debug-mini]', err));
         }
         renderFrameTable(s, e);
@@ -721,7 +778,7 @@
             Plotly.relayout(timelineEl, { 'xaxis.autorange': true })
                 .finally(() => { _syncingFromTable = false; });
             if (debugMiniEl && debugMiniEl.data) {
-                Plotly.relayout(debugMiniEl, { 'xaxis.autorange': true })
+                Plotly.relayout(debugMiniEl, { [`${debugMiniMasterKey}.autorange`]: true })
                     .catch(err => console.debug('[debug-mini]', err));
             }
             renderFrameTable(null, null);
