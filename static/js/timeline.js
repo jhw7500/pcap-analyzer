@@ -544,6 +544,26 @@
 
         const retryMax = retryPts.reduce((m, p) => Math.max(m, p.retry_pct || 0), 0);
         const lossMax = pingPts.reduce((m, p) => Math.max(m, p.loss_pct || 0), 0);
+
+        // 빈 panel 자동 collapse — 데이터가 0인 metric의 subplot이 빈 공간을 차지하지
+        // 않도록 활성 panel에만 도메인을 분배. 메인 차트의 applyPanelLayout과 동일 패턴
+        // (visible:false + 작은 domain). trace는 이미 panel 활성 시에만 push되므로
+        // 비활성 yaxis로 trace가 들어가지 않는다.
+        const panelSpecs = [
+            { xaxis: 'xaxis',  yaxis: 'yaxis',  yAnchor: 'y',  has: rssiPts.length > 0,
+              yspec: { title: 'RSSI (dBm)' } },
+            { xaxis: 'xaxis2', yaxis: 'yaxis2', yAnchor: 'y2', has: retryPts.length > 0,
+              yspec: { title: 'Retry %', range: [0, Math.max(10, retryMax * 1.1)] } },
+            { xaxis: 'xaxis3', yaxis: 'yaxis3', yAnchor: 'y3', has: pingPts.length > 0,
+              yspec: { title: 'Loss %',  range: [0, Math.max(10, lossMax * 1.1)] } },
+            { xaxis: 'xaxis4', yaxis: 'yaxis4', yAnchor: 'y4', has: roamingPts.length > 0,
+              yspec: { title: 'Roam', showticklabels: false, range: [0.4, 2.6] } },
+        ];
+        const activePanels = panelSpecs.filter(p => p.has);
+        const N = activePanels.length;
+        const gap = 0.04;
+        const each = N > 0 ? (1 - gap * Math.max(0, N - 1)) / N : 1;
+
         const dLayout = {
             paper_bgcolor: 'rgba(0,0,0,0)',
             plot_bgcolor: 'rgba(0,0,0,0)',
@@ -554,16 +574,40 @@
             hovermode: 'x unified',
             hoverlabel: HOVERLABEL,
             uirevision: 'keep-debug',
-            xaxis:  { anchor: 'y',  domain: [0, 1], showticklabels: false, gridcolor: GRID, ...SPIKE, ...HOVER_X },
-            xaxis2: { anchor: 'y2', domain: [0, 1], showticklabels: false, matches: 'x', gridcolor: GRID, ...SPIKE, ...HOVER_X },
-            xaxis3: { anchor: 'y3', domain: [0, 1], showticklabels: false, matches: 'x', gridcolor: GRID, ...SPIKE, ...HOVER_X },
-            xaxis4: { anchor: 'y4', domain: [0, 1], matches: 'x', gridcolor: GRID, ...SPIKE, ...HOVER_X },
-            yaxis:  { title: 'RSSI (dBm)', domain: [0.62, 1.0], gridcolor: GRID },
-            yaxis2: { title: 'Retry %',    domain: [0.40, 0.58], gridcolor: GRID, range: [0, Math.max(10, retryMax * 1.1)] },
-            yaxis3: { title: 'Loss %',     domain: [0.18, 0.36], gridcolor: GRID, range: [0, Math.max(10, lossMax * 1.1)] },
-            yaxis4: { title: 'Roam',       domain: [0.0, 0.12], gridcolor: GRID, showticklabels: false, range: [0.4, 2.6] },
             margin: { t: 30, r: 20, b: 30, l: 60 },
         };
+
+        // 활성 panel: top→bottom 순서로 도메인 분배. 마지막 활성 panel만 시간축 라벨 노출.
+        let top = 1.0;
+        activePanels.forEach((p, idx) => {
+            const bot = top - each;
+            const isLast = idx === activePanels.length - 1;
+            dLayout[p.xaxis] = {
+                anchor: p.yAnchor,
+                domain: [0, 1],
+                showticklabels: isLast,
+                gridcolor: GRID,
+                ...SPIKE,
+                ...HOVER_X,
+                ...(p.xaxis !== 'xaxis' ? { matches: 'x' } : {}),
+            };
+            dLayout[p.yaxis] = {
+                ...p.yspec,
+                domain: [Math.max(0, +bot.toFixed(4)), +top.toFixed(4)],
+                gridcolor: GRID,
+            };
+            top = bot - gap;
+        });
+
+        // 비활성 panel: visible:false + 작은 domain. trace가 어차피 안 들어가지만
+        // layout 키 누락은 Plotly 경고를 일으킬 수 있어 명시적으로 등록.
+        panelSpecs.filter(p => !p.has).forEach(p => {
+            dLayout[p.xaxis] = {
+                visible: false, domain: [0, 0.001],
+                ...(p.xaxis !== 'xaxis' ? { matches: 'x' } : {}),
+            };
+            dLayout[p.yaxis] = { visible: false, domain: [0, 0.001] };
+        });
         Plotly.newPlot(debugMiniEl, dTraces, dLayout, {
             responsive: true,
             displayModeBar: false,
