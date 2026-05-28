@@ -514,22 +514,23 @@
         }
 
         // Roaming markers — auth=▼(y=1), assoc=▽(y=2)
+        // strict mode에서 블록 안 function 선언은 동작이 미묘하므로 arrow 사용.
+        const roamTrace = (pts, name, yLevel, color) => {
+            if (!pts.length) return null;
+            return {
+                x: pts.map(p => epochToDate(p.epoch)),
+                y: pts.map(() => yLevel),
+                type: 'scatter', mode: 'markers',
+                name: name,
+                marker: { symbol: 'triangle-down', color: color, size: 10, line: { color: '#92400e', width: 1 } },
+                xaxis: 'x4', yaxis: 'y4',
+                text: pts.map(p => `STA=${p.sta || '?'} → AP=${p.ap || '?'} · frame#${p.frame_number != null ? p.frame_number : '?'}`),
+                hovertemplate: `%{x|%H:%M:%S} · ${name} · %{text}<extra></extra>`,
+            };
+        };
         if (roamingPts.length) {
             const authPts = roamingPts.filter(p => p.kind === 'auth');
             const assocPts = roamingPts.filter(p => p.kind === 'assoc');
-            function roamTrace(pts, name, yLevel, color) {
-                if (!pts.length) return null;
-                return {
-                    x: pts.map(p => epochToDate(p.epoch)),
-                    y: pts.map(() => yLevel),
-                    type: 'scatter', mode: 'markers',
-                    name: name,
-                    marker: { symbol: 'triangle-down', color: color, size: 10, line: { color: '#92400e', width: 1 } },
-                    xaxis: 'x4', yaxis: 'y4',
-                    text: pts.map(p => `STA=${p.sta || '?'} → AP=${p.ap || '?'} · frame#${p.frame_number != null ? p.frame_number : '?'}`),
-                    hovertemplate: `%{x|%H:%M:%S} · ${name} · %{text}<extra></extra>`,
-                };
-            }
             const tA = roamTrace(authPts, 'Auth', 1, '#f59e0b');
             const tB = roamTrace(assocPts, 'Assoc', 2, '#f97316');
             if (tA) dTraces.push(tA);
@@ -557,12 +558,11 @@
             xaxis2: { anchor: 'y2', domain: [0, 1], showticklabels: false, matches: 'x', gridcolor: GRID, ...SPIKE, ...HOVER_X },
             xaxis3: { anchor: 'y3', domain: [0, 1], showticklabels: false, matches: 'x', gridcolor: GRID, ...SPIKE, ...HOVER_X },
             xaxis4: { anchor: 'y4', domain: [0, 1], matches: 'x', gridcolor: GRID, ...SPIKE, ...HOVER_X },
-            yaxis:  { title: 'RSSI(dBm)', domain: [0.62, 1.0], gridcolor: GRID },
-            yaxis2: { title: 'Retry %',   domain: [0.40, 0.58], gridcolor: GRID, range: [0, Math.max(10, retryMax * 1.1)] },
-            yaxis3: { title: 'Loss %',    domain: [0.18, 0.36], gridcolor: GRID, range: [0, Math.max(10, lossMax * 1.1)] },
-            yaxis4: { title: 'Roam',      domain: [0.0, 0.12], gridcolor: GRID, showticklabels: false, range: [0.4, 2.6] },
+            yaxis:  { title: 'RSSI (dBm)', domain: [0.62, 1.0], gridcolor: GRID },
+            yaxis2: { title: 'Retry %',    domain: [0.40, 0.58], gridcolor: GRID, range: [0, Math.max(10, retryMax * 1.1)] },
+            yaxis3: { title: 'Loss %',     domain: [0.18, 0.36], gridcolor: GRID, range: [0, Math.max(10, lossMax * 1.1)] },
+            yaxis4: { title: 'Roam',       domain: [0.0, 0.12], gridcolor: GRID, showticklabels: false, range: [0.4, 2.6] },
             margin: { t: 30, r: 20, b: 30, l: 60 },
-            barmode: 'group',
         };
         Plotly.newPlot(debugMiniEl, dTraces, dLayout, {
             responsive: true,
@@ -662,6 +662,11 @@
             renderFrameTable(null, null);
             if (startInput) startInput.value = '';
             if (endInput) endInput.value = '';
+            // 메인이 autorange면 미니차트도 같이 풀어준다 (양방향 동기화).
+            if (debugMiniEl && debugMiniEl.data) {
+                Plotly.relayout(debugMiniEl, { 'xaxis.autorange': true })
+                    .catch(e => console.debug('[debug-mini]', e));
+            }
             return;
         } else {
             return;
@@ -674,6 +679,12 @@
         if (startInput) startInput.value = s.toFixed(1);
         if (endInput) endInput.value = e.toFixed(1);
         renderFrameTable(s, e);
+        // 메인 차트를 마우스로 직접 줌/팬할 때도 미니차트가 같이 움직이도록 동기화.
+        // (applyRangeToTimeline 경로와는 별개 — 이 핸들러는 메인→미니 단방향 동기화 담당)
+        if (debugMiniEl && debugMiniEl.data) {
+            Plotly.relayout(debugMiniEl, { 'xaxis.range': [r0, r1] })
+                .catch(e => console.debug('[debug-mini]', e));
+        }
     });
 
     /* ── 표 상단 시간범위 입력 → 타임라인 줌 (역방향) ── */
@@ -681,11 +692,14 @@
         if (s == null || e == null || isNaN(s) || isNaN(e)) return;
         _syncingFromTable = true;
         const range = [epochToDate(s), epochToDate(e)];
+        // finally — relayout이 실패해도 _syncingFromTable 플래그를 반드시 해제하여
+        // 영구 잠금(table→timeline 동기화 영구 차단)을 방지.
         Plotly.relayout(timelineEl, { 'xaxis.range': range })
-            .then(() => { _syncingFromTable = false; });
+            .finally(() => { _syncingFromTable = false; });
         // 디버그 미니차트도 같은 범위로 줌 (Plotly.newPlot 호출됐는지 확인)
         if (debugMiniEl && debugMiniEl.data) {
-            Plotly.relayout(debugMiniEl, { 'xaxis.range': range }).catch(() => {});
+            Plotly.relayout(debugMiniEl, { 'xaxis.range': range })
+                .catch(e => console.debug('[debug-mini]', e));
         }
         renderFrameTable(s, e);
     }
@@ -705,9 +719,10 @@
             if (endInput) endInput.value = '';
             _syncingFromTable = true;
             Plotly.relayout(timelineEl, { 'xaxis.autorange': true })
-                .then(() => { _syncingFromTable = false; });
+                .finally(() => { _syncingFromTable = false; });
             if (debugMiniEl && debugMiniEl.data) {
-                Plotly.relayout(debugMiniEl, { 'xaxis.autorange': true }).catch(() => {});
+                Plotly.relayout(debugMiniEl, { 'xaxis.autorange': true })
+                    .catch(e => console.debug('[debug-mini]', e));
             }
             renderFrameTable(null, null);
         });
