@@ -436,11 +436,16 @@
     const debugMetaEl = document.getElementById('debug-series-meta');
     // sync 호출이 타겟할 master x-axis 키. buildDebugMini에서 활성 panel 첫 번째의
     // xaxis 키로 갱신된다. RSSI가 비활성이면 'xaxis2' 등이 되며, 그래야 zoom sync가
-    // 보이는 축을 타겟해 동작한다(claude regression fix).
+    // 보이는 축을 타겟해 동작한다.
     let debugMiniMasterKey = 'xaxis';
 
     function buildDebugMini() {
         if (!debugMiniEl) return;
+        // 매 빌드 시작 시 안전한 기본값으로 리셋. early-return으로 차트가 비어
+        // 그려지지 못해도, 이전 빌드의 masterKey가 stale로 남아 sync 호출이
+        // 사라진 축을 타겟하는 일을 막는다. innerHTML='...' 후에도 Plotly가
+        // 노드에 저장한 .data 프로퍼티가 truthy로 살아남을 수 있음에 유의.
+        debugMiniMasterKey = 'xaxis';
         if (!debugAxis.bin_count || debugAxis.empty) {
             debugMiniEl.innerHTML = '<p class="text-gray-500 text-center py-12 text-xs">디버그 시계열 데이터 없음 (공유 시간축 비어있음).</p>';
             if (debugMetaEl) debugMetaEl.textContent = '';
@@ -573,7 +578,8 @@
         // 다른 활성 panel이 matches:'x' 고정하면 hidden 축 참조로 동기화가 깨진다.
         // sync 호출도 같은 키를 타겟해야 메인↔미니 zoom이 유지된다.
         const masterKey = activePanels[0].xaxis;
-        const masterX = masterKey === 'xaxis' ? 'x' : masterKey.replace('xaxis', 'x');
+        // 'xaxis' → 'x', 'xaxis2' → 'x2' (xaxis 케이스도 replace 결과가 'x'라 분기 불필요).
+        const masterX = masterKey.replace('xaxis', 'x');
         debugMiniMasterKey = masterKey;
 
         const dLayout = {
