@@ -51,10 +51,18 @@ def _meta_section(result: Dict[str, Any]) -> List[str]:
         pairs.append(f"tshark `{_clean_code_span(result['tshark_version'])}`")
     if overview.get("duration_sec") is not None:
         pairs.append(f"캡처 시간 {overview['duration_sec']}s")
-    if overview.get("total_frames") is not None:
-        pairs.append(f"프레임 {overview['total_frames']:,}건")
-    if result.get("pcap_size"):
-        pairs.append(f"크기 {result['pcap_size']:,}B")
+    # int 캐스팅 — JSON 라운드트립으로 문자열이 들어오면 `:,` format이
+    # ValueError로 500을 만든다. 실패 시 그 라인만 생략.
+    try:
+        if overview.get("total_frames") is not None:
+            pairs.append(f"프레임 {int(overview['total_frames']):,}건")
+    except (TypeError, ValueError):
+        pass
+    try:
+        if result.get("pcap_size"):
+            pairs.append(f"크기 {int(result['pcap_size']):,}B")
+    except (TypeError, ValueError):
+        pass
     if pairs:
         lines.append(" · ".join(pairs))
     lines.append("")
@@ -75,7 +83,7 @@ def _correlations_section(diagnosis: Dict[str, Any]) -> List[str]:
             conf = float(c.get("confidence", 0))
         except (TypeError, ValueError):
             conf = 0.0
-        title = c.get("title", "?")
+        title = _clean_inline(c.get("title", "?"))
         sta = _clean_code_span(c.get("sta_name") or c.get("sta_mac") or "?")
         lines.append(f"### C{n}: {title} (conf={conf:.2f})")
         lines.append(f"- STA: `{sta}`")
@@ -99,7 +107,7 @@ def _correlations_section(diagnosis: Dict[str, Any]) -> List[str]:
         n_refs = len(frame_refs) if isinstance(frame_refs, list) else 0
         if n_refs:
             lines.append(f"- 증거 프레임: {n_refs:,}건")
-        explanation = (c.get("explanation") or "").strip()
+        explanation = _clean_inline((c.get("explanation") or "").strip())
         if explanation:
             lines.append(f"- 단일 결론 요약: {explanation}")
         lines.append("")
@@ -115,6 +123,18 @@ def _clean_cell(s: Any) -> str:
     if not isinstance(s, str):
         s = "" if s is None else str(s)
     return s.replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
+def _clean_inline(s: Any) -> str:
+    """heading/list 줄에 안전한 inline 텍스트.
+
+    \\n/\\r을 공백으로 치환 — heading(`### Title`) 안에 줄바꿈이 있으면 그 뒤
+    줄이 spurious heading이나 새 paragraph로 흘러 마크다운 구조가 깨진다.
+    list item(`- explanation`)도 마찬가지로 새 줄에서 indentation 깨짐.
+    """
+    if not isinstance(s, str):
+        s = "" if s is None else str(s)
+    return s.replace("\r", " ").replace("\n", " ")
 
 
 def _clean_code_span(s: Any) -> str:
@@ -158,7 +178,7 @@ def _sta_diags_section(diagnosis: Dict[str, Any]) -> List[str]:
     for sd in sta_diags:
         if not isinstance(sd, dict):
             continue
-        name = sd.get("name", "?")
+        name = _clean_inline(sd.get("name", "?"))
         mac = _clean_code_span(sd.get("mac", ""))
         score = sd.get("score")
         lines.append(f"### {name} `{mac}`")
@@ -187,9 +207,9 @@ def _sta_diags_section(diagnosis: Dict[str, Any]) -> List[str]:
             for iss in issues:
                 if not isinstance(iss, dict):
                     continue
-                sev = iss.get("severity", "?")
-                msg = iss.get("msg", "")
-                action = iss.get("action", "")
+                sev = _clean_inline(iss.get("severity", "?"))
+                msg = _clean_inline(iss.get("msg", ""))
+                action = _clean_inline(iss.get("action", ""))
                 line = f"  - [{sev}] {msg}"
                 if action:
                     line += f" — 조치: {action}"
@@ -211,14 +231,25 @@ def _health_section(diagnosis: Dict[str, Any]) -> List[str]:
         grade = health.get("grade", "")
         lines.append(f"- 전체: **{health['score']}** ({grade})")
     if scores:
-        score_strs = " · ".join(f"{k}={v}" for k, v in scores.items())
+        # key/value 모두 inline-safe 처리 — 외부 데이터가 |/newline 포함 가능.
+        score_strs = " · ".join(
+            f"{_clean_inline(k)}={_clean_inline(v)}" for k, v in scores.items()
+        )
         lines.append(f"- 컴포넌트 점수: {score_strs}")
     lines.append("")
     return lines
 
 
 def _ai_review_section(result: Dict[str, Any]) -> List[str]:
-    """AI 가설 (있으면 마크다운 그대로 inline)."""
+    """AI 가설 (있으면 마크다운 그대로 inline).
+
+    **Trust boundary**: ai_review 본문은 사용자 본인이 호출한 LLM 응답이라
+    사용자 input과 동등한 trust level로 취급. 마크다운/raw HTML 콘텐츠가
+    pandoc/typora 변환 시 survive할 수 있어 prompt-injection 노출 발생
+    가능성 있음. 본 도구는 자동차 WiFi 디버깅 환경(사용자 = 분석가) 가정이라
+    raw 그대로 노출하는 게 디버깅 가치 우선. 외부에 PDF 배포 전에는 사용자가
+    AI 응답을 검토하는 흐름을 권장.
+    """
     ai = result.get("ai_review") or ""
     if not isinstance(ai, str) or not ai.strip():
         return []

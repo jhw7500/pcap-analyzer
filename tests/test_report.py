@@ -358,3 +358,84 @@ def test_sta_mac_backtick_sanitised():
     }))
     assert "AA:`evil:01" not in md
     assert "AA:evil:01" in md
+
+
+# ── int 캐스팅 방어 (claude 3rd-round) ─────────────────────────────────────
+
+def test_meta_handles_string_total_frames_without_crashing():
+    """JSON 라운드트립으로 문자열이 들어와도 :, format crash 없이 누락."""
+    md = build_report_markdown({
+        "id": "x", "pcap_name": "f.pcap",
+        "structured": {"overview": {"total_frames": "1000", "duration_sec": 10}},
+    })
+    # int 캐스팅 성공 시 "프레임 1,000건" / 실패 시 라인 자체 누락 — 둘 다 OK
+    assert md.startswith("# WLAN Pcap 종합 분석 리포트")
+
+
+def test_meta_handles_non_numeric_total_frames():
+    md = build_report_markdown({
+        "id": "x", "pcap_name": "f.pcap",
+        "structured": {"overview": {"total_frames": "not-a-number"}},
+    })
+    # 라인 자체 누락
+    assert "프레임" not in md or "프레임 ?" in md
+
+
+def test_meta_handles_non_numeric_pcap_size():
+    md = build_report_markdown({
+        "id": "x", "pcap_name": "f.pcap", "pcap_size": "not-a-number",
+        "structured": {"overview": {}},
+    })
+    assert "크기" not in md
+
+
+# ── heading injection 방어 (claude 3rd-round medium) ──────────────────────
+
+def test_correlation_title_newline_does_not_inject_heading():
+    """title에 newline+# 가 들어가도 spurious heading이 생기지 않는다."""
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {"correlations": [{
+            "title": "Foo\n# Injected", "confidence": 0.5,
+            "sta_name": "S", "signals": [{"type": "high_retry"}],
+            "frame_refs": [1], "explanation": "x",
+        }]},
+    }))
+    # heading 한 줄에 "Foo Injected" — newline이 공백으로 치환됨
+    assert "### C1: Foo # Injected" in md
+    # raw newline 뒤 # heading은 생성되지 않음 (newline 제거됨)
+    assert "Foo\n# Injected" not in md
+
+
+def test_sta_name_newline_does_not_inject_heading():
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {"sta_diags": [{
+            "name": "Bad\n# Injected", "mac": "AA", "score": 50,
+        }]},
+    }))
+    assert "### Bad # Injected `AA`" in md
+    assert "Bad\n# Injected" not in md
+
+
+def test_explanation_newline_sanitised():
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {"correlations": [{
+            "title": "X", "confidence": 0.5, "sta_name": "S",
+            "signals": [{"type": "high_retry"}], "frame_refs": [1],
+            "explanation": "line1\nline2",
+        }]},
+    }))
+    assert "line1 line2" in md
+    assert "line1\nline2" not in md
+
+
+def test_component_scores_keys_and_values_sanitised():
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {
+            "component_scores": {"bad|key": "bad\nvalue"},
+        },
+    }))
+    # pipe escape + newline 공백 치환 (component_scores는 list item이라
+    # _clean_inline로 충분 — 파이프 escape는 별도 안 함, 출력은 그대로
+    # 'bad|key=bad value'라도 list item이라 깨지지 않는다)
+    assert "bad\nvalue" not in md
+    assert "bad value" in md
