@@ -171,7 +171,22 @@ def test_correlation_title_matches_known_combo():
     ])
     corrs = build_correlations(diag)
     assert len(corrs) == 1
-    assert corrs[0]["title"] == "약전계로 인한 multi-symptom"
+    assert corrs[0]["title"] == "약전계로 인한 multi-symptom (느린 로밍 동반)"
+
+
+def test_correlation_title_distinguishes_slow_vs_frequent_roaming():
+    """동일 multi-symptom 조합이라도 슬로우/잦은 로밍 변종은 제목에서 구분된다."""
+    from analyzer.core.modules.causality import SIG_FREQUENT_ROAMING
+    diag = _diag([
+        ("STA1", "AA", [
+            _make_issue(SIG_WEAK_RSSI, 100, 110, [1]),
+            _make_issue(SIG_HIGH_RETRY, 102, 108, [2]),
+            _make_issue(SIG_FREQUENT_ROAMING, 103, 109, [3]),
+        ]),
+    ])
+    corrs = build_correlations(diag)
+    assert len(corrs) == 1
+    assert corrs[0]["title"] == "약전계로 인한 multi-symptom (잦은 로밍 동반)"
 
 
 def test_correlation_title_generic_when_no_rule_matches():
@@ -434,3 +449,65 @@ def test_build_correlations_no_correlation_without_sta_signal():
 def test_build_correlations_isolated_from_unknown_input():
     """build_correlations는 예측 가능한 형태로만 동작 — sta_diags 없으면 빈."""
     assert build_correlations({"sta_diags": None, "issues": None}) == []  # type: ignore[dict-item]
+
+
+def test_correlation_signals_have_no_weight_field():
+    """weight = 1/N 균등은 정보량 0이라 필드 자체를 노출하지 않는다."""
+    diag = _diag([
+        ("STA1", "AA", [
+            _make_issue(SIG_WEAK_RSSI, 100, 110, [1]),
+            _make_issue(SIG_HIGH_RETRY, 102, 108, [2]),
+        ]),
+    ])
+    corrs = build_correlations(diag)
+    for sig in corrs[0]["signals"]:
+        assert "weight" not in sig, (
+            "weight 필드는 균등 분배라 의미 없어 제거 — consumer 잘못된 기대 방지"
+        )
+
+
+def test_attach_network_signals_uses_any_member_overlap_not_union():
+    """cluster union이 아닌 any-member 정책 — cluster 가운데 빈 시간대의
+    network 사건이 STA 신호와 시간 안 맞으면 attach 되면 안 된다."""
+    cluster = [
+        {"sta_mac": "AA", "signal_type": SIG_WEAK_RSSI,
+         "time_window": {"start_epoch": 100, "end_epoch": 110},
+         "frame_refs": [1], "msg": "weak"},
+        {"sta_mac": "AA", "signal_type": SIG_HIGH_RETRY,
+         "time_window": {"start_epoch": 200, "end_epoch": 210},
+         "frame_refs": [2], "msg": "retry"},
+    ]
+    clusters = [cluster]
+    # network 사건: t=150~160 — union(100~210) 안이지만 멤버 어느 쪽과도 겹침 0.
+    net_signals = [{
+        "sta_mac": None, "signal_type": SIG_HIGH_LOSS,
+        "time_window": {"start_epoch": 150, "end_epoch": 160},
+        "frame_refs": [9], "msg": "loss", "issue_scope": "net",
+    }]
+    _attach_network_signals(clusters, net_signals)
+    types = {s["signal_type"] for s in clusters[0]}
+    assert SIG_HIGH_LOSS not in types, (
+        "union 정책이라면 잘못 attach되겠지만 any-member 정책에선 거부돼야 함"
+    )
+
+
+def test_attach_network_signals_any_member_overlap_with_one_member():
+    """cluster 멤버 중 하나라도 시간 겹치면 attach (any-member 정책)."""
+    cluster = [
+        {"sta_mac": "AA", "signal_type": SIG_WEAK_RSSI,
+         "time_window": {"start_epoch": 100, "end_epoch": 110},
+         "frame_refs": [1], "msg": "weak"},
+        {"sta_mac": "AA", "signal_type": SIG_HIGH_RETRY,
+         "time_window": {"start_epoch": 200, "end_epoch": 210},
+         "frame_refs": [2], "msg": "retry"},
+    ]
+    clusters = [cluster]
+    # 멤버 B(200~210)와 정확히 겹침.
+    net_signals = [{
+        "sta_mac": None, "signal_type": SIG_HIGH_LOSS,
+        "time_window": {"start_epoch": 205, "end_epoch": 208},
+        "frame_refs": [9], "msg": "loss", "issue_scope": "net",
+    }]
+    _attach_network_signals(clusters, net_signals)
+    types = {s["signal_type"] for s in clusters[0]}
+    assert SIG_HIGH_LOSS in types

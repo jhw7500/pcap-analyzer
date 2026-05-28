@@ -701,6 +701,13 @@ def _structured_diagnosis(
     try:
         from analyzer.core.modules.causality import build_correlations
         result["correlations"] = build_correlations(result)
-    except Exception:
+    except Exception as exc:
+        # 핵심 진단을 보호하기 위해 bare-except로 흡수하되, 무음 실패는 디버깅을
+        # 어렵게 만든다 — WARN 레벨로 traceback과 함께 남겨 회귀 발견 가능하게.
+        import logging
+        logging.getLogger(__name__).warning(
+            "build_correlations failed; correlations 빈 리스트로 fallback: %s",
+            exc, exc_info=True,
+        )
         result["correlations"] = []
     return result

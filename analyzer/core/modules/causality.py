@@ -11,7 +11,10 @@
 - 시간만 우연히 겹친 가능성도 있어 confidence는 1.0이 되지 않으며 결합
   신호 수와 윈도우 겹침 비율로 산출한다.
 """
+import logging
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+logger = logging.getLogger(__name__)
 
 # Signal type constants — issue 객체의 signal_type 필드와 일치.
 # msg 문자열 파싱 대신 명시적 type 부여로 견고성 확보.
@@ -34,11 +37,13 @@ CONF_OVERLAP_BONUS = 0.1
 CONF_CAP = 0.95
 
 # 신호 조합별 사람 친화 제목. frozenset 키로 결정적 매칭.
+# multi-symptom 룰은 로밍 변종(느린/잦은)을 제목에서 차별화 — 두 룰이 같은
+# 제목을 갖던 코드 중복을 제거하면서 사용자에게 로밍 유형 정보를 노출.
 TITLE_RULES: List[Tuple[frozenset, str]] = [
     (frozenset({SIG_WEAK_RSSI, SIG_HIGH_RETRY, SIG_SLOW_ROAMING}),
-     "약전계로 인한 multi-symptom"),
+     "약전계로 인한 multi-symptom (느린 로밍 동반)"),
     (frozenset({SIG_WEAK_RSSI, SIG_HIGH_RETRY, SIG_FREQUENT_ROAMING}),
-     "약전계로 인한 multi-symptom"),
+     "약전계로 인한 multi-symptom (잦은 로밍 동반)"),
     (frozenset({SIG_WEAK_RSSI, SIG_HIGH_RETRY}),
      "약전계로 인한 retry 폭증"),
     (frozenset({SIG_WEAK_RSSI, SIG_SLOW_ROAMING}),
@@ -214,18 +219,26 @@ def _attach_network_signals(
 ) -> None:
     """network signal이 시간 윈도우 겹치는 STA cluster에 추가 신호로 합류.
 
-    in-place로 cluster 리스트를 변경한다. network signal은 STA 무관이라 같은
-    네트워크 사건이 여러 STA에 영향을 주는 경우 여러 cluster에 동시 합류할
-    수 있다(중복 OK — distinct signal_type 수가 confidence를 결정하므로 동일
-    네트워크 신호가 여러 cluster에 들어가도 각 cluster 안에서는 1회 카운트).
+    매칭 정책은 **any-member overlap** — cluster의 *어떤* 멤버 윈도우와도
+    임계 이상 겹치면 합류. cluster의 union window(t=100~500)와 비교하면
+    가운데 빈 시간대(t=300)의 network 사건이 STA 신호 없이도 잘못 attach되는
+    문제가 생긴다. any-member 정책은 적어도 한 STA 신호와는 시간이 맞는
+    network 사건만 합류시켜 인과 가설을 명확히 한다.
+
+    in-place로 cluster 리스트를 변경. network signal은 STA 무관이라 같은
+    네트워크 사건이 여러 STA cluster에 동시 합류할 수 있다(중복 OK —
+    distinct signal_type 수가 confidence를 결정하므로 각 cluster 안에서
+    1회 카운트).
     """
     for ns in net_signals:
         for cl in clusters:
-            cluster_window = _window_union([m["time_window"] for m in cl])
-            if cluster_window is None:
-                continue
-            if _overlap_ratio(ns["time_window"], cluster_window) >= overlap_threshold:
+            if any(_overlap_ratio(ns["time_window"], m["time_window"])
+                   >= overlap_threshold for m in cl):
                 cl.append(ns)
+                logger.debug(
+                    "net signal %s cross-attached to cluster sta=%s (cluster size: %d)",
+                    ns.get("signal_type"), cl[0].get("sta_mac"), len(cl),
+                )
 
 
 def _title_for(types: frozenset) -> str:
@@ -283,8 +296,10 @@ def _correlation_from_cluster(cluster: Sequence[Dict[str, Any]]) -> Dict[str, An
     # cluster는 sta_diags 기반 클러스터링에서 발생하지 않으므로 항상 STA 정보 있음.
     sta_mac = next((s.get("sta_mac") for s in cluster if s.get("sta_mac")), None)
     sta_name = next((s.get("sta_name") for s in cluster if s.get("sta_name")), None)
-    n_distinct = max(1, len(distinct_types))
-    weight = round(1.0 / n_distinct, 3)
+    # signal_type별로 issue_refs 묶음. weight 필드는 추가하지 않는다 —
+    # distinct type 수로 동등 분배(1/N)할 경우 정보량이 0이라 consumer가
+    # 잘못 기대(상대적 중요도)를 가질 수 있다. 향후 strength·severity 기반
+    # 가중치를 도입하게 되면 그때 의미 있는 값으로 노출.
     by_type: Dict[str, List[Dict[str, Any]]] = {}
     for s in cluster:
         by_type.setdefault(s["signal_type"], []).append(s)
@@ -299,7 +314,6 @@ def _correlation_from_cluster(cluster: Sequence[Dict[str, Any]]) -> Dict[str, An
             refs_out.append(ref)
         signals_out.append({
             "type": stype,
-            "weight": weight,
             "issue_refs": refs_out,
         })
     return {
@@ -332,8 +346,13 @@ def build_correlations(diagnosis: Dict[str, Any]) -> List[Dict[str, Any]]:
         return []
     sta_signals, net_signals = _collect_signals(diagnosis)
     if not sta_signals:
+        logger.debug("build_correlations: no STA signals → 빈 리스트")
         return []
     clusters = _cluster_signals(sta_signals)
+    logger.debug(
+        "build_correlations: collected sta=%d net=%d → %d clusters",
+        len(sta_signals), len(net_signals), len(clusters),
+    )
     _attach_network_signals(clusters, net_signals)
     correlations = [
         _correlation_from_cluster(cl)
@@ -341,4 +360,10 @@ def build_correlations(diagnosis: Dict[str, Any]) -> List[Dict[str, Any]]:
         if len({s["signal_type"] for s in cl}) >= MIN_CLUSTER_SIZE
     ]
     correlations.sort(key=lambda c: c["confidence"], reverse=True)
+    for c in correlations:
+        logger.debug(
+            "correlation built: sta=%s confidence=%.2f signals=%s title=%r",
+            c.get("sta_mac"), c.get("confidence"),
+            [s["type"] for s in c["signals"]], c.get("title"),
+        )
     return correlations

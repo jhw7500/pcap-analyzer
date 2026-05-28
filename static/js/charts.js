@@ -922,7 +922,12 @@
     const issues = diag.issues || [];
     const correlations = diag.correlations || [];
 
-    // 종합 진단 (다중 신호 결합 결론) — 단일 결론은 그대로 두고 추가 표시
+    // 종합 진단 (다중 신호 결합 결론) — 단일 결론은 그대로 두고 추가 표시.
+    //
+    // 키 동기화: analyzer/core/modules/causality.py 의 SIG_* 상수와
+    // 1:1 매핑돼야 한다. 새 signal_type을 추가할 때 이 맵을 함께 갱신하지
+    // 않으면 미등록 key는 raw 영문 키(escapeHtml 처리)로 fallback 노출돼
+    // UI에서 어색하게 보인다. (PR #5 검토: claude info-level 권고)
     const SIGNAL_TYPE_LABEL = {
         weak_rssi: '약신호',
         high_retry: 'retry 폭증',
