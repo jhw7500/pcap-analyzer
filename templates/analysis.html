@@ -129,6 +129,18 @@
         </div>
     </div>
 
+    <!-- 디버그 모드 axis-aligned 미니차트 — 진단 결론의 시간 위치를 공유 bin에 정렬 -->
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mt-4" id="debug-series-panel">
+        <div class="mb-2 flex items-start justify-between flex-wrap gap-3">
+            <div>
+                <h3 class="text-sm font-semibold text-gray-400 mb-1">디버그 미니차트 <span class="text-gray-500 font-normal">(공유 시간축 정렬)</span></h3>
+                <p class="text-xs text-gray-500">진단 근거 생성에 사용된 공유 bin에 RSSI(min/max 영역+mean) · Retry% · Ping Loss% · 로밍 이벤트를 같은 x축에 정렬. 진단 결론이 어느 구간에서 비롯됐는지 한눈에 확인.</p>
+            </div>
+            <span id="debug-series-meta" class="text-xs text-gray-500 tabular-nums"></span>
+        </div>
+        <div id="chart-debug-mini" style="height:340px"></div>
+    </div>
+
     <!-- 증거 프레임 테이블 (디버그) — 타임라인과 양방향 동기화 -->
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mt-4" id="debug-frames-panel">
         <div class="flex items-center justify-between flex-wrap gap-2 mb-3">

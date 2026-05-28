@@ -420,6 +420,160 @@
     }
 
     /* ══════════════════════════════════════════════════════════════════
+     * 디버그 미니차트 — debug.axis 공유 시간축 위에 debug.series 정렬 표시
+     *
+     * 메인 4-panel 타임라인은 raw + LTTB 다운샘플로 그리지만, 진단 결론은
+     * build_debug_block이 만든 공유 bin(axis)에 다운샘플된 series로부터
+     * frame_refs/time_window를 도출한다. 이 미니차트는 그 공유 bin 위에
+     * RSSI band+mean / Retry% / Ping Loss% / Roaming 마커를 모두 같은
+     * x축으로 정렬해 보여줘서, 진단 결론과 시계열 시간 위치가 시각적으로
+     * 일치한다는 점을 검증·탐색할 수 있게 한다.
+     * ════════════════════════════════════════════════════════════════ */
+    const debug = DATA.debug || {};
+    const debugAxis = debug.axis || {};
+    const debugSeries = debug.series || {};
+    const debugMiniEl = document.getElementById('chart-debug-mini');
+    const debugMetaEl = document.getElementById('debug-series-meta');
+
+    function buildDebugMini() {
+        if (!debugMiniEl) return;
+        if (!debugAxis.bin_count || debugAxis.empty) {
+            debugMiniEl.innerHTML = '<p class="text-gray-500 text-center py-12 text-xs">디버그 시계열 데이터 없음 (공유 시간축 비어있음).</p>';
+            if (debugMetaEl) debugMetaEl.textContent = '';
+            return;
+        }
+
+        const rssiPts = debugSeries.rssi || [];
+        const retryPts = debugSeries.retry || [];
+        const pingPts = debugSeries.ping || [];
+        const roamingPts = debugSeries.roaming || [];
+
+        if (debugMetaEl) {
+            const dur = debugAxis.duration_sec || 0;
+            const binSize = debugAxis.bin_size_sec || 0;
+            debugMetaEl.textContent = `${debugAxis.bin_count} bins · ${binSize.toFixed(2)}s/bin · 총 ${dur.toFixed(1)}s`;
+        }
+
+        const dTraces = [];
+
+        // RSSI: min/max 영역(fill) + mean line
+        if (rssiPts.length) {
+            const xs = rssiPts.map(p => epochToDate(p.epoch));
+            dTraces.push({
+                x: xs, y: rssiPts.map(p => p.rssi_max),
+                type: 'scatter', mode: 'lines',
+                name: 'RSSI max',
+                line: { width: 0 },
+                xaxis: 'x', yaxis: 'y',
+                hoverinfo: 'skip', showlegend: false,
+            });
+            dTraces.push({
+                x: xs, y: rssiPts.map(p => p.rssi_min),
+                type: 'scatter', mode: 'lines',
+                name: 'RSSI min/max',
+                line: { width: 0 },
+                fill: 'tonexty', fillcolor: 'rgba(96,165,250,0.18)',
+                xaxis: 'x', yaxis: 'y',
+                hoverinfo: 'skip',
+            });
+            dTraces.push({
+                x: xs, y: rssiPts.map(p => p.rssi),
+                type: 'scatter', mode: 'lines',
+                name: 'RSSI mean',
+                line: { color: '#3b82f6', width: 1.6 },
+                xaxis: 'x', yaxis: 'y',
+                customdata: rssiPts.map(p => [p.rssi_min, p.rssi_max, p.count]),
+                hovertemplate: '%{x|%H:%M:%S} · mean %{y:.1f} dBm · min %{customdata[0]} / max %{customdata[1]} · n=%{customdata[2]}<extra></extra>',
+            });
+        }
+
+        // Retry %: per-bin bar
+        if (retryPts.length) {
+            dTraces.push({
+                x: retryPts.map(p => epochToDate(p.epoch)),
+                y: retryPts.map(p => p.retry_pct),
+                type: 'bar', name: 'Retry %',
+                marker: { color: 'rgba(239,68,68,0.75)' },
+                xaxis: 'x2', yaxis: 'y2',
+                customdata: retryPts.map(p => [p.retry, p.total]),
+                hovertemplate: '%{x|%H:%M:%S} · %{y:.1f}% (%{customdata[0]}/%{customdata[1]} frames)<extra></extra>',
+            });
+        }
+
+        // Ping Loss %: per-bin bar
+        if (pingPts.length) {
+            dTraces.push({
+                x: pingPts.map(p => epochToDate(p.epoch)),
+                y: pingPts.map(p => p.loss_pct),
+                type: 'bar', name: 'Loss %',
+                marker: { color: 'rgba(249,115,22,0.8)' },
+                xaxis: 'x3', yaxis: 'y3',
+                customdata: pingPts.map(p => [p.loss, p.total]),
+                hovertemplate: '%{x|%H:%M:%S} · %{y:.1f}% (loss %{customdata[0]} / total %{customdata[1]})<extra></extra>',
+            });
+        }
+
+        // Roaming markers — auth=▼(y=1), assoc=▽(y=2)
+        // strict mode에서 블록 안 function 선언은 동작이 미묘하므로 arrow 사용.
+        const roamTrace = (pts, name, yLevel, color) => {
+            if (!pts.length) return null;
+            return {
+                x: pts.map(p => epochToDate(p.epoch)),
+                y: pts.map(() => yLevel),
+                type: 'scatter', mode: 'markers',
+                name: name,
+                marker: { symbol: 'triangle-down', color: color, size: 10, line: { color: '#92400e', width: 1 } },
+                xaxis: 'x4', yaxis: 'y4',
+                text: pts.map(p => `STA=${p.sta || '?'} → AP=${p.ap || '?'} · frame#${p.frame_number != null ? p.frame_number : '?'}`),
+                hovertemplate: `%{x|%H:%M:%S} · ${name} · %{text}<extra></extra>`,
+            };
+        };
+        if (roamingPts.length) {
+            const authPts = roamingPts.filter(p => p.kind === 'auth');
+            const assocPts = roamingPts.filter(p => p.kind === 'assoc');
+            const tA = roamTrace(authPts, 'Auth', 1, '#f59e0b');
+            const tB = roamTrace(assocPts, 'Assoc', 2, '#f97316');
+            if (tA) dTraces.push(tA);
+            if (tB) dTraces.push(tB);
+        }
+
+        if (!dTraces.length) {
+            debugMiniEl.innerHTML = '<p class="text-gray-500 text-center py-12 text-xs">공유 축은 있으나 시계열 데이터가 비어있습니다.</p>';
+            return;
+        }
+
+        const retryMax = retryPts.reduce((m, p) => Math.max(m, p.retry_pct || 0), 0);
+        const lossMax = pingPts.reduce((m, p) => Math.max(m, p.loss_pct || 0), 0);
+        const dLayout = {
+            paper_bgcolor: 'rgba(0,0,0,0)',
+            plot_bgcolor: 'rgba(0,0,0,0)',
+            font: { color: '#9ca3af', size: 10 },
+            showlegend: true,
+            legend: { orientation: 'h', y: 1.12, font: { size: 10 } },
+            dragmode: 'pan',
+            hovermode: 'x unified',
+            hoverlabel: HOVERLABEL,
+            uirevision: 'keep-debug',
+            xaxis:  { anchor: 'y',  domain: [0, 1], showticklabels: false, gridcolor: GRID, ...SPIKE, ...HOVER_X },
+            xaxis2: { anchor: 'y2', domain: [0, 1], showticklabels: false, matches: 'x', gridcolor: GRID, ...SPIKE, ...HOVER_X },
+            xaxis3: { anchor: 'y3', domain: [0, 1], showticklabels: false, matches: 'x', gridcolor: GRID, ...SPIKE, ...HOVER_X },
+            xaxis4: { anchor: 'y4', domain: [0, 1], matches: 'x', gridcolor: GRID, ...SPIKE, ...HOVER_X },
+            yaxis:  { title: 'RSSI (dBm)', domain: [0.62, 1.0], gridcolor: GRID },
+            yaxis2: { title: 'Retry %',    domain: [0.40, 0.58], gridcolor: GRID, range: [0, Math.max(10, retryMax * 1.1)] },
+            yaxis3: { title: 'Loss %',     domain: [0.18, 0.36], gridcolor: GRID, range: [0, Math.max(10, lossMax * 1.1)] },
+            yaxis4: { title: 'Roam',       domain: [0.0, 0.12], gridcolor: GRID, showticklabels: false, range: [0.4, 2.6] },
+            margin: { t: 30, r: 20, b: 30, l: 60 },
+        };
+        Plotly.newPlot(debugMiniEl, dTraces, dLayout, {
+            responsive: true,
+            displayModeBar: false,
+            scrollZoom: true,
+            doubleClick: 'reset+autosize',
+        });
+    }
+    buildDebugMini();
+
+    /* ══════════════════════════════════════════════════════════════════
      * 증거 프레임 테이블 + 타임라인 양방향 동기화 (디버그 모드)
      *
      * - structured.debug.frames(8개 컬럼)로 표를 채운다.
@@ -428,7 +582,6 @@
      * - 진단 탭의 "증거 보기" 점프(window.TimelineDebug.focus)는 타임라인을
      *   time_window로 줌 + 해당 frame_refs를 표에서 하이라이트.
      * ════════════════════════════════════════════════════════════════ */
-    const debug = DATA.debug || {};
     const debugFrames = debug.frames || [];
     const tbody = document.querySelector('#debug-frames-table tbody');
     const countEl = document.getElementById('debug-frames-count');
@@ -509,6 +662,11 @@
             renderFrameTable(null, null);
             if (startInput) startInput.value = '';
             if (endInput) endInput.value = '';
+            // 메인이 autorange면 미니차트도 같이 풀어준다 (양방향 동기화).
+            if (debugMiniEl && debugMiniEl.data) {
+                Plotly.relayout(debugMiniEl, { 'xaxis.autorange': true })
+                    .catch(err => console.debug('[debug-mini]', err));
+            }
             return;
         } else {
             return;
@@ -521,15 +679,28 @@
         if (startInput) startInput.value = s.toFixed(1);
         if (endInput) endInput.value = e.toFixed(1);
         renderFrameTable(s, e);
+        // 메인 차트를 마우스로 직접 줌/팬할 때도 미니차트가 같이 움직이도록 동기화.
+        // (applyRangeToTimeline 경로와는 별개 — 이 핸들러는 메인→미니 단방향 동기화 담당)
+        if (debugMiniEl && debugMiniEl.data) {
+            Plotly.relayout(debugMiniEl, { 'xaxis.range': [r0, r1] })
+                .catch(err => console.debug('[debug-mini]', err));
+        }
     });
 
     /* ── 표 상단 시간범위 입력 → 타임라인 줌 (역방향) ── */
     function applyRangeToTimeline(s, e) {
         if (s == null || e == null || isNaN(s) || isNaN(e)) return;
         _syncingFromTable = true;
-        Plotly.relayout(timelineEl, {
-            'xaxis.range': [epochToDate(s), epochToDate(e)],
-        }).then(() => { _syncingFromTable = false; });
+        const range = [epochToDate(s), epochToDate(e)];
+        // finally — relayout이 실패해도 _syncingFromTable 플래그를 반드시 해제하여
+        // 영구 잠금(table→timeline 동기화 영구 차단)을 방지.
+        Plotly.relayout(timelineEl, { 'xaxis.range': range })
+            .finally(() => { _syncingFromTable = false; });
+        // 디버그 미니차트도 같은 범위로 줌 (Plotly.newPlot 호출됐는지 확인)
+        if (debugMiniEl && debugMiniEl.data) {
+            Plotly.relayout(debugMiniEl, { 'xaxis.range': range })
+                .catch(err => console.debug('[debug-mini]', err));
+        }
         renderFrameTable(s, e);
     }
     const applyBtn = document.getElementById('debug-range-apply');
@@ -548,7 +719,11 @@
             if (endInput) endInput.value = '';
             _syncingFromTable = true;
             Plotly.relayout(timelineEl, { 'xaxis.autorange': true })
-                .then(() => { _syncingFromTable = false; });
+                .finally(() => { _syncingFromTable = false; });
+            if (debugMiniEl && debugMiniEl.data) {
+                Plotly.relayout(debugMiniEl, { 'xaxis.autorange': true })
+                    .catch(err => console.debug('[debug-mini]', err));
+            }
             renderFrameTable(null, null);
         });
     }
