@@ -14,6 +14,8 @@
            class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm">JSON 내보내기</a>
         <a href="/api/analysis/{{ result.id }}/text" target="_blank"
            class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm">텍스트 리포트</a>
+        <a href="/api/analysis/{{ result.id }}/report.md"
+           class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm" title="종합 결론·진단·AI 가설을 포함한 단일 마크다운 (pandoc/typora 등으로 PDF 변환 가능)">📄 마크다운 리포트</a>
         <button onclick="showAiPrompt('{{ result.id }}')"
                 class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm">AI 프롬프트 보기</button>
         <button id="ai-review-btn" onclick="requestAiReview('{{ result.id }}')"

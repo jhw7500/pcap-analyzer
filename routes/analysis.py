@@ -16,6 +16,7 @@ from analyzer.casefile_serializer import (
     validate_casefile,
 )
 from analyzer.errors import ErrorCode, error_payload
+from analyzer.web.report import build_report_markdown
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
@@ -109,6 +110,30 @@ async def delete_analysis(analysis_id: str):
         )
     path.unlink()
     return JSONResponse({"status": "deleted"})
+
+
+@router.get("/api/analysis/{analysis_id}/report.md")
+async def analysis_report_markdown(analysis_id: str):
+    """분석 결과를 외부 공유용 마크다운으로 export.
+
+    구성: 메타 + 건강도 + 종합 결론(correlations) + 단일 진단(issues) +
+    STA별 진단 + AI 가설. 표준 GFM이라 pandoc/typora/gstack 등으로
+    PDF·HTML 추가 변환 가능. 본 PR(단계 1)은 마크다운까지만 — PDF export는
+    후속 PR(Playwright headless).
+    """
+    result, error = _load_result_checked(analysis_id)
+    if error is not None:
+        return error
+    assert result is not None
+    md = build_report_markdown(result)
+    safe_id = "".join(c for c in analysis_id if c.isalnum() or c in "_-")[:64] or "analysis"
+    return PlainTextResponse(
+        md,
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="report_{safe_id}.md"',
+        },
+    )
 
 
 @router.get("/api/analysis/{analysis_id}/text")

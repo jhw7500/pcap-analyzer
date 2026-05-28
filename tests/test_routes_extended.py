@@ -166,6 +166,29 @@ class TestAnalysisWithData:
         finally:
             path.unlink(missing_ok=True)
 
+    def test_api_report_md(self):
+        """마크다운 리포트 엔드포인트 — 정상 응답 + 다운로드 헤더."""
+        fake_id, path = _create_fake_analysis()
+        try:
+            resp = client.get(f"/api/analysis/{fake_id}/report.md")
+            assert resp.status_code == 200
+            assert "text/markdown" in resp.headers["content-type"]
+            disp = resp.headers.get("content-disposition", "")
+            assert "attachment" in disp
+            assert f"report_{fake_id}" in disp
+            assert resp.text.startswith("# WLAN Pcap 종합 분석 리포트")
+            assert "test.pcap" in resp.text
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_api_report_md_not_found(self):
+        resp = client.get("/api/analysis/nonexistent_id_12345/report.md")
+        assert resp.status_code == 404
+
+    def test_api_report_md_invalid_id(self):
+        resp = client.get("/api/analysis/bad..id/report.md")
+        assert resp.status_code == 400
+
     def test_delete(self):
         fake_id, path = _create_fake_analysis()
         resp = client.delete(f"/api/analysis/{fake_id}")
