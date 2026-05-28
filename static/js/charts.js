@@ -932,6 +932,14 @@
         delay_zone: '지연 구간',
         anomaly: '이상 프레임',
     };
+    // pcap에서 파싱된 문자열(sta_name, title, explanation 등)을 innerHTML로
+    // 주입하기 전 HTML 특수문자 escape. 현재 분석 파이프라인에서는 안전한
+    // 값만 흘러오지만, 악의적 pcap이 만든 문자열이 들어와도 XSS로 번지지
+    // 않도록 boundary에서 방어. (gemini security-high 권고 반영)
+    const escapeHtml = (str) => String(str == null ? '' : str)
+        .replace(/[&<>"']/g, m => (
+            { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]
+        ));
     const corrCountEl = document.getElementById('correlations-count');
     if (corrCountEl) {
         corrCountEl.textContent = correlations.length
@@ -952,7 +960,7 @@
                     : confPct >= 60 ? 'bg-yellow-700' : 'bg-blue-700';
                 const confBadge = `<span class="${confColor} text-white px-2 py-0.5 rounded text-xs font-bold tabular-nums" title="결합 신호 수와 시간 윈도우 겹침으로 산출한 신뢰도">${confPct}% conf</span>`;
                 const sigChips = (c.signals || []).map(s => {
-                    const label = SIGNAL_TYPE_LABEL[s.type] || s.type;
+                    const label = SIGNAL_TYPE_LABEL[s.type] || escapeHtml(s.type);
                     return `<span class="inline-block bg-purple-900/60 border border-purple-700 text-purple-200 text-xs px-2 py-0.5 rounded">${label}</span>`;
                 }).join(' ');
                 const refs = c.frame_refs || [];
@@ -964,11 +972,11 @@
                             data-refs="${refs.join(',')}"
                             title="결합된 모든 신호의 증거 프레임 ${refs.length}건">\u{1F50D} 증거 보기 (${refs.length})</button>`
                     : '';
-                const staLabel = c.sta_name || c.sta_mac || '?';
+                const staLabel = escapeHtml(c.sta_name || c.sta_mac || '?');
                 return `<div class="bg-slate-800 rounded-lg p-3 border border-purple-800/50">
                     <div class="flex items-center gap-2 mb-2 flex-wrap">
                         ${confBadge}
-                        <span class="text-sm font-medium text-purple-100">${c.title}</span>
+                        <span class="text-sm font-medium text-purple-100">${escapeHtml(c.title)}</span>
                         <span class="text-xs text-gray-500">STA ${staLabel}</span>
                         ${evidenceBtn}
                     </div>
@@ -976,7 +984,7 @@
                         <span class="text-gray-500">결합 신호:</span>
                         ${sigChips}
                     </div>
-                    <div class="text-xs text-gray-400 ml-1">${c.explanation || ''}</div>
+                    <div class="text-xs text-gray-400 ml-1">${escapeHtml(c.explanation)}</div>
                 </div>`;
             }).join('');
         }

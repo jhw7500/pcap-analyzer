@@ -6,10 +6,16 @@ from analyzer.core.modules.causality import (
     SIG_HIGH_RETRY,
     SIG_SLOW_ROAMING,
     SIG_HIGH_LOSS,
+    SIG_DELAY_ZONE,
+    SIG_ANOMALY,
     build_correlations,
     _overlap_ratio,
     _confidence,
     _cluster_signals,
+    _collect_signals,
+    _attach_network_signals,
+    _window_union,
+    _explanation_for,
 )
 
 
@@ -212,12 +218,12 @@ def test_signals_carry_issue_refs():
     ])
     corrs = build_correlations(diag)
     refs_by_type = {s["type"]: s["issue_refs"] for s in corrs[0]["signals"]}
-    # 원본 issue 위치(0번 STA, 인덱스 0/1)를 가리켜야 한다.
+    # scope=sta 신호는 sta_diag_index + issue_index를 가리킨다.
     assert refs_by_type[SIG_WEAK_RSSI] == [
-        {"sta_diag_index": 0, "issue_index": 0}
+        {"scope": "sta", "sta_diag_index": 0, "issue_index": 0}
     ]
     assert refs_by_type[SIG_HIGH_RETRY] == [
-        {"sta_diag_index": 0, "issue_index": 1}
+        {"scope": "sta", "sta_diag_index": 0, "issue_index": 1}
     ]
 
 
@@ -232,3 +238,199 @@ def test_correlation_time_window_is_union():
     tw = corrs[0]["time_window"]
     assert tw["start_epoch"] == 100
     assert tw["end_epoch"] == 120
+
+
+# ── _overlap_ratio edge cases (review fixes) ──────────────────────────────
+
+def test_overlap_invalid_window_end_before_start():
+    """end < start인 잘못된 윈도우는 0.0 반환(방어)."""
+    bad = {"start_epoch": 110.0, "end_epoch": 100.0}
+    good = {"start_epoch": 100.0, "end_epoch": 110.0}
+    assert _overlap_ratio(bad, good) == 0.0
+    assert _overlap_ratio(good, bad) == 0.0
+
+
+def test_overlap_point_inside_interval():
+    """점 윈도우가 더 큰 윈도우 안에 있으면 1.0 — sparse evidence 매칭."""
+    point = {"start_epoch": 105.0, "end_epoch": 105.0}
+    interval = {"start_epoch": 100.0, "end_epoch": 110.0}
+    assert _overlap_ratio(point, interval) == 1.0
+    assert _overlap_ratio(interval, point) == 1.0
+
+
+def test_overlap_point_outside_interval():
+    point = {"start_epoch": 200.0, "end_epoch": 200.0}
+    interval = {"start_epoch": 100.0, "end_epoch": 110.0}
+    assert _overlap_ratio(point, interval) == 0.0
+
+
+def test_overlap_two_same_point():
+    p = {"start_epoch": 100.0, "end_epoch": 100.0}
+    assert _overlap_ratio(p, p) == 1.0
+
+
+# ── _window_union edge cases ──────────────────────────────────────────────
+
+def test_window_union_empty_returns_none():
+    assert _window_union([]) is None
+
+
+def test_window_union_all_none_returns_none():
+    assert _window_union([None, None]) is None  # type: ignore[list-item]
+
+
+def test_window_union_mixed_includes_valid():
+    out = _window_union([
+        None,                                        # type: ignore[list-item]
+        {"start_epoch": 100, "end_epoch": 110},
+        {"start_epoch": 105, "end_epoch": 120},
+    ])
+    assert out == {"start_epoch": 100, "end_epoch": 120}
+
+
+# ── _explanation_for ──────────────────────────────────────────────────────
+
+def test_explanation_uses_msg_only_no_english_keys():
+    """[high_retry] 같은 영어 키를 prepend하지 않고 msg만 연결."""
+    out = _explanation_for([
+        {"signal_type": SIG_WEAK_RSSI, "msg": "RSSI 평균 -70dBm"},
+        {"signal_type": SIG_HIGH_RETRY, "msg": "Retry율 30%"},
+    ])
+    assert out == "RSSI 평균 -70dBm · Retry율 30%"
+    assert "[" not in out and "weak_rssi" not in out
+
+
+def test_explanation_filters_empty_msg():
+    out = _explanation_for([
+        {"signal_type": SIG_WEAK_RSSI, "msg": "RSSI 약함"},
+        {"signal_type": SIG_HIGH_RETRY},  # msg 누락
+    ])
+    assert out == "RSSI 약함"
+
+
+# ── _cluster_signals defensive ────────────────────────────────────────────
+
+def test_cluster_handles_missing_sta_mac():
+    """sta_mac 키가 누락된 signal도 KeyError 없이 처리."""
+    sigs = [
+        {"signal_type": SIG_WEAK_RSSI,  # sta_mac 누락
+         "time_window": {"start_epoch": 100, "end_epoch": 110}},
+        {"signal_type": SIG_HIGH_RETRY,  # sta_mac 누락
+         "time_window": {"start_epoch": 100, "end_epoch": 110}},
+    ]
+    clusters = _cluster_signals(sigs)
+    assert len(clusters) == 1
+
+
+# ── build_correlations defensive ──────────────────────────────────────────
+
+def test_build_correlations_none_input_returns_empty():
+    assert build_correlations(None) == []  # type: ignore[arg-type]
+
+
+def test_build_correlations_non_dict_input_returns_empty():
+    assert build_correlations([]) == []  # type: ignore[arg-type]
+    assert build_correlations("oops") == []  # type: ignore[arg-type]
+
+
+# ── _collect_signals + _attach_network_signals (option A 확장) ────────────
+
+def test_collect_signals_separates_sta_and_network():
+    """sta_diags issue는 sta 신호로, all_issues 중 STA 카테고리 아닌 것은 network."""
+    diag = {
+        "sta_diags": [{
+            "name": "STA1", "mac": "AA",
+            "issues": [
+                {"signal_type": SIG_WEAK_RSSI, "msg": "RSSI",
+                 "time_window": {"start_epoch": 100, "end_epoch": 110},
+                 "frame_refs": [1]},
+            ],
+        }],
+        "issues": [
+            # 네트워크 카테고리 — sta name과 다름
+            {"category": "Ping", "signal_type": SIG_HIGH_LOSS, "msg": "Loss",
+             "time_window": {"start_epoch": 100, "end_epoch": 110},
+             "frame_refs": [9]},
+            # sta_diags에서 승격된 항목 — 같은 sta name → 중복으로 제외돼야
+            {"category": "STA1", "signal_type": SIG_WEAK_RSSI, "msg": "RSSI",
+             "time_window": {"start_epoch": 100, "end_epoch": 110},
+             "frame_refs": [1]},
+        ],
+    }
+    sta_sigs, net_sigs = _collect_signals(diag)
+    assert len(sta_sigs) == 1
+    assert sta_sigs[0]["signal_type"] == SIG_WEAK_RSSI
+    assert len(net_sigs) == 1
+    assert net_sigs[0]["signal_type"] == SIG_HIGH_LOSS
+    assert net_sigs[0]["issue_scope"] == "net"
+
+
+def test_attach_network_signals_joins_overlapping_clusters():
+    """network signal이 시간 겹치는 STA cluster에 cross-attach."""
+    cluster = [
+        {"sta_mac": "AA", "signal_type": SIG_WEAK_RSSI,
+         "time_window": {"start_epoch": 100, "end_epoch": 110},
+         "frame_refs": [1], "msg": "weak"},
+        {"sta_mac": "AA", "signal_type": SIG_HIGH_RETRY,
+         "time_window": {"start_epoch": 100, "end_epoch": 110},
+         "frame_refs": [2], "msg": "retry"},
+    ]
+    clusters = [cluster]
+    net_signals = [{
+        "sta_mac": None, "signal_type": SIG_HIGH_LOSS,
+        "time_window": {"start_epoch": 102, "end_epoch": 108},
+        "frame_refs": [9], "msg": "loss", "issue_scope": "net",
+    }]
+    _attach_network_signals(clusters, net_signals)
+    assert len(clusters[0]) == 3
+    assert any(s["signal_type"] == SIG_HIGH_LOSS for s in clusters[0])
+
+
+def test_build_correlations_uses_network_signals_to_complete_combo():
+    """STA 단일 신호 + 시간 겹치는 network signal → 종합 결론으로 묶임.
+
+    'high_retry + high_loss' 룰이 매칭되어 generic 제목 대신 명시 제목.
+    """
+    diag = {
+        "sta_diags": [{
+            "name": "STA1", "mac": "AA",
+            "issues": [{
+                "signal_type": SIG_HIGH_RETRY, "msg": "Retry율 30%",
+                "time_window": {"start_epoch": 100, "end_epoch": 110},
+                "frame_refs": [1], "severity": "high",
+            }],
+        }],
+        "issues": [{
+            "category": "Ping", "signal_type": SIG_HIGH_LOSS,
+            "msg": "Ping Loss 10%",
+            "time_window": {"start_epoch": 102, "end_epoch": 108},
+            "frame_refs": [9], "severity": "high",
+        }],
+    }
+    corrs = build_correlations(diag)
+    assert len(corrs) == 1
+    c = corrs[0]
+    types = {s["type"] for s in c["signals"]}
+    assert SIG_HIGH_RETRY in types and SIG_HIGH_LOSS in types
+    assert c["title"] == "혼잡으로 인한 ping loss"
+    # network signal의 issue_ref는 scope="net"
+    net_refs = next(s["issue_refs"] for s in c["signals"] if s["type"] == SIG_HIGH_LOSS)
+    assert net_refs == [{"scope": "net", "issue_index": 0}]
+
+
+def test_build_correlations_no_correlation_without_sta_signal():
+    """sta_diags signal이 0이면 network signal만 있어도 cluster 생성 X."""
+    diag = {
+        "sta_diags": [],
+        "issues": [{
+            "category": "Ping", "signal_type": SIG_HIGH_LOSS,
+            "time_window": {"start_epoch": 100, "end_epoch": 110},
+            "frame_refs": [9], "msg": "loss",
+        }],
+    }
+    assert build_correlations(diag) == []
+
+
+def test_build_correlations_isolated_from_unknown_input():
+    """build_correlations는 예측 가능한 형태로만 동작 — sta_diags 없으면 빈."""
+    assert build_correlations({"sta_diags": None, "issues": None}) == []  # type: ignore[dict-item]
