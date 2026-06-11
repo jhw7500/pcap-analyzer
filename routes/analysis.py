@@ -1,10 +1,16 @@
 """분석 결과 조회 + 시각화 데이터 API."""
 
+import html
 import json
 from typing import Any, Optional, Tuple
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+)
 from fastapi.templating import Jinja2Templates
 
 import config
@@ -16,7 +22,9 @@ from analyzer.casefile_serializer import (
     validate_casefile,
 )
 from analyzer.errors import ErrorCode, error_payload
+from analyzer.web.pdf import PdfRenderError, is_pdf_available, render_pdf_from_html
 from analyzer.web.report import build_report_markdown
+from analyzer.web.report_html import render_report_html
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
@@ -52,6 +60,21 @@ def _load_result_checked(
         )
 
 
+def _safe_filename_id(analysis_id: str) -> str:
+    """다운로드 파일명용 ID 정제 — ASCII 영숫자·_-만 허용, 64자 절단, 빈값 fallback.
+
+    ASCII 제한 필수: analysis_id는 pcap 파일명 stem을 포함하므로 한글 등
+    비ASCII가 들어올 수 있는데, str.isalnum()은 유니코드 전체에 True라
+    그대로 두면 Content-Disposition 헤더 인코딩(latin-1)에서 500이 난다.
+    """
+    return (
+        "".join(
+            c for c in analysis_id if (c.isascii() and c.isalnum()) or c in "_-"
+        )[:64]
+        or "analysis"
+    )
+
+
 def _build_casefile_or_error(result: dict[str, Any], incident_id: str = ""):
     try:
         payload = build_casefile(result, incident_id=incident_id)
@@ -85,6 +108,7 @@ async def analysis_page(request: Request, analysis_id: str):
                 result.get("structured", {}), ensure_ascii=False, default=str
             ),
             "offline_assets": config.is_offline_assets(),
+            "pdf_available": is_pdf_available(),
         },
     )
 
@@ -125,12 +149,69 @@ async def analysis_report_markdown(analysis_id: str):
         return error
     assert result is not None
     md = build_report_markdown(result)
-    safe_id = "".join(c for c in analysis_id if c.isalnum() or c in "_-")[:64] or "analysis"
+    safe_id = _safe_filename_id(analysis_id)
     return PlainTextResponse(
         md,
         media_type="text/markdown; charset=utf-8",
         headers={
             "Content-Disposition": f'attachment; filename="report_{safe_id}.md"',
+        },
+    )
+
+
+@router.get("/analysis/{analysis_id}/report", response_class=HTMLResponse)
+async def analysis_report_print_view(analysis_id: str):
+    """인쇄용 리포트 HTML — 브라우저 인쇄(Ctrl+P → PDF 저장)가 기본 경로.
+
+    playwright 없는 환경(폐쇄망 Windows 포함)에서도 항상 동작하는 PDF
+    획득 수단. 서버측 PDF(report.pdf)와 같은 HTML을 쓴다.
+    """
+    result, error = _load_result_checked(analysis_id)
+    if error is not None:
+        code = (
+            ErrorCode.INVALID_ANALYSIS_ID
+            if error.status_code == 400
+            else ErrorCode.ANALYSIS_NOT_FOUND
+        )
+        msg = html.escape(error_payload(code)["error"])
+        return HTMLResponse(f"<h1>{msg}</h1>", status_code=error.status_code)
+    assert result is not None
+    return HTMLResponse(render_report_html(result))
+
+
+@router.get("/api/analysis/{analysis_id}/report.pdf")
+def analysis_report_pdf(analysis_id: str):
+    """분석 리포트를 서버에서 PDF로 생성 — playwright 설치 환경 전용 선택 기능.
+
+    sync playwright API를 쓰므로 의도적으로 `def` 선언 (FastAPI threadpool
+    실행) — async로 바꾸면 이벤트 루프와 충돌한다. 미설치 시 501과 함께
+    인쇄용 리포트 대안을 hint로 안내.
+    """
+    result, error = _load_result_checked(analysis_id)
+    if error is not None:
+        return error
+    assert result is not None
+    if not is_pdf_available():
+        return JSONResponse(
+            error_payload(ErrorCode.PDF_EXPORT_UNAVAILABLE), status_code=501
+        )
+    try:
+        pdf_bytes = render_pdf_from_html(render_report_html(result))
+    except PdfRenderError:
+        # 응답에는 catalog message/hint만 나가므로 원인(원본 예외)은 로그로 남긴다.
+        import logging
+
+        logging.getLogger(__name__).exception("PDF 렌더 실패: %s", analysis_id)
+        return JSONResponse(
+            error_payload(ErrorCode.PDF_RENDER_FAILED), status_code=500
+        )
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="report_{_safe_filename_id(analysis_id)}.pdf"'
+            ),
         },
     )
 

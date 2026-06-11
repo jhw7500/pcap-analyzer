@@ -180,3 +180,25 @@ export PCAP_AI_MODEL=claude-sonnet-4-6
 4. 새 디렉토리에서 `./install.sh` (또는 `install.bat`) → `./run.sh` (또는 `run.bat`)
 
 기존 `.venv/`는 버리고 새로 만드는 게 안전합니다 (의존성 버전 차이 가능).
+
+## 8. PDF 리포트 (선택)
+
+분석 결과 페이지의 **🖨️ 인쇄용 리포트** 버튼은 추가 설치 없이 모든 환경에서
+동작합니다 — 열린 화면에서 브라우저 인쇄(`Ctrl+P`) → "PDF로 저장"을 선택하세요.
+
+서버에서 바로 PDF 파일을 받는 **📑 PDF 다운로드** 버튼은 선택 기능이며,
+인터넷 가능 환경에서만 설치할 수 있습니다:
+
+```bash
+# venv 활성화 후
+pip install -r requirements-pdf.txt
+playwright install chromium        # ~150MB 다운로드
+```
+
+- 미설치 상태에서는 버튼이 표시되지 않으며 앱은 정상 동작합니다.
+- Linux 서버에서 PDF 한글이 □(tofu)로 나오면: `sudo apt install fonts-noto-cjk`
+- PDF 생성이 끝나지 않고 멈춘 것처럼 보이면(드묾 — chromium 이상) 서버를
+  재시작하세요 (`Ctrl+C` 후 run 스크립트 재실행). 인쇄용 리포트는 영향 없이 동작합니다.
+- 폐쇄망 고급 절차: 온라인 PC에서 `PLAYWRIGHT_BROWSERS_PATH=<경로> playwright install chromium`
+  으로 받은 브라우저 캐시를 대상 PC의 같은 경로로 복사하고, 실행 전 동일한
+  환경변수를 지정하면 동작합니다 (OS·Python 마이너 버전 일치 필요).

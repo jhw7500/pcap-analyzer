@@ -4,8 +4,9 @@
 진단, AI 가설)을 단일 마크다운 파일로 export. 외부 도구(pandoc, gstack,
 typora 등)로 PDF/HTML로 추가 변환 가능하도록 표준 GFM 사양 준수.
 
-차트(미니차트, 메인 타임라인)는 텍스트 요약(bin별 RSSI/Retry/Loss/Roaming
-대표값)으로 노출 — SVG/PNG inline은 후속 PR(PDF export)에서 다룬다.
+차트(미니차트, 메인 타임라인) 이미지는 미포함 — 인쇄용 뷰(/analysis/{id}/report)와
+report.pdf도 같은 텍스트 기반 리포트를 공유한다. 차트가 필요하면 분석
+페이지를 브라우저에서 직접 인쇄. SVG/PNG inline은 후속 PR 후보로 남긴다.
 """
 from datetime import datetime, timezone
 from typing import Any, Dict, List
