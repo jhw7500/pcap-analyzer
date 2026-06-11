@@ -198,6 +198,10 @@ def analysis_report_pdf(analysis_id: str):
     try:
         pdf_bytes = render_pdf_from_html(render_report_html(result))
     except PdfRenderError:
+        # 응답에는 catalog message/hint만 나가므로 원인(원본 예외)은 로그로 남긴다.
+        import logging
+
+        logging.getLogger(__name__).exception("PDF 렌더 실패: %s", analysis_id)
         return JSONResponse(
             error_payload(ErrorCode.PDF_RENDER_FAILED), status_code=500
         )

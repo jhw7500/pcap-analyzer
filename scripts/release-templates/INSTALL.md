@@ -197,6 +197,8 @@ playwright install chromium        # ~150MB 다운로드
 
 - 미설치 상태에서는 버튼이 표시되지 않으며 앱은 정상 동작합니다.
 - Linux 서버에서 PDF 한글이 □(tofu)로 나오면: `sudo apt install fonts-noto-cjk`
+- PDF 생성이 끝나지 않고 멈춘 것처럼 보이면(드묾 — chromium 이상) 서버를
+  재시작하세요 (`Ctrl+C` 후 run 스크립트 재실행). 인쇄용 리포트는 영향 없이 동작합니다.
 - 폐쇄망 고급 절차: 온라인 PC에서 `PLAYWRIGHT_BROWSERS_PATH=<경로> playwright install chromium`
   으로 받은 브라우저 캐시를 대상 PC의 같은 경로로 복사하고, 실행 전 동일한
   환경변수를 지정하면 동작합니다 (OS·Python 마이너 버전 일치 필요).
