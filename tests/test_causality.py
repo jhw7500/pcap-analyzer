@@ -6,8 +6,6 @@ from analyzer.core.modules.causality import (
     SIG_HIGH_RETRY,
     SIG_SLOW_ROAMING,
     SIG_HIGH_LOSS,
-    SIG_DELAY_ZONE,
-    SIG_ANOMALY,
     build_correlations,
     _overlap_ratio,
     _confidence,
