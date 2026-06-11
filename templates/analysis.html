@@ -19,7 +19,7 @@
         <a href="/analysis/{{ result.id }}/report" target="_blank" rel="noopener noreferrer"
            class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm" title="브라우저 인쇄(Ctrl+P)로 PDF 저장 가능한 인쇄용 화면 — 모든 환경에서 동작">🖨️ 인쇄용 리포트</a>
         {% if pdf_available %}
-        <a href="/api/analysis/{{ result.id }}/report.pdf"
+        <a href="/api/analysis/{{ result.id }}/report.pdf" rel="noopener noreferrer"
            class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm" title="서버에서 PDF 생성 (playwright 설치 환경)">📑 PDF 다운로드</a>
         {% endif %}
         <button onclick="showAiPrompt('{{ result.id }}')"

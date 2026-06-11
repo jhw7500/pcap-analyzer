@@ -35,8 +35,11 @@ class TestRenderPdfErrorWrapping:
 
 class TestRenderLockTimeout:
     def test_lock_wait_timeout_fail_fast(self, monkeypatch):
-        """선행 렌더가 lock을 쥔 채면 대기 상한 후 즉시 실패 — 무기한 적체 방지."""
-        monkeypatch.setattr(pdf_mod, "_LOCK_WAIT_TIMEOUT_S", 0.05)
+        """선행 렌더가 lock을 쥔 채면 대기 상한 후 즉시 실패 — 무기한 적체 방지.
+
+        timeout=0(논블로킹 acquire)으로 wall-clock 의존 없이 결정적으로 검증.
+        """
+        monkeypatch.setattr(pdf_mod, "_LOCK_WAIT_TIMEOUT_S", 0)
         assert pdf_mod._render_lock.acquire(timeout=1)
         try:
             with pytest.raises(pdf_mod.PdfRenderError):

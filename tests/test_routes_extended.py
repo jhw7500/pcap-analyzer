@@ -285,6 +285,19 @@ class TestSafeFilenameId:
 
         assert _safe_filename_id("ab_c-1") == "ab_c-1"
 
+    def test_non_ascii_filtered(self):
+        """한글 등 비ASCII 제거 — Content-Disposition 헤더(latin-1) 500 방지.
+
+        analysis_id는 pcap 파일명 stem을 포함하므로 한글 파일명 업로드 시
+        실제로 도달하는 경로다 (str.isalnum()은 한글에도 True).
+        """
+        from routes.analysis import _safe_filename_id
+
+        assert _safe_filename_id("1700000000_샘플_검증_ab12cd34") == (
+            "1700000000___ab12cd34"
+        )
+        assert _safe_filename_id("한글만") == "analysis"
+
 
 class TestReportPrintView:
     def test_print_view_ok(self):

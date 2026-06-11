@@ -1,5 +1,6 @@
 """분석 결과 조회 + 시각화 데이터 API."""
 
+import html
 import json
 from typing import Any, Optional, Tuple
 
@@ -60,9 +61,17 @@ def _load_result_checked(
 
 
 def _safe_filename_id(analysis_id: str) -> str:
-    """다운로드 파일명용 ID 정제 — 영숫자·_-만 허용, 64자 절단, 빈값 fallback."""
+    """다운로드 파일명용 ID 정제 — ASCII 영숫자·_-만 허용, 64자 절단, 빈값 fallback.
+
+    ASCII 제한 필수: analysis_id는 pcap 파일명 stem을 포함하므로 한글 등
+    비ASCII가 들어올 수 있는데, str.isalnum()은 유니코드 전체에 True라
+    그대로 두면 Content-Disposition 헤더 인코딩(latin-1)에서 500이 난다.
+    """
     return (
-        "".join(c for c in analysis_id if c.isalnum() or c in "_-")[:64] or "analysis"
+        "".join(
+            c for c in analysis_id if (c.isascii() and c.isalnum()) or c in "_-"
+        )[:64]
+        or "analysis"
     )
 
 
@@ -164,7 +173,7 @@ async def analysis_report_print_view(analysis_id: str):
             if error.status_code == 400
             else ErrorCode.ANALYSIS_NOT_FOUND
         )
-        msg = error_payload(code)["error"]
+        msg = html.escape(error_payload(code)["error"])
         return HTMLResponse(f"<h1>{msg}</h1>", status_code=error.status_code)
     assert result is not None
     return HTMLResponse(render_report_html(result))

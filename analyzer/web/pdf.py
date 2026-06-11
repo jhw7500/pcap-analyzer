@@ -27,9 +27,14 @@ class PdfRenderError(Exception):
     """PDF 생성 실패 — chromium 기동/렌더/타임아웃 오류를 단일 타입으로 래핑."""
 
 
+# import 시점 1회 평가 — find_spec은 디스크 탐색이라 요청마다 부르지 않고,
+# '설치 후 서버 재시작 필요'라는 의미론을 명시적으로 만든다.
+_PDF_AVAILABLE = importlib.util.find_spec("playwright") is not None
+
+
 def is_pdf_available() -> bool:
-    """playwright 모듈 존재 여부 — chromium 실존은 렌더 단계 예외로 흡수."""
-    return importlib.util.find_spec("playwright") is not None
+    """playwright 모듈 존재 여부(import 시점 캐시) — chromium 실존은 렌더 단계 예외로 흡수."""
+    return _PDF_AVAILABLE
 
 
 def render_pdf_from_html(html: str) -> bytes:
@@ -45,6 +50,9 @@ def render_pdf_from_html(html: str) -> bytes:
     커버한다 — playwright의 page.pdf()는 timeout 옵션이 없어 chromium
     wedge 시 해당 요청은 회수되지 않는다. 대신 lock 대기에 상한을 둬
     후속 요청이 threadpool 스레드를 쥔 채 무기한 적체되는 것은 막는다.
+    wedge 발생 시 회복 절차: 서버 프로세스 재시작 (단일 사용자 로컬 도구
+    전제 — sync playwright는 스레드 간 호출이 불가해 외부에서 안전하게
+    중단시킬 수단이 없다).
     """
     if not _render_lock.acquire(timeout=_LOCK_WAIT_TIMEOUT_S):
         raise PdfRenderError(
@@ -58,32 +66,37 @@ def render_pdf_from_html(html: str) -> bytes:
                 browser = p.chromium.launch()
                 try:
                     context = browser.new_context(java_script_enabled=False)
-                    page = context.new_page()
-                    page.route("**/*", lambda route: route.abort())
-                    page.set_default_timeout(_RENDER_TIMEOUT_MS)
-                    page.set_content(
-                        html, wait_until="load", timeout=_RENDER_TIMEOUT_MS
-                    )
-                    return page.pdf(
-                        format="A4",
-                        print_background=True,
-                        display_header_footer=True,
-                        # isolated header/footer 컨텍스트는 시스템 한글 폰트가
-                        # 안 잡힐 수 있어 ASCII+숫자만 사용.
-                        header_template="<span></span>",
-                        footer_template=(
-                            '<div style="width:100%;text-align:center;'
-                            'font-size:8px;color:#777;">'
-                            '<span class="pageNumber"></span> / '
-                            '<span class="totalPages"></span></div>'
-                        ),
-                        margin={
-                            "top": "14mm",
-                            "bottom": "16mm",
-                            "left": "12mm",
-                            "right": "12mm",
-                        },
-                    )
+                    try:
+                        page = context.new_page()
+                        page.route("**/*", lambda route: route.abort())
+                        page.set_default_timeout(_RENDER_TIMEOUT_MS)
+                        page.set_content(
+                            html, wait_until="load", timeout=_RENDER_TIMEOUT_MS
+                        )
+                        return page.pdf(
+                            format="A4",
+                            print_background=True,
+                            display_header_footer=True,
+                            # isolated header/footer 컨텍스트는 시스템 한글 폰트가
+                            # 안 잡힐 수 있어 ASCII+숫자만 사용.
+                            header_template="<span></span>",
+                            footer_template=(
+                                '<div style="width:100%;text-align:center;'
+                                'font-size:8px;color:#777;">'
+                                '<span class="pageNumber"></span> / '
+                                '<span class="totalPages"></span></div>'
+                            ),
+                            margin={
+                                "top": "14mm",
+                                "bottom": "16mm",
+                                "left": "12mm",
+                                "right": "12mm",
+                            },
+                        )
+                    finally:
+                        # browser.close() cascade에 기대지 않고 명시적으로 닫음 —
+                        # close 실패 시 원래 렌더 예외가 가려지는 것 방지.
+                        context.close()
                 finally:
                     browser.close()
         except Exception as exc:
