@@ -19,6 +19,8 @@ htmlcov/
 /test_*.py
 .gstack/
 .bkit/
+.claude/
+.playwright-mcp/
 
 # 배포 산출물 (scripts/build-release.sh 출력)
 dist/
