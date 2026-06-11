@@ -262,3 +262,140 @@ class TestSettingsPost:
             follow_redirects=False,
         )
         assert resp.status_code == 303
+
+
+class TestSafeFilenameId:
+    def test_filters_special_chars(self):
+        from routes.analysis import _safe_filename_id
+
+        assert _safe_filename_id("abc!@#def") == "abcdef"
+
+    def test_truncates_to_64(self):
+        from routes.analysis import _safe_filename_id
+
+        assert len(_safe_filename_id("a" * 100)) == 64
+
+    def test_empty_falls_back(self):
+        from routes.analysis import _safe_filename_id
+
+        assert _safe_filename_id("///") == "analysis"
+
+    def test_keeps_underscore_hyphen(self):
+        from routes.analysis import _safe_filename_id
+
+        assert _safe_filename_id("ab_c-1") == "ab_c-1"
+
+
+class TestReportPrintView:
+    def test_print_view_ok(self):
+        fake_id, path = _create_fake_analysis()
+        try:
+            resp = client.get(f"/analysis/{fake_id}/report")
+            assert resp.status_code == 200
+            assert "text/html" in resp.headers["content-type"]
+            assert "WLAN Pcap 종합 분석 리포트" in resp.text
+            assert "@page" in resp.text
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_print_view_not_found(self):
+        resp = client.get("/analysis/nonexistent_id_12345/report")
+        assert resp.status_code == 404
+
+    def test_print_view_invalid_id(self):
+        resp = client.get("/analysis/bad..id/report")
+        assert resp.status_code == 400
+
+
+class TestReportPdf:
+    """report.pdf — 전 케이스가 playwright 미설치 CI에서도 실행 가능 (monkeypatch)."""
+
+    def test_pdf_unavailable_501(self, monkeypatch):
+        import routes.analysis as analysis_routes
+
+        monkeypatch.setattr(analysis_routes, "is_pdf_available", lambda: False)
+        fake_id, path = _create_fake_analysis()
+        try:
+            resp = client.get(f"/api/analysis/{fake_id}/report.pdf")
+            assert resp.status_code == 501
+            data = resp.json()
+            assert data["code"] == "PDF_EXPORT_UNAVAILABLE"
+            assert data["hint"]
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_pdf_success(self, monkeypatch):
+        import routes.analysis as analysis_routes
+
+        monkeypatch.setattr(analysis_routes, "is_pdf_available", lambda: True)
+        monkeypatch.setattr(
+            analysis_routes, "render_pdf_from_html", lambda html: b"%PDF-1.4 fake"
+        )
+        fake_id, path = _create_fake_analysis()
+        try:
+            resp = client.get(f"/api/analysis/{fake_id}/report.pdf")
+            assert resp.status_code == 200
+            assert resp.headers["content-type"] == "application/pdf"
+            disp = resp.headers.get("content-disposition", "")
+            assert "attachment" in disp
+            assert f"report_{fake_id}.pdf" in disp
+            assert resp.content.startswith(b"%PDF")
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_pdf_render_failed_500(self, monkeypatch):
+        import routes.analysis as analysis_routes
+        from analyzer.web.pdf import PdfRenderError
+
+        monkeypatch.setattr(analysis_routes, "is_pdf_available", lambda: True)
+
+        def _boom(html):
+            raise PdfRenderError("chromium not found")
+
+        monkeypatch.setattr(analysis_routes, "render_pdf_from_html", _boom)
+        fake_id, path = _create_fake_analysis()
+        try:
+            resp = client.get(f"/api/analysis/{fake_id}/report.pdf")
+            assert resp.status_code == 500
+            assert resp.json()["code"] == "PDF_RENDER_FAILED"
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_pdf_not_found(self):
+        resp = client.get("/api/analysis/nonexistent_id_12345/report.pdf")
+        assert resp.status_code == 404
+
+    def test_pdf_invalid_id(self):
+        resp = client.get("/api/analysis/bad..id/report.pdf")
+        assert resp.status_code == 400
+
+
+class TestAnalysisPagePdfButton:
+    """{% if pdf_available %} 템플릿 분기 — 양쪽 모두 결정적으로 검증."""
+
+    def test_pdf_button_visible_when_available(self, monkeypatch):
+        import routes.analysis as analysis_routes
+
+        monkeypatch.setattr(analysis_routes, "is_pdf_available", lambda: True)
+        fake_id, path = _create_fake_analysis()
+        try:
+            resp = client.get(f"/analysis/{fake_id}")
+            assert resp.status_code == 200
+            assert "PDF 다운로드" in resp.text
+            assert "인쇄용 리포트" in resp.text
+            assert f"/analysis/{fake_id}/report" in resp.text
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_pdf_button_hidden_when_unavailable(self, monkeypatch):
+        import routes.analysis as analysis_routes
+
+        monkeypatch.setattr(analysis_routes, "is_pdf_available", lambda: False)
+        fake_id, path = _create_fake_analysis()
+        try:
+            resp = client.get(f"/analysis/{fake_id}")
+            assert resp.status_code == 200
+            assert "PDF 다운로드" not in resp.text
+            assert "인쇄용 리포트" in resp.text
+        finally:
+            path.unlink(missing_ok=True)

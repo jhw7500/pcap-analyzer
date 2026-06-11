@@ -17,6 +17,8 @@ class ErrorCode(str, Enum):
     INCIDENT_NOT_FOUND = "INCIDENT_NOT_FOUND"
     CASEFILE_UNAVAILABLE = "CASEFILE_UNAVAILABLE"
     AI_REVIEW_FAILED = "AI_REVIEW_FAILED"
+    PDF_EXPORT_UNAVAILABLE = "PDF_EXPORT_UNAVAILABLE"
+    PDF_RENDER_FAILED = "PDF_RENDER_FAILED"
 
 
 ERROR_CATALOG: Dict[ErrorCode, Dict[str, str]] = {
@@ -67,6 +69,14 @@ ERROR_CATALOG: Dict[ErrorCode, Dict[str, str]] = {
     ErrorCode.AI_REVIEW_FAILED: {
         "message": "AI 리뷰 실행에 실패했습니다.",
         "hint": "API 키와 모델 설정을 확인하고 외부 네트워크 연결을 점검하세요.",
+    },
+    ErrorCode.PDF_EXPORT_UNAVAILABLE: {
+        "message": "PDF 변환 엔진이 설치되어 있지 않습니다.",
+        "hint": "pip install -r requirements-pdf.txt && playwright install chromium 으로 설치하세요(인터넷 필요). 오프라인 환경에서는 인쇄용 리포트(/analysis/{id}/report)를 열어 브라우저 인쇄(Ctrl+P)로 PDF 저장하세요.",
+    },
+    ErrorCode.PDF_RENDER_FAILED: {
+        "message": "PDF 생성에 실패했습니다.",
+        "hint": "playwright install chromium 으로 브라우저 설치를 확인하고, Linux 서버라면 fonts-noto-cjk 등 한글 폰트 설치를 점검하세요.",
     },
 }
 

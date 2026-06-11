@@ -1,0 +1,8 @@
+# 선택 기능: 서버측 PDF export (GET /api/analysis/{id}/report.pdf)
+#
+# - 설치: pip install -r requirements-pdf.txt && playwright install chromium
+# - chromium 다운로드(~150MB, CDN 필요)가 있어 폐쇄망에서는 설치 불가.
+#   폐쇄망 대안: 인쇄용 리포트(/analysis/{id}/report)를 열어 브라우저
+#   인쇄(Ctrl+P)로 PDF 저장 — 추가 설치 없이 모든 환경에서 동작.
+# - 배포 산출물(dist/)에는 포함되지 않는다 (기본 기능 아님).
+playwright>=1.40

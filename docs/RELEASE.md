@@ -17,6 +17,9 @@ dist/
 └── SHA256SUMS.txt
 ```
 
+> PDF export(선택 기능)의 playwright/chromium은 배포 산출물에 포함되지 않습니다 —
+> 사용자는 `requirements-pdf.txt`로 별도 설치 (INSTALL.md "PDF 리포트" 절 참조).
+
 ## 버전 규칙
 
 - 기본: `git describe --tags --always --dirty` 결과 사용
