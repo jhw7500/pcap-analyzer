@@ -145,7 +145,7 @@
             const e = d.map[p.epoch];
             return (e && e.total) ? `${e.retry_pct}% (${e.retry}/${e.total})` : '0% (0/0)';
         }));
-        const devLines = retryDevs.map((d, i) => `${d.name}: %{customdata[${i}]}`).join('<br>');
+        const devLines = retryDevs.map((d, i) => `${escapeHtml(d.name)}: %{customdata[${i}]}`).join('<br>');
         traces.push({
             x: tl.map(p => epochToDate(p.epoch)),
             y: tl.map(p => p.total ? p.retry / p.total * 100 : 0),
@@ -224,7 +224,7 @@
             const d = (p.by_dev || {})[name];
             return (d && d.total) ? `${d.loss_pct}% (${d.loss}/${d.total})` : '–';
         }));
-        const devLines = pingDevs.map((name, i) => `${name}: %{customdata[${i}]}`).join('<br>');
+        const devLines = pingDevs.map((name, i) => `${escapeHtml(name)}: %{customdata[${i}]}`).join('<br>');
         // 평균 RTT 선 (주축 y3) — matched 없는 초는 null이라 gap. hover에 장치별 RTT.
         traces.push({
             x: pingTl.map(p => epochToDate(p.epoch)),
@@ -444,7 +444,7 @@
             const p = t._panel || 'misc';
             (groups[p] = groups[p] || []).push({ t, idx });
         });
-        const PANEL_LABELS = { rssi: 'RSSI', retry: 'Retry/s', rtt: 'Ping RTT', frames: 'Frames/s', misc: '기타' };
+        const PANEL_LABELS = { rssi: 'RSSI', retry: 'Retry %', rtt: 'Ping RTT', frames: 'Frames/s', misc: '기타' };
         const groupsHtml = PANELS.concat(['misc']).filter(p => groups[p]).map(p => {
             // 그룹 헤더 체크 = 패널 on/off (서브플롯 표시/숨김). misc는 패널이 아니라 토글 없음.
             const panelEnabled = (p === 'misc') ? true : !!panelOn[p];
@@ -848,6 +848,13 @@
         if (idxs.length) Plotly.restyle(timelineEl, { x: newX, y: newY }, idxs);
     }
 
+    // pan/zoom 중 plotly_relayout이 매 프레임 발생 — redraw를 80ms debounce로 묶어 jank 방지.
+    let _rssiRedrawTimer = null;
+    function redrawRssiDebounced(x0, x1) {
+        if (_rssiRedrawTimer) clearTimeout(_rssiRedrawTimer);
+        _rssiRedrawTimer = setTimeout(() => redrawRssi(x0, x1), 80);
+    }
+
     /* ── 타임라인 x축 범위 변경 → 표 필터 (브러시/줌/팬) ── */
     let _syncingFromTable = false;
     timelineEl.on && timelineEl.on('plotly_relayout', (ev) => {
@@ -860,7 +867,7 @@
             r0 = ev['xaxis.range'][0];
             r1 = ev['xaxis.range'][1];
         } else if (ev['xaxis.autorange']) {
-            redrawRssi(null, null);
+            redrawRssiDebounced(null, null);
             renderFrameTable(null, null);
             if (startInput) startInput.value = '';
             if (endInput) endInput.value = '';
@@ -878,7 +885,7 @@
         const e = new Date(r1).getTime() / 1000;
         // invalid range(예: new Date(undefined) → NaN)는 표 필터를 깨뜨리므로 방어
         if (isNaN(s) || isNaN(e)) return;
-        redrawRssi(s, e);
+        redrawRssiDebounced(s, e);
         if (startInput) startInput.value = s.toFixed(1);
         if (endInput) endInput.value = e.toFixed(1);
         renderFrameTable(s, e);

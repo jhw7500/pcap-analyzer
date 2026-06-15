@@ -4,7 +4,7 @@ pipeline.run_analysis가 오케스트레이션 중 호출한다. 각 함수는 f
 (필요 시 FrameIndex)를 받아 UI가 소비하는 중첩 dict를 반환한다.
 """
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 from typing import Any, Dict, List
 
 from ..core.models import Frame
@@ -174,31 +174,33 @@ def _ping_per_sec(full_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     (기존 분석엔 이 필드가 없어 full_list로 즉석 계산). bucketing 규칙(어떤 status를
     loss로 셀지 등)을 바꾸면 양쪽을 함께 갱신할 것.
 
-    각 초: 전체 {loss, matched, total, loss_pct, avg_rtt} + dst_mac별 동일 지표(by_dev).
+    각 초: 전체 {loss, matched, total, loss_pct, avg_rtt} + 장치(STA)별 동일 지표(by_dev).
+    by_dev 키는 _sta_of가 IP↔장치 학습으로 식별한 장치명(미상이면 IP/'?').
     hover에서 그 시점 어느 STA가 손실/지연 주범인지 분해해 보여주기 위함.
     matched=정상 응답, loss/loss_gap=손실. 그 외 status는 무시.
     """
     def _blank() -> Dict[str, Any]:
         return {"loss": 0, "matched": 0, "rtt_sum": 0.0, "rtt_count": 0}
 
-    # ping의 다수(역방향·seq-gap 추정손실)는 MAC이 비어 dst_mac으로 장치를 못 가른다.
+    # ping의 다수(역방향·seq-gap 추정손실)는 src/dst MAC이 비어 장치를 못 가른다.
     # src/dst IP는 항상 있으므로, MAC이 있는 항목에서 IP→장치명을 학습해 IP로 식별한다.
-    ip_dev: Dict[str, str] = {}
+    # (값은 MAC이 아니라 장치명 문자열 — 예: "STA1(aa)")
+    ip_to_dev: Dict[str, str] = {}
     for p in full_list:
         if p.get("src") and p.get("src_mac"):
-            ip_dev[p["src"]] = p["src_mac"]
+            ip_to_dev[p["src"]] = p["src_mac"]
         if p.get("dst") and p.get("dst_mac"):
-            ip_dev[p["dst"]] = p["dst_mac"]
+            ip_to_dev[p["dst"]] = p["dst_mac"]
 
     def _sta_of(p: Dict[str, Any]) -> str:
         # ping 상대 STA = src/dst 중 STA로 매핑되는 IP의 장치명.
         for ip in (p.get("dst"), p.get("src")):
-            dev = ip_dev.get(ip)
+            dev = ip_to_dev.get(ip)
             if dev and dev.startswith("STA"):
                 return dev
         # STA 매핑 실패 시 AP가 아닌 IP를 STA 후보로(IP 그대로 표시).
         for ip in (p.get("dst"), p.get("src")):
-            if ip and not ip_dev.get(ip, "").startswith("AP"):
+            if ip and not ip_to_dev.get(ip, "").startswith("AP"):
                 return ip
         return "?"
 
