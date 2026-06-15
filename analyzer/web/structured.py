@@ -4,6 +4,7 @@ pipeline.run_analysis가 오케스트레이션 중 호출한다. 각 함수는 f
 (필요 시 FrameIndex)를 받아 UI가 소비하는 중첩 dict를 반환한다.
 """
 
+from collections import Counter, defaultdict
 from typing import Any, Dict, List
 
 from ..core.models import Frame
@@ -104,22 +105,20 @@ def _retry_per_sec(device_frames: List[Frame]) -> List[Dict[str, Any]]:
     rssi 유무와 무관하게 그 장치가 송신한 모든 프레임이 분모(total)에 들어간다
     (retry는 rssi 없는 프레임에도 set될 수 있으므로).
     """
-    if not device_frames:
-        return []
-    from collections import Counter
-
-    total = Counter(int(f.epoch) for f in device_frames)
-    retry = Counter(int(f.epoch) for f in device_frames if f.retry)
+    by_sec: Dict[int, Dict[str, int]] = defaultdict(lambda: {"retry": 0, "total": 0})
+    for f in device_frames:
+        b = by_sec[int(f.epoch)]
+        b["total"] += 1
+        if f.retry:
+            b["retry"] += 1
     return [
         {
             "epoch": sec,
-            "retry": retry.get(sec, 0),
-            "total": total[sec],
-            "retry_pct": round(retry.get(sec, 0) * 100.0 / total[sec], 1)
-            if total[sec]
-            else 0.0,
+            "retry": b["retry"],
+            "total": b["total"],
+            "retry_pct": round(b["retry"] * 100.0 / b["total"], 1) if b["total"] else 0.0,
         }
-        for sec in sorted(total)
+        for sec, b in sorted(by_sec.items())
     ]
 
 
@@ -171,14 +170,16 @@ def _structured_signal(
 def _ping_per_sec(full_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """ping outcome을 초 단위로 묶어 전체/장치별 loss%·평균 RTT를 집계한다.
 
+    NOTE: 프론트 `computePingTimeline`(static/js/timeline.js)이 동일 로직을 미러링한다
+    (기존 분석엔 이 필드가 없어 full_list로 즉석 계산). bucketing 규칙(어떤 status를
+    loss로 셀지 등)을 바꾸면 양쪽을 함께 갱신할 것.
+
     각 초: 전체 {loss, matched, total, loss_pct, avg_rtt} + dst_mac별 동일 지표(by_dev).
     hover에서 그 시점 어느 STA가 손실/지연 주범인지 분해해 보여주기 위함.
     matched=정상 응답, loss/loss_gap=손실. 그 외 status는 무시.
     """
-    from collections import defaultdict
-
     def _blank() -> Dict[str, Any]:
-        return {"loss": 0, "matched": 0, "rtt_sum": 0.0}
+        return {"loss": 0, "matched": 0, "rtt_sum": 0.0, "rtt_count": 0}
 
     # ping의 다수(역방향·seq-gap 추정손실)는 MAC이 비어 dst_mac으로 장치를 못 가른다.
     # src/dst IP는 항상 있으므로, MAC이 있는 항목에서 IP→장치명을 학습해 IP로 식별한다.
@@ -224,6 +225,7 @@ def _ping_per_sec(full_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 rtt = p.get("rtt_ms")
                 if isinstance(rtt, (int, float)):
                     b["rtt_sum"] += rtt
+                    b["rtt_count"] += 1
 
     def _summary(b: Dict[str, Any]) -> Dict[str, Any]:
         total = b["loss"] + b["matched"]
@@ -232,7 +234,8 @@ def _ping_per_sec(full_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "matched": b["matched"],
             "total": total,
             "loss_pct": round(b["loss"] * 100.0 / total, 1) if total else 0.0,
-            "avg_rtt": round(b["rtt_sum"] / b["matched"], 2) if b["matched"] else None,
+            # rtt_count(실제 RTT 누적 횟수)를 분모로 — matched 중 rtt_ms 없는 게 있어도 왜곡 없음.
+            "avg_rtt": round(b["rtt_sum"] / b["rtt_count"], 2) if b["rtt_count"] else None,
         }
 
     out: List[Dict[str, Any]] = []

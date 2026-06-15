@@ -61,8 +61,10 @@
        (redrawRssi). */
     const RSSI_AVG_BINS = 150;     // 보이는 범위를 이 개수 구간으로 평균
     const RSSI_SCATTER_MAX = 800;  // 점분포 최대 표시 점수
+    const TIMELINE_MAX = 3000;     // retry/ping 초당 시계열 표시 상한 (장시간 캡처 대비)
     function _rssiHexToRgba(hex, a) {
-        const m = hex.replace('#', '');
+        let m = hex.replace('#', '');
+        if (m.length === 3) m = m[0] + m[0] + m[1] + m[1] + m[2] + m[2];  // #abc → aabbcc
         const r = parseInt(m.substring(0, 2), 16);
         const g = parseInt(m.substring(2, 4), 16);
         const b = parseInt(m.substring(4, 6), 16);
@@ -76,7 +78,8 @@
         const binSize = span / targetBins;
         const buckets = {};
         for (const p of raw) {
-            const b = Math.floor((p.x - t0) / binSize);
+            // 마지막 점(p.x==t1)은 b=targetBins가 되어 범위를 벗어나므로 clamp.
+            const b = Math.min(targetBins - 1, Math.floor((p.x - t0) / binSize));
             (buckets[b] = buckets[b] || []).push(p.y);
         }
         return Object.keys(buckets).map(Number).sort((a, b) => a - b).map(b => {
@@ -135,15 +138,17 @@
             (signal.aps[name].retry_timeline || []).forEach(p => { map[p.epoch] = p; });
             retryDevs.push({ name, map });
         });
+        // 장시간 캡처(초당 시계열) 대비 상한으로 솎는다 — RSSI 다운샘플과 동일 취지.
+        const tl = downsampleStep(timeline, TIMELINE_MAX);
         // 각 초마다 [장치별 "retry%（retry/total)"] 배열을 customdata로.
-        const customdata = timeline.map(p => retryDevs.map(d => {
+        const customdata = tl.map(p => retryDevs.map(d => {
             const e = d.map[p.epoch];
             return (e && e.total) ? `${e.retry_pct}% (${e.retry}/${e.total})` : '0% (0/0)';
         }));
         const devLines = retryDevs.map((d, i) => `${d.name}: %{customdata[${i}]}`).join('<br>');
         traces.push({
-            x: timeline.map(p => epochToDate(p.epoch)),
-            y: timeline.map(p => p.total ? p.retry / p.total * 100 : 0),
+            x: tl.map(p => epochToDate(p.epoch)),
+            y: tl.map(p => p.total ? p.retry / p.total * 100 : 0),
             type: 'scatter', mode: 'lines',
             name: '전체 Retry%',
             line: { color: '#ef4444', width: 1.5 },
@@ -167,8 +172,8 @@
             if (p.dst && p.dst_mac) ipDev[p.dst] = p.dst_mac;
         });
         const staOf = (p) => {
-            for (const ip of [p.dst, p.src]) { const d = ipDev[ip]; if (d && d.indexOf('STA') === 0) return d; }
-            for (const ip of [p.dst, p.src]) { if (ip && (ipDev[ip] || '').indexOf('AP') !== 0) return ip; }
+            for (const ip of [p.dst, p.src]) { const d = ipDev[ip]; if (d && d.startsWith('STA')) return d; }
+            for (const ip of [p.dst, p.src]) { if (ip && !(ipDev[ip] || '').startsWith('AP')) return ip; }
             return '?';
         };
         const secs = {};
@@ -179,12 +184,12 @@
             else if (p.status === 'loss' || p.status === 'loss_gap') isLoss = true;
             else return;
             const sec = Math.floor(p.epoch);
-            const b = secs[sec] || (secs[sec] = { agg: { loss: 0, matched: 0, rtt: 0 }, dev: {} });
+            const b = secs[sec] || (secs[sec] = { agg: { loss: 0, matched: 0, rtt: 0, rtt_cnt: 0 }, dev: {} });
             const dev = staOf(p);
-            const db = b.dev[dev] || (b.dev[dev] = { loss: 0, matched: 0, rtt: 0 });
+            const db = b.dev[dev] || (b.dev[dev] = { loss: 0, matched: 0, rtt: 0, rtt_cnt: 0 });
             [b.agg, db].forEach(bb => {
                 if (isLoss) { bb.loss++; }
-                else { bb.matched++; if (typeof p.rtt_ms === 'number') bb.rtt += p.rtt_ms; }
+                else { bb.matched++; if (typeof p.rtt_ms === 'number') { bb.rtt += p.rtt_ms; bb.rtt_cnt++; } }
             });
         });
         const summ = (b) => {
@@ -192,7 +197,7 @@
             return {
                 loss: b.loss, matched: b.matched, total,
                 loss_pct: total ? Math.round(b.loss * 1000 / total) / 10 : 0,
-                avg_rtt: b.matched ? Math.round(b.rtt / b.matched * 100) / 100 : null,
+                avg_rtt: b.rtt_cnt ? Math.round(b.rtt / b.rtt_cnt * 100) / 100 : null,
             };
         };
         return Object.keys(secs).map(Number).sort((a, b) => a - b).map(sec => {
@@ -203,19 +208,24 @@
             return row;
         });
     }
-    const pingTl = (ping.timeline && ping.timeline.length)
+    const pingRaw = (ping.timeline && ping.timeline.length)
         ? ping.timeline
         : computePingTimeline(ping.full_list || []);
+    const pingTl = downsampleStep(pingRaw, TIMELINE_MAX);  // 장시간 캡처 대비 상한
     if (pingTl.length > 0) {
         const pingDevs = [...staNames, ...apNames];  // RSSI/retry와 동일한 장치 순서
-        const customdata = pingTl.map(p => pingDevs.map(name => {
+        // 두 선의 hover를 역할별로 분리 — RTT 선은 장치별 RTT, Loss 선은 장치별 loss.
+        const rttCd = pingTl.map(p => pingDevs.map(name => {
             const d = (p.by_dev || {})[name];
-            if (!d || !d.total) return '–';
-            const rtt = d.avg_rtt != null ? `${d.avg_rtt}ms` : '응답없음';
-            return `loss ${d.loss_pct}% (${d.loss}/${d.total}) · RTT ${rtt}`;
+            if (!d || !d.matched) return '–';
+            return `${d.avg_rtt}ms (n=${d.matched})`;
+        }));
+        const lossCd = pingTl.map(p => pingDevs.map(name => {
+            const d = (p.by_dev || {})[name];
+            return (d && d.total) ? `${d.loss_pct}% (${d.loss}/${d.total})` : '–';
         }));
         const devLines = pingDevs.map((name, i) => `${name}: %{customdata[${i}]}`).join('<br>');
-        // 평균 RTT 선 (주축 y3) — matched 없는 초는 null이라 gap.
+        // 평균 RTT 선 (주축 y3) — matched 없는 초는 null이라 gap. hover에 장치별 RTT.
         traces.push({
             x: pingTl.map(p => epochToDate(p.epoch)),
             y: pingTl.map(p => p.avg_rtt),
@@ -224,10 +234,11 @@
             line: { color: '#10b981', width: 1.5 },
             connectgaps: false,
             xaxis: 'x3', yaxis: 'y3',
-            hovertemplate: '평균 RTT %{y:.1f}ms<extra></extra>',
+            customdata: rttCd,
+            hovertemplate: `평균 RTT %{y:.1f}ms<br>${devLines}<extra></extra>`,
             _panel: 'rtt',
         });
-        // Loss% 선 (보조축 y5) + 장치별 customdata (hover 분해)
+        // Loss% 선 (보조축 y5) — hover에 장치별 loss.
         traces.push({
             x: pingTl.map(p => epochToDate(p.epoch)),
             y: pingTl.map(p => p.loss_pct),
@@ -236,7 +247,7 @@
             line: { color: '#f97316', width: 1.5 },
             fill: 'tozeroy', fillcolor: 'rgba(249,115,22,0.1)',
             xaxis: 'x3', yaxis: 'y5',
-            customdata: customdata,
+            customdata: lossCd,
             hovertemplate: `Loss %{y:.1f}%<br>${devLines}<extra></extra>`,
             _panel: 'rtt',
         });
@@ -444,7 +455,7 @@
                 return `<label class="flex items-center gap-2 py-0.5 px-2 hover:bg-gray-700 rounded cursor-pointer text-xs ${visible ? '' : 'opacity-40'}" data-trace-idx="${idx}">
                     <input type="checkbox" ${visible ? 'checked' : ''} class="trace-toggle accent-blue-500" data-trace-idx="${idx}">
                     <span class="inline-block w-3 h-3 rounded flex-shrink-0" style="background:${c}"></span>
-                    <span class="truncate" title="${t.name}">${t.name}</span>
+                    <span class="truncate" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</span>
                 </label>`;
             }).join('');
             const panelToggle = (p === 'misc') ? ''
@@ -763,8 +774,8 @@
     let highlightSet = new Set();
 
     function escapeHtml(s) {
-        return String(s == null ? '' : s).replace(/[<&>]/g, c => (
-            { '<': '&lt;', '&': '&amp;', '>': '&gt;' }[c]
+        return String(s == null ? '' : s).replace(/[<&>"']/g, c => (
+            { '<': '&lt;', '&': '&amp;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
         ));
     }
 
