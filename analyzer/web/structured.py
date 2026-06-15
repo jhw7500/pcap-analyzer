@@ -97,6 +97,32 @@ def _structured_overview(
     }
 
 
+def _retry_per_sec(device_frames: List[Frame]) -> List[Dict[str, Any]]:
+    """장치(ta)의 송신 프레임을 초 단위로 묶어 retry%를 집계한다.
+
+    각 초의 {retry 프레임 수, 전체 프레임 수, retry_pct}를 epoch 오름차순으로 반환.
+    rssi 유무와 무관하게 그 장치가 송신한 모든 프레임이 분모(total)에 들어간다
+    (retry는 rssi 없는 프레임에도 set될 수 있으므로).
+    """
+    if not device_frames:
+        return []
+    from collections import Counter
+
+    total = Counter(int(f.epoch) for f in device_frames)
+    retry = Counter(int(f.epoch) for f in device_frames if f.retry)
+    return [
+        {
+            "epoch": sec,
+            "retry": retry.get(sec, 0),
+            "total": total[sec],
+            "retry_pct": round(retry.get(sec, 0) * 100.0 / total[sec], 1)
+            if total[sec]
+            else 0.0,
+        }
+        for sec in sorted(total)
+    ]
+
+
 def _structured_signal(
     frames: List[Frame], roles: Dict[str, Dict[str, Any]], index
 ) -> Dict[str, Any]:
@@ -114,11 +140,10 @@ def _structured_signal(
             continue
         name = info["name"]
         if index:
-            tx_frames = [
-                f for f in index.by_ta.get(mac, []) if f.rssi_first is not None
-            ]
+            device_frames = index.by_ta.get(mac, [])
         else:
-            tx_frames = [f for f in frames if f.ta == mac and f.rssi_first is not None]
+            device_frames = [f for f in frames if f.ta == mac]
+        tx_frames = [f for f in device_frames if f.rssi_first is not None]
 
         rssi_timeline = [
             {"epoch": f.epoch, "rssi": f.rssi_first, "mcs": f.mcs_int}
@@ -134,6 +159,8 @@ def _structured_signal(
             if rssi_values
             else None,
             "frame_count": len(tx_frames),
+            # 장치별 초당 retry% (송신 프레임 전체 기준 — rssi 유무 무관).
+            "retry_timeline": _retry_per_sec(device_frames),
         }
         bucket = "stas" if role == "STA" else "aps"
         result[bucket][name] = entry
@@ -141,10 +168,88 @@ def _structured_signal(
     return result
 
 
+def _ping_per_sec(full_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """ping outcome을 초 단위로 묶어 전체/장치별 loss%·평균 RTT를 집계한다.
+
+    각 초: 전체 {loss, matched, total, loss_pct, avg_rtt} + dst_mac별 동일 지표(by_dev).
+    hover에서 그 시점 어느 STA가 손실/지연 주범인지 분해해 보여주기 위함.
+    matched=정상 응답, loss/loss_gap=손실. 그 외 status는 무시.
+    """
+    from collections import defaultdict
+
+    def _blank() -> Dict[str, Any]:
+        return {"loss": 0, "matched": 0, "rtt_sum": 0.0}
+
+    # ping의 다수(역방향·seq-gap 추정손실)는 MAC이 비어 dst_mac으로 장치를 못 가른다.
+    # src/dst IP는 항상 있으므로, MAC이 있는 항목에서 IP→장치명을 학습해 IP로 식별한다.
+    ip_dev: Dict[str, str] = {}
+    for p in full_list:
+        if p.get("src") and p.get("src_mac"):
+            ip_dev[p["src"]] = p["src_mac"]
+        if p.get("dst") and p.get("dst_mac"):
+            ip_dev[p["dst"]] = p["dst_mac"]
+
+    def _sta_of(p: Dict[str, Any]) -> str:
+        # ping 상대 STA = src/dst 중 STA로 매핑되는 IP의 장치명.
+        for ip in (p.get("dst"), p.get("src")):
+            dev = ip_dev.get(ip)
+            if dev and dev.startswith("STA"):
+                return dev
+        # STA 매핑 실패 시 AP가 아닌 IP를 STA 후보로(IP 그대로 표시).
+        for ip in (p.get("dst"), p.get("src")):
+            if ip and not ip_dev.get(ip, "").startswith("AP"):
+                return ip
+        return "?"
+
+    secs: Dict[int, Dict[str, Any]] = {}
+    for p in full_list:
+        epoch = p.get("epoch")
+        if not isinstance(epoch, (int, float)):
+            continue
+        status = p.get("status")
+        if status == "matched":
+            is_loss = False
+        elif status in ("loss", "loss_gap"):
+            is_loss = True
+        else:
+            continue
+        sec = int(epoch)
+        bucket = secs.setdefault(sec, {"agg": _blank(), "by_dev": defaultdict(_blank)})
+        dev = _sta_of(p)
+        for b in (bucket["agg"], bucket["by_dev"][dev]):
+            if is_loss:
+                b["loss"] += 1
+            else:
+                b["matched"] += 1
+                rtt = p.get("rtt_ms")
+                if isinstance(rtt, (int, float)):
+                    b["rtt_sum"] += rtt
+
+    def _summary(b: Dict[str, Any]) -> Dict[str, Any]:
+        total = b["loss"] + b["matched"]
+        return {
+            "loss": b["loss"],
+            "matched": b["matched"],
+            "total": total,
+            "loss_pct": round(b["loss"] * 100.0 / total, 1) if total else 0.0,
+            "avg_rtt": round(b["rtt_sum"] / b["matched"], 2) if b["matched"] else None,
+        }
+
+    out: List[Dict[str, Any]] = []
+    for sec in sorted(secs):
+        bucket = secs[sec]
+        row = {"epoch": sec, **_summary(bucket["agg"])}
+        row["by_dev"] = {dev: _summary(b) for dev, b in bucket["by_dev"].items()}
+        out.append(row)
+    return out
+
+
 def _structured_ping(
     frames: List[Frame], roles: Dict[str, Dict[str, Any]]
 ) -> Dict[str, Any]:
-    return build_ping_matches(frames, roles, PING_MATCH_WINDOW_SEC)
+    ping = build_ping_matches(frames, roles, PING_MATCH_WINDOW_SEC)
+    ping["timeline"] = _ping_per_sec(ping.get("full_list", []))
+    return ping
 
 
 def _structured_roaming(

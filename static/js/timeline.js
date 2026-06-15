@@ -119,76 +119,125 @@
         traces.push(...rssiTraces(signal.aps[name], name, apColors[i % apColors.length]));
     });
 
-    /* ── 서브플롯 2: Retry/sec ── */
+    /* ── 서브플롯 2: Retry % ── 전체 retry% 선 1개.
+       hover 시 그 시점(초)의 장치별 retry를 툴팁에 펼쳐 원인 장치를 식별한다. ── */
     const timeline = perSec.timeline || [];
     if (timeline.length > 0) {
-        const sampled = downsample(
-            timeline.map(p => ({ x: p.epoch, y: p.retry })), 2000
-        );
+        // 장치별 retry_timeline을 epoch(초)로 인덱싱 → hover customdata 구성용.
+        const retryDevs = [];
+        staNames.forEach(name => {
+            const map = {};
+            (signal.stas[name].retry_timeline || []).forEach(p => { map[p.epoch] = p; });
+            retryDevs.push({ name, map });
+        });
+        apNames.forEach(name => {
+            const map = {};
+            (signal.aps[name].retry_timeline || []).forEach(p => { map[p.epoch] = p; });
+            retryDevs.push({ name, map });
+        });
+        // 각 초마다 [장치별 "retry%（retry/total)"] 배열을 customdata로.
+        const customdata = timeline.map(p => retryDevs.map(d => {
+            const e = d.map[p.epoch];
+            return (e && e.total) ? `${e.retry_pct}% (${e.retry}/${e.total})` : '0% (0/0)';
+        }));
+        const devLines = retryDevs.map((d, i) => `${d.name}: %{customdata[${i}]}`).join('<br>');
         traces.push({
-            x: sampled.map(p => epochToDate(p.x)),
-            y: sampled.map(p => p.y),
+            x: timeline.map(p => epochToDate(p.epoch)),
+            y: timeline.map(p => p.total ? p.retry / p.total * 100 : 0),
             type: 'scatter', mode: 'lines',
-            name: 'Retry/sec',
-            line: { color: '#ef4444', width: 1 },
+            name: '전체 Retry%',
+            line: { color: '#ef4444', width: 1.5 },
             fill: 'tozeroy', fillcolor: 'rgba(239,68,68,0.1)',
             xaxis: 'x2', yaxis: 'y2',
-            hovertemplate: '%{x|%H:%M:%S} · %{y:.0f} pkt/s<extra></extra>',
+            customdata: customdata,
+            hovertemplate: `%{x|%H:%M:%S} · 전체 %{y:.1f}%<br>${devLines}<extra></extra>`,
             _panel: 'retry',
         });
     }
 
-    /* ── 서브플롯 3: Ping RTT ── 정상은 숨김(legendonly), 지연·loss만 강조 */
-    const allPairs = ping.pairs || [];
-    const rttsSorted = allPairs
-        .map(p => p.rtt_ms).filter(v => v != null && v > 0)
-        .sort((a, b) => a - b);
-    // 임계값: P90(상위 10%) — 단 너무 낮으면 시각적 의미 없으니 50ms 하한
-    const p90 = rttsSorted.length > 0
-        ? rttsSorted[Math.floor(rttsSorted.length * 0.9)]
-        : 50;
-    const PING_DELAY_THRESHOLD = Math.max(p90, 50);
-    const normalPairs  = downsampleStep(allPairs.filter(p => p.rtt_ms != null && p.rtt_ms <  PING_DELAY_THRESHOLD), 2000);
-    const delayedPairs = allPairs.filter(p => p.rtt_ms != null && p.rtt_ms >= PING_DELAY_THRESHOLD);
-    if (normalPairs.length > 0) {
-        traces.push({
-            x: normalPairs.map(p => epochToDate(p.epoch)),
-            y: normalPairs.map(p => p.rtt_ms),
-            type: 'scatter', mode: 'markers',
-            name: `Ping 정상 (<${PING_DELAY_THRESHOLD.toFixed(0)}ms)`,
-            marker: { color: 'rgba(16,185,129,0.6)', size: 2 },  // 살짝 투명한 녹색
-            xaxis: 'x3', yaxis: 'y3',
-            hovertemplate: '%{x|%H:%M:%S} · %{y:.1f} ms<extra></extra>',
-            _panel: 'rtt',
+    /* ── 서브플롯 3: Ping ── 평균 RTT(주축 y3, ms) + Loss%(보조축 y5, 우측).
+       hover 시 그 시점 장치별 loss/RTT를 펼쳐 손실·지연 원인 STA를 식별한다. ── */
+    /* ping.timeline은 백엔드 신규 필드 — 기존(재분석 전) 결과엔 없으므로 full_list로
+       즉석 계산해 호환성을 보장한다(full_list는 모든 분석에 존재). 백엔드 _ping_per_sec와
+       동일 로직: MAC 있는 항목에서 IP↔장치를 학습해 IP로 STA를 식별. */
+    function computePingTimeline(fullList) {
+        const ipDev = {};
+        fullList.forEach(p => {
+            if (p.src && p.src_mac) ipDev[p.src] = p.src_mac;
+            if (p.dst && p.dst_mac) ipDev[p.dst] = p.dst_mac;
+        });
+        const staOf = (p) => {
+            for (const ip of [p.dst, p.src]) { const d = ipDev[ip]; if (d && d.indexOf('STA') === 0) return d; }
+            for (const ip of [p.dst, p.src]) { if (ip && (ipDev[ip] || '').indexOf('AP') !== 0) return ip; }
+            return '?';
+        };
+        const secs = {};
+        fullList.forEach(p => {
+            if (typeof p.epoch !== 'number') return;
+            let isLoss;
+            if (p.status === 'matched') isLoss = false;
+            else if (p.status === 'loss' || p.status === 'loss_gap') isLoss = true;
+            else return;
+            const sec = Math.floor(p.epoch);
+            const b = secs[sec] || (secs[sec] = { agg: { loss: 0, matched: 0, rtt: 0 }, dev: {} });
+            const dev = staOf(p);
+            const db = b.dev[dev] || (b.dev[dev] = { loss: 0, matched: 0, rtt: 0 });
+            [b.agg, db].forEach(bb => {
+                if (isLoss) { bb.loss++; }
+                else { bb.matched++; if (typeof p.rtt_ms === 'number') bb.rtt += p.rtt_ms; }
+            });
+        });
+        const summ = (b) => {
+            const total = b.loss + b.matched;
+            return {
+                loss: b.loss, matched: b.matched, total,
+                loss_pct: total ? Math.round(b.loss * 1000 / total) / 10 : 0,
+                avg_rtt: b.matched ? Math.round(b.rtt / b.matched * 100) / 100 : null,
+            };
+        };
+        return Object.keys(secs).map(Number).sort((a, b) => a - b).map(sec => {
+            const b = secs[sec];
+            const row = Object.assign({ epoch: sec }, summ(b.agg));
+            row.by_dev = {};
+            for (const dev in b.dev) row.by_dev[dev] = summ(b.dev[dev]);
+            return row;
         });
     }
-    if (delayedPairs.length > 0) {
+    const pingTl = (ping.timeline && ping.timeline.length)
+        ? ping.timeline
+        : computePingTimeline(ping.full_list || []);
+    if (pingTl.length > 0) {
+        const pingDevs = [...staNames, ...apNames];  // RSSI/retry와 동일한 장치 순서
+        const customdata = pingTl.map(p => pingDevs.map(name => {
+            const d = (p.by_dev || {})[name];
+            if (!d || !d.total) return '–';
+            const rtt = d.avg_rtt != null ? `${d.avg_rtt}ms` : '응답없음';
+            return `loss ${d.loss_pct}% (${d.loss}/${d.total}) · RTT ${rtt}`;
+        }));
+        const devLines = pingDevs.map((name, i) => `${name}: %{customdata[${i}]}`).join('<br>');
+        // 평균 RTT 선 (주축 y3) — matched 없는 초는 null이라 gap.
         traces.push({
-            x: delayedPairs.map(p => epochToDate(p.epoch)),
-            y: delayedPairs.map(p => p.rtt_ms),
-            type: 'scatter', mode: 'markers',
-            name: `Ping 지연 (≥${PING_DELAY_THRESHOLD.toFixed(0)}ms)`,
-            marker: { color: '#f97316', size: 5 },
+            x: pingTl.map(p => epochToDate(p.epoch)),
+            y: pingTl.map(p => p.avg_rtt),
+            type: 'scatter', mode: 'lines',
+            name: '평균 RTT',
+            line: { color: '#10b981', width: 1.5 },
+            connectgaps: false,
             xaxis: 'x3', yaxis: 'y3',
-            hovertemplate: '%{x|%H:%M:%S} · %{y:.1f} ms<extra></extra>',
+            hovertemplate: '평균 RTT %{y:.1f}ms<extra></extra>',
             _panel: 'rtt',
         });
-    }
-    // Ping loss 마커 — 항상 × 마커로 표시 (막대는 저-RTT pair 영역을 가려 오해 유발)
-    // 손실 위치는 차트 상단(rtt_max * 1.1)에 찍어 RTT trace 위에 떠 있게 함.
-    const losses = downsampleStep(ping.losses || [], 1000);
-    if (losses.length > 0) {
-        const rttMax = rttsSorted.length > 0 ? rttsSorted[rttsSorted.length - 1] : 1;
-        const lossY = rttMax > 0 ? rttMax * 1.1 : 1;
+        // Loss% 선 (보조축 y5) + 장치별 customdata (hover 분해)
         traces.push({
-            x: losses.map(p => epochToDate(p.epoch)),
-            y: losses.map(() => lossY),
-            type: 'scatter', mode: 'markers',
-            name: `Ping Loss (${losses.length}건)`,
-            marker: { symbol: 'x', color: '#ef4444', size: 10, line: { width: 2 } },
-            xaxis: 'x3', yaxis: 'y3',
-            hovertemplate: '%{x|%H:%M:%S} · loss seq=%{customdata}<extra></extra>',
-            customdata: losses.map(p => p.seq || '?'),
+            x: pingTl.map(p => epochToDate(p.epoch)),
+            y: pingTl.map(p => p.loss_pct),
+            type: 'scatter', mode: 'lines',
+            name: 'Loss%',
+            line: { color: '#f97316', width: 1.5 },
+            fill: 'tozeroy', fillcolor: 'rgba(249,115,22,0.1)',
+            xaxis: 'x3', yaxis: 'y5',
+            customdata: customdata,
+            hovertemplate: `Loss %{y:.1f}%<br>${devLines}<extra></extra>`,
             _panel: 'rtt',
         });
     }
@@ -284,9 +333,11 @@
         xaxis3: { anchor: 'y3', domain: [0, 1], showticklabels: false, matches: 'x', gridcolor: GRID, ...SPIKE, ...HOVER_X },
         xaxis4: { anchor: 'y4', domain: [0, 1], matches: 'x', gridcolor: GRID, ...SPIKE, ...HOVER_X },
         yaxis:  { title: 'RSSI (dBm)', domain: [0.78, 1.0], gridcolor: GRID },
-        yaxis2: { title: 'Retry/s',    domain: [0.53, 0.75], gridcolor: GRID },
+        yaxis2: { title: 'Retry %',    domain: [0.53, 0.75], gridcolor: GRID },
         yaxis3: { title: 'RTT (ms)',   domain: [0.28, 0.50], gridcolor: GRID },
         yaxis4: { title: 'Frames/s',   domain: [0.00, 0.25], gridcolor: GRID },
+        // Ping 패널 보조축: Loss%(우측). RTT(y3)와 같은 칸에 겹쳐 그린다.
+        yaxis5: { title: 'Loss %', overlaying: 'y3', side: 'right', range: [0, 100], showgrid: false, color: '#f97316' },
         shapes: allShapes.map(({ _kind, ...rest }) => rest),
         margin: { t: 20, r: 20, b: 40, l: 60 },
     };
@@ -321,12 +372,14 @@
             const bot = top - each;
             updates[`${axis}.domain`] = [Number(bot.toFixed(4)), Number(top.toFixed(4))];
             updates[`${axis}.visible`] = true;
+            if (p === 'rtt') updates['yaxis5.visible'] = true;  // Ping 보조축(Loss%) 동기화
             top = bot - gap;
         });
         PANELS.filter(p => !panelOn[p]).forEach(p => {
             const axis = PANEL_AXIS[p];
             updates[`${axis}.visible`] = false;
             updates[`${axis}.domain`] = [0, 0.001];
+            if (p === 'rtt') updates['yaxis5.visible'] = false;
         });
         Plotly.relayout(timelineEl, updates);
         // 꺼진 패널 트레이스는 숨김, 켜진 패널은 사이드바 개별 상태(_userVisible)대로.
