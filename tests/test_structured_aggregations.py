@@ -78,3 +78,19 @@ def test_ping_per_sec_ip_identifies_sta_without_mac():
     assert "STA1(aa)" in by
     assert by["STA1(aa)"]["loss"] == 1 and by["STA1(aa)"]["matched"] == 1
     assert "?" not in by  # 미매핑 fallback 없이 STA로 귀속
+
+
+def test_retry_per_sec_skips_none_epoch():
+    # epoch 없는 프레임은 건너뛰고 build를 깨지 않는다.
+    out = _retry_per_sec([_Frame(None, True), _Frame(100.1, False)])
+    assert out == [{"epoch": 100, "retry": 0, "total": 1, "retry_pct": 0.0}]
+
+
+def test_ping_per_sec_ip_fallback_key_when_no_sta():
+    # 어떤 항목도 STA로 매핑 안 되면 by_dev 키가 IP(또는 '?') — 장치명이 아님.
+    full = [_ping(100.1, "loss", None, src="192.168.0.99", dst="192.168.0.1",
+                  src_mac="", dst_mac="")]
+    out = _ping_per_sec(full)
+    by = out[0]["by_dev"]
+    assert all(not k.startswith("STA") for k in by)  # STA 장치명 키 없음
+    assert out[0]["loss"] == 1  # 전체 집계 agg 에는 포함

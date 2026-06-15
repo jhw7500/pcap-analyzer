@@ -107,6 +107,8 @@ def _retry_per_sec(device_frames: List[Frame]) -> List[Dict[str, Any]]:
     """
     by_sec: Dict[int, Dict[str, int]] = defaultdict(lambda: {"retry": 0, "total": 0})
     for f in device_frames:
+        if f.epoch is None:  # epoch 없는 프레임이 build 전체를 깨지 않도록 방어.
+            continue
         b = by_sec[int(f.epoch)]
         b["total"] += 1
         if f.retry:
@@ -198,7 +200,9 @@ def _ping_per_sec(full_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             dev = ip_to_dev.get(ip)
             if dev and dev.startswith("STA"):
                 return dev
-        # STA 매핑 실패 시 AP가 아닌 IP를 STA 후보로(IP 그대로 표시).
+        # STA 매핑 실패 시 AP가 아닌 IP를 STA 후보로(IP 그대로 표시), 끝내 없으면 '?'.
+        # → by_dev 키에 IP/'?' 가 섞일 수 있다. 프론트는 staNames/apNames(장치명)만
+        #   hover에 펼치므로 IP/'?' 키는 hover에서 빠진다(전체 집계 agg에는 포함).
         for ip in (p.get("dst"), p.get("src")):
             if ip and not ip_to_dev.get(ip, "").startswith("AP"):
                 return ip

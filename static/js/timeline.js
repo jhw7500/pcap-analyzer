@@ -43,6 +43,13 @@
         return arr.filter((_, i) => i % step === 0);
     }
 
+    // HTML 이스케이프 — innerHTML/Plotly hovertemplate에 장치명을 넣기 전 거친다(악성 pcap 방어).
+    function escapeHtml(s) {
+        return String(s == null ? '' : s).replace(/[<&>"']/g, c => (
+            { '<': '&lt;', '&': '&amp;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+        ));
+    }
+
     function epochToDate(epoch) {
         return new Date(epoch * 1000);
     }
@@ -61,7 +68,7 @@
        (redrawRssi). */
     const RSSI_AVG_BINS = 150;     // 보이는 범위를 이 개수 구간으로 평균
     const RSSI_SCATTER_MAX = 800;  // 점분포 최대 표시 점수
-    const TIMELINE_MAX = 3000;     // retry/ping 초당 시계열 표시 상한 (장시간 캡처 대비)
+    const TIMELINE_MAX = 10800;    // retry/ping 초당 시계열 상한(=3h). 이미 초당 집계라 그 이하는 무손실.
     function _rssiHexToRgba(hex, a) {
         let m = hex.replace('#', '');
         if (m.length === 3) m = m[0] + m[0] + m[1] + m[1] + m[2] + m[2];  // #abc → aabbcc
@@ -184,12 +191,12 @@
             else if (p.status === 'loss' || p.status === 'loss_gap') isLoss = true;
             else return;
             const sec = Math.floor(p.epoch);
-            const b = secs[sec] || (secs[sec] = { agg: { loss: 0, matched: 0, rtt: 0, rtt_cnt: 0 }, dev: {} });
+            const b = secs[sec] || (secs[sec] = { agg: { loss: 0, matched: 0, rtt: 0, rtt_count: 0 }, dev: {} });
             const dev = staOf(p);
-            const db = b.dev[dev] || (b.dev[dev] = { loss: 0, matched: 0, rtt: 0, rtt_cnt: 0 });
+            const db = b.dev[dev] || (b.dev[dev] = { loss: 0, matched: 0, rtt: 0, rtt_count: 0 });
             [b.agg, db].forEach(bb => {
                 if (isLoss) { bb.loss++; }
-                else { bb.matched++; if (typeof p.rtt_ms === 'number') { bb.rtt += p.rtt_ms; bb.rtt_cnt++; } }
+                else { bb.matched++; if (typeof p.rtt_ms === 'number') { bb.rtt += p.rtt_ms; bb.rtt_count++; } }
             });
         });
         const summ = (b) => {
@@ -197,7 +204,7 @@
             return {
                 loss: b.loss, matched: b.matched, total,
                 loss_pct: total ? Math.round(b.loss * 1000 / total) / 10 : 0,
-                avg_rtt: b.rtt_cnt ? Math.round(b.rtt / b.rtt_cnt * 100) / 100 : null,
+                avg_rtt: b.rtt_count ? Math.round(b.rtt / b.rtt_count * 100) / 100 : null,
             };
         };
         return Object.keys(secs).map(Number).sort((a, b) => a - b).map(sec => {
@@ -773,12 +780,6 @@
     // 필요하므로 debug.frames 각 행에 epoch을 함께 싣지 않은 경우 전체만 보여준다.
     let highlightSet = new Set();
 
-    function escapeHtml(s) {
-        return String(s == null ? '' : s).replace(/[<&>"']/g, c => (
-            { '<': '&lt;', '&': '&amp;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-        ));
-    }
-
     function rowEpoch(row) {
         // frame_to_row는 epoch을 직접 싣지 않지만, pipeline이 debug.frames에 epoch을
         // 부가하면 사용. 없으면 null(필터 시 항상 포함).
@@ -848,11 +849,12 @@
         if (idxs.length) Plotly.restyle(timelineEl, { x: newX, y: newY }, idxs);
     }
 
-    // pan/zoom 중 plotly_relayout이 매 프레임 발생 — redraw를 80ms debounce로 묶어 jank 방지.
+    // pan/zoom 중 plotly_relayout이 매 프레임 발생 — redraw(전 RSSI trace restyle)를
+    // 120ms debounce로 묶어 jank 방지. 인터랙션엔 거의 지각되지 않는 지연.
     let _rssiRedrawTimer = null;
     function redrawRssiDebounced(x0, x1) {
         if (_rssiRedrawTimer) clearTimeout(_rssiRedrawTimer);
-        _rssiRedrawTimer = setTimeout(() => redrawRssi(x0, x1), 80);
+        _rssiRedrawTimer = setTimeout(() => redrawRssi(x0, x1), 120);
     }
 
     /* ── 타임라인 x축 범위 변경 → 표 필터 (브러시/줌/팬) ── */
