@@ -111,7 +111,7 @@ def _retry_per_sec(device_frames: List[Frame]) -> List[Dict[str, Any]]:
             continue
         b = by_sec[int(f.epoch)]
         b["total"] += 1
-        if f.retry:
+        if f.retry:  # Frame.retry는 bool — truthy면 재전송. None/0/False는 비-retry로 본다.
             b["retry"] += 1
     return [
         {

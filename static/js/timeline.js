@@ -44,9 +44,11 @@
     }
 
     // HTML 이스케이프 — innerHTML/Plotly hovertemplate에 장치명을 넣기 전 거친다(악성 pcap 방어).
+    // '%'도 막는다: Plotly hovertemplate은 %{...}를 데이터 바인딩으로 해석하므로,
+    // 장치명에 %{...}가 있으면 임의 trace 데이터가 새어나갈 수 있다.
     function escapeHtml(s) {
-        return String(s == null ? '' : s).replace(/[<&>"']/g, c => (
-            { '<': '&lt;', '&': '&amp;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+        return String(s == null ? '' : s).replace(/[<&>"'%]/g, c => (
+            { '<': '&lt;', '&': '&amp;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '%': '&#37;' }[c]
         ));
     }
 
@@ -190,7 +192,7 @@
             if (p.status === 'matched') isLoss = false;
             else if (p.status === 'loss' || p.status === 'loss_gap') isLoss = true;
             else return;
-            const sec = Math.floor(p.epoch);
+            const sec = Math.floor(p.epoch);  // 백엔드 _ping_per_sec의 int(epoch)와 동등(epoch는 양수)
             const b = secs[sec] || (secs[sec] = { agg: { loss: 0, matched: 0, rtt: 0, rtt_count: 0 }, dev: {} });
             const dev = staOf(p);
             const db = b.dev[dev] || (b.dev[dev] = { loss: 0, matched: 0, rtt: 0, rtt_count: 0 });
