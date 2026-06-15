@@ -55,25 +55,68 @@
     const apColors  = ['#10b981', '#34d399', '#fbbf24', '#f59e0b'];  // 초록~노랑
     const staNames = Object.keys(signal.stas || {});
     const apNames  = Object.keys(signal.aps  || {});
-    function rssiTrace(node, name, color) {
+    /* RSSI 표시: 구간평균 선(추세) + 반투명 측정점 분포(노이즈).
+       고진동 RSSI를 선으로 이으면 톱니로 뭉치므로, 추세는 평균선이, 산포는
+       점이 담당하도록 분리한다. 둘 다 보이는 줌 범위에 맞춰 재계산된다
+       (redrawRssi). */
+    const RSSI_AVG_BINS = 150;     // 보이는 범위를 이 개수 구간으로 평균
+    const RSSI_SCATTER_MAX = 800;  // 점분포 최대 표시 점수
+    function _rssiHexToRgba(hex, a) {
+        const m = hex.replace('#', '');
+        const r = parseInt(m.substring(0, 2), 16);
+        const g = parseInt(m.substring(2, 4), 16);
+        const b = parseInt(m.substring(4, 6), 16);
+        return `rgba(${r},${g},${b},${a})`;
+    }
+    function _rssiBinAverage(raw, targetBins) {
+        if (!raw.length) return [];
+        const t0 = raw[0].x, t1 = raw[raw.length - 1].x;
+        const span = t1 - t0;
+        if (span <= 0) return raw.map(p => ({ x: p.x, y: p.y }));
+        const binSize = span / targetBins;
+        const buckets = {};
+        for (const p of raw) {
+            const b = Math.floor((p.x - t0) / binSize);
+            (buckets[b] = buckets[b] || []).push(p.y);
+        }
+        return Object.keys(buckets).map(Number).sort((a, b) => a - b).map(b => {
+            const arr = buckets[b];
+            return { x: t0 + b * binSize + binSize / 2, y: arr.reduce((s, v) => s + v, 0) / arr.length };
+        });
+    }
+    /* 노드 1개당 trace 2개: [0] 측정점 분포(scattergl markers), [1] 평균선. */
+    function rssiTraces(node, name, color) {
         const raw = (node.rssi_timeline || []).map(p => ({ x: p.epoch, y: p.rssi }));
-        const sampled = downsample(raw, 2000);
-        return {
-            x: sampled.map(p => epochToDate(p.x)),
-            y: sampled.map(p => p.y),
-            type: 'scatter', mode: 'lines',
-            name: name + ' RSSI',
-            line: { color: color, width: 1 },
-            xaxis: 'x', yaxis: 'y',
-            hovertemplate: '%{x|%H:%M:%S} · %{y:.0f} dBm<extra></extra>',
-            _panel: 'rssi',
-        };
+        const scatterPts = downsampleStep(raw, RSSI_SCATTER_MAX);
+        const avgPts = _rssiBinAverage(raw, RSSI_AVG_BINS);
+        return [
+            {
+                x: scatterPts.map(p => epochToDate(p.x)),
+                y: scatterPts.map(p => p.y),
+                type: 'scattergl', mode: 'markers',
+                name: name + ' RSSI 측정점',
+                marker: { color: _rssiHexToRgba(color, 0.30), size: 3 },
+                xaxis: 'x', yaxis: 'y',
+                hovertemplate: '%{x|%H:%M:%S} · %{y:.0f} dBm<extra></extra>',
+                _panel: 'rssi', _rawRssi: raw, _rssiKind: 'scatter',
+            },
+            {
+                x: avgPts.map(p => epochToDate(p.x)),
+                y: avgPts.map(p => p.y),
+                type: 'scatter', mode: 'lines',
+                name: name + ' RSSI 평균',
+                line: { color: color, width: 2 },
+                xaxis: 'x', yaxis: 'y',
+                hovertemplate: '%{x|%H:%M:%S} · 평균 %{y:.1f} dBm<extra></extra>',
+                _panel: 'rssi', _rawRssi: raw, _rssiKind: 'avg',
+            },
+        ];
     }
     staNames.forEach((name, i) => {
-        traces.push(rssiTrace(signal.stas[name], name, staColors[i % staColors.length]));
+        traces.push(...rssiTraces(signal.stas[name], name, staColors[i % staColors.length]));
     });
     apNames.forEach((name, i) => {
-        traces.push(rssiTrace(signal.aps[name], name, apColors[i % apColors.length]));
+        traces.push(...rssiTraces(signal.aps[name], name, apColors[i % apColors.length]));
     });
 
     /* ── 서브플롯 2: Retry/sec ── */
@@ -261,68 +304,39 @@
         modeBarButtonsToRemove: ['lasso2d', 'select2d'],
     });
 
-    /* ── 패널 토글 ── 체크박스 변경 시 도메인 재배치 + trace visible ── */
-    function applyPanelLayout(enabled) {
-        if (enabled.length === 0) return;
-        const order = PANELS.filter(p => enabled.includes(p));
+    /* ── 패널 on/off 상태 ── 사이드바 그룹 체크가 관리(상단 패널 표시 제거됨). ── */
+    const panelOn = {};
+    PANELS.forEach(p => { panelOn[p] = true; });
+
+    /* ── 패널 레이아웃 ── panelOn 기준으로 켜진 패널만 도메인 분배 + 꺼진 패널 숨김.
+       꺼진 패널(서브플롯)은 칸을 비우고 나머지가 공간을 채운다. 0개면 전체 빈다. ── */
+    function applyPanelLayout() {
+        const enabled = PANELS.filter(p => panelOn[p]);
         const gap = 0.04;
-        const each = (1 - gap * Math.max(0, order.length - 1)) / order.length;
+        const each = enabled.length ? (1 - gap * Math.max(0, enabled.length - 1)) / enabled.length : 0;
         const updates = {};
         let top = 1.0;
-        order.forEach(p => {
+        enabled.forEach(p => {
             const axis = PANEL_AXIS[p];
             const bot = top - each;
             updates[`${axis}.domain`] = [Number(bot.toFixed(4)), Number(top.toFixed(4))];
             updates[`${axis}.visible`] = true;
             top = bot - gap;
         });
-        PANELS.filter(p => !enabled.includes(p)).forEach(p => {
+        PANELS.filter(p => !panelOn[p]).forEach(p => {
             const axis = PANEL_AXIS[p];
             updates[`${axis}.visible`] = false;
             updates[`${axis}.domain`] = [0, 0.001];
         });
         Plotly.relayout(timelineEl, updates);
-        // 트레이스 visible: 비활성 패널 트레이스만 숨김. 사이드바 체크박스 상태는 보존.
+        // 꺼진 패널 트레이스는 숨김, 켜진 패널은 사이드바 개별 상태(_userVisible)대로.
         const visibleArr = timelineEl.data.map(t => {
             if (!t._panel) return t.visible !== false ? true : false;
-            if (!enabled.includes(t._panel)) return false;
-            // 패널은 켜져 있고 — 사이드바 상태대로
+            if (!panelOn[t._panel]) return false;
             return t._userVisible !== false;
         });
         Plotly.restyle(timelineEl, { visible: visibleArr });
-        renderTraceLegend();  // 사이드바 활성/비활성 갱신
-    }
-
-    const toggleBoxes = document.querySelectorAll('.timeline-toggle');
-    toggleBoxes.forEach(cb => {
-        cb.addEventListener('change', () => {
-            const enabled = Array.from(toggleBoxes).filter(x => x.checked).map(x => x.dataset.panel);
-            if (enabled.length === 0) {
-                cb.checked = true;
-                return;
-            }
-            applyPanelLayout(enabled);
-        });
-    });
-
-    /* ── 단독 보기 버튼 ── 그 패널만 켜고 나머지 끔 ── */
-    document.querySelectorAll('.timeline-solo').forEach(btn => {
-        btn.addEventListener('click', e => {
-            e.preventDefault();
-            const target = btn.dataset.panel;
-            toggleBoxes.forEach(cb => { cb.checked = cb.dataset.panel === target; });
-            applyPanelLayout([target]);
-        });
-    });
-
-    /* ── 전체 표시 버튼 ── */
-    const showAllBtn = document.querySelector('.timeline-show-all');
-    if (showAllBtn) {
-        showAllBtn.addEventListener('click', e => {
-            e.preventDefault();
-            toggleBoxes.forEach(cb => { cb.checked = true; });
-            applyPanelLayout(PANELS.slice());
-        });
+        renderTraceLegend();
     }
 
     /* ── 오버레이 토글 ── 로밍 점선 / 이상 구간 / RSSI Cliff ── */
@@ -340,8 +354,8 @@
         const visibleArr = timelineEl.data.map(t => {
             if (t._overlay === 'cliff' && !want.cliff) return false;
             if (t._panel) {
-                const cb = document.querySelector(`.timeline-toggle[data-panel="${t._panel}"]`);
-                return !cb || cb.checked;
+                if (t._panel !== 'misc' && panelOn[t._panel] === false) return false;
+                return t._userVisible !== false;
             }
             return true;
         });
@@ -360,38 +374,82 @@
     function renderTraceLegend() {
         const lg = document.getElementById('timeline-legend');
         if (!lg) return;
+        const isVisible = (t) => t.visible !== false && t.visible !== 'legendonly';
         const groups = {};
         timelineEl.data.forEach((t, idx) => {
             const p = t._panel || 'misc';
             (groups[p] = groups[p] || []).push({ t, idx });
         });
         const PANEL_LABELS = { rssi: 'RSSI', retry: 'Retry/s', rtt: 'Ping RTT', frames: 'Frames/s', misc: '기타' };
-        const html = PANELS.concat(['misc']).filter(p => groups[p]).map(p => {
-            const enabled = !document.querySelector(`.timeline-toggle[data-panel="${p}"]`)
-                || document.querySelector(`.timeline-toggle[data-panel="${p}"]`).checked;
+        const groupsHtml = PANELS.concat(['misc']).filter(p => groups[p]).map(p => {
+            // 그룹 헤더 체크 = 패널 on/off (서브플롯 표시/숨김). misc는 패널이 아니라 토글 없음.
+            const panelEnabled = (p === 'misc') ? true : !!panelOn[p];
             const items = groups[p].map(({ t, idx }) => {
-                const visible = t.visible !== false && t.visible !== 'legendonly';
+                const visible = isVisible(t);
                 const c = traceColor(t);
-                return `<label class="flex items-center gap-2 py-0.5 px-2 hover:bg-gray-700 rounded cursor-pointer text-xs ${visible && enabled ? '' : 'opacity-40'}" data-trace-idx="${idx}">
-                    <input type="checkbox" ${visible ? 'checked' : ''} ${enabled ? '' : 'disabled'} class="trace-toggle accent-blue-500" data-trace-idx="${idx}">
+                // disabled 제거 — 패널이 꺼져 있어도 하위를 체크하면 그 패널을 자동 ON.
+                return `<label class="flex items-center gap-2 py-0.5 px-2 hover:bg-gray-700 rounded cursor-pointer text-xs ${visible ? '' : 'opacity-40'}" data-trace-idx="${idx}">
+                    <input type="checkbox" ${visible ? 'checked' : ''} class="trace-toggle accent-blue-500" data-trace-idx="${idx}">
                     <span class="inline-block w-3 h-3 rounded flex-shrink-0" style="background:${c}"></span>
                     <span class="truncate" title="${t.name}">${t.name}</span>
                 </label>`;
             }).join('');
+            const panelToggle = (p === 'misc') ? ''
+                : `<input type="checkbox" class="panel-toggle accent-blue-500" data-panel="${p}" ${panelEnabled ? 'checked' : ''}>`;
             return `<div class="mb-2">
-                <div class="text-[10px] uppercase tracking-wide text-gray-500 px-2 mb-1">${PANEL_LABELS[p] || p}</div>
+                <label class="flex items-center gap-2 px-2 mb-1 cursor-pointer hover:bg-gray-700/50 rounded">
+                    ${panelToggle}
+                    <span class="text-[10px] uppercase tracking-wide text-gray-400 font-semibold">${PANEL_LABELS[p] || p}</span>
+                </label>
                 ${items}
             </div>`;
         }).join('');
-        lg.innerHTML = html;
+        const allPanelsOn = PANELS.every(p => panelOn[p]);
+        const totalVis = timelineEl.data.filter(isVisible).length;
+        const totalAll = allPanelsOn && totalVis === timelineEl.data.length;
+        const anyOn = PANELS.some(p => panelOn[p]) || totalVis > 0;
+        lg.innerHTML = `
+            <label class="flex items-center gap-2 px-2 py-1 mb-2 border-b border-gray-700 cursor-pointer sticky top-0 bg-gray-800 z-10">
+                <input type="checkbox" id="trace-toggle-all" class="accent-blue-500" ${totalAll ? 'checked' : ''}>
+                <span class="text-xs font-semibold text-gray-300">전체 선택/해제</span>
+            </label>
+            ${groupsHtml}`;
+
+        // 일부만 켜진 전체 체크박스는 indeterminate(중간) 표시
+        const allCb = lg.querySelector('#trace-toggle-all');
+        if (allCb) allCb.indeterminate = anyOn && !totalAll;
+
+        // 개별 트레이스 visible 토글. 꺼진 패널의 하위를 켜면 그 패널을 자동 ON.
         lg.querySelectorAll('.trace-toggle').forEach(cb => {
             cb.addEventListener('change', () => {
                 const idx = parseInt(cb.dataset.traceIdx, 10);
+                const panel = timelineEl.data[idx]._panel;
                 timelineEl.data[idx]._userVisible = cb.checked;
-                Plotly.restyle(timelineEl, { visible: cb.checked }, [idx]);
-                cb.closest('label').classList.toggle('opacity-40', !cb.checked);
+                if (cb.checked && panel && panel !== 'misc' && !panelOn[panel]) {
+                    panelOn[panel] = true;        // 하위 체크 → 상위 패널 자동 ON
+                    applyPanelLayout();           // 재배치 + _userVisible 반영 + 범례 갱신
+                } else {
+                    Plotly.restyle(timelineEl, { visible: cb.checked }, [idx]);
+                    renderTraceLegend();
+                }
             });
         });
+        // 그룹 체크 = 패널 on/off → 서브플롯 숨김 + 레이아웃 재배치
+        lg.querySelectorAll('.panel-toggle').forEach(cb => {
+            cb.addEventListener('change', () => {
+                panelOn[cb.dataset.panel] = cb.checked;
+                applyPanelLayout();
+            });
+        });
+        // 전체 선택/해제 = 모든 패널 on/off + 모든 트레이스 visible
+        if (allCb) {
+            allCb.addEventListener('change', () => {
+                const on = allCb.checked;
+                PANELS.forEach(p => { panelOn[p] = on; });
+                timelineEl.data.forEach((_, i) => { timelineEl.data[i]._userVisible = on; });
+                applyPanelLayout();
+            });
+        }
     }
     renderTraceLegend();
 
@@ -704,6 +762,28 @@
     }
     renderFrameTable(null, null);
 
+    /* ── RSSI 줌 적응형 재계산 ──
+     * 보이는 x범위의 raw RSSI를 매번 다시 계산한다 — 평균선(_rssiKind 'avg')은
+     * 그 범위를 RSSI_AVG_BINS구간으로 평균, 측정점 분포('scatter')는
+     * RSSI_SCATTER_MAX개로 솎는다. 줌인하면 그 구간만으로 다시 채워 평균
+     * 해상도·산포가 상세해진다. cliff 마커 등 _rssiKind 없는 trace는 제외. */
+    function redrawRssi(x0Epoch, x1Epoch) {
+        const idxs = [], newX = [], newY = [];
+        timelineEl.data.forEach((t, i) => {
+            if (t._panel !== 'rssi' || t._overlay || !t._rawRssi || !t._rssiKind) return;
+            const vis = (x0Epoch == null || x1Epoch == null)
+                ? t._rawRssi
+                : t._rawRssi.filter(p => p.x >= x0Epoch && p.x <= x1Epoch);
+            const s = (t._rssiKind === 'avg')
+                ? _rssiBinAverage(vis, RSSI_AVG_BINS)
+                : downsampleStep(vis, RSSI_SCATTER_MAX);
+            idxs.push(i);
+            newX.push(s.map(p => epochToDate(p.x)));
+            newY.push(s.map(p => p.y));
+        });
+        if (idxs.length) Plotly.restyle(timelineEl, { x: newX, y: newY }, idxs);
+    }
+
     /* ── 타임라인 x축 범위 변경 → 표 필터 (브러시/줌/팬) ── */
     let _syncingFromTable = false;
     timelineEl.on && timelineEl.on('plotly_relayout', (ev) => {
@@ -716,6 +796,7 @@
             r0 = ev['xaxis.range'][0];
             r1 = ev['xaxis.range'][1];
         } else if (ev['xaxis.autorange']) {
+            redrawRssi(null, null);
             renderFrameTable(null, null);
             if (startInput) startInput.value = '';
             if (endInput) endInput.value = '';
@@ -733,6 +814,7 @@
         const e = new Date(r1).getTime() / 1000;
         // invalid range(예: new Date(undefined) → NaN)는 표 필터를 깨뜨리므로 방어
         if (isNaN(s) || isNaN(e)) return;
+        redrawRssi(s, e);
         if (startInput) startInput.value = s.toFixed(1);
         if (endInput) endInput.value = e.toFixed(1);
         renderFrameTable(s, e);
@@ -758,6 +840,7 @@
             Plotly.relayout(debugMiniEl, { [`${debugMiniMasterKey}.range`]: range })
                 .catch(err => console.debug('[debug-mini]', err));
         }
+        redrawRssi(s, e);
         renderFrameTable(s, e);
     }
     const applyBtn = document.getElementById('debug-range-apply');
@@ -781,6 +864,7 @@
                 Plotly.relayout(debugMiniEl, { [`${debugMiniMasterKey}.autorange`]: true })
                     .catch(err => console.debug('[debug-mini]', err));
             }
+            redrawRssi(null, null);
             renderFrameTable(null, null);
         });
     }
