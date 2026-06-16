@@ -224,9 +224,29 @@
         </div>
     </div>
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-        <h3 class="text-sm font-semibold text-gray-400 mb-2">
-            Ping 전수검사 (ICMP Seq 기준 Request↔Reply 매칭, Timestamp 정렬)
-        </h3>
+        <div class="flex items-center justify-between flex-wrap gap-2 mb-2">
+            <h3 class="text-sm font-semibold text-gray-400">
+                Ping 전수검사 (ICMP Seq 기준 Request↔Reply 매칭, Timestamp 정렬)
+            </h3>
+            <div class="flex items-center gap-2 text-xs flex-wrap">
+                <label class="flex items-center gap-1 text-gray-400">상태
+                    <select id="ping-filter-status" class="bg-gray-700 border border-gray-600 rounded px-2 py-1">
+                        <option value="">전체</option>
+                        <option value="matched">응답</option>
+                        <option value="loss">손실</option>
+                    </select>
+                </label>
+                <label class="flex items-center gap-1 text-gray-400">흐름
+                    <select id="ping-filter-flow" class="bg-gray-700 border border-gray-600 rounded px-2 py-1">
+                        <option value="">전체</option>
+                    </select>
+                </label>
+                <label class="flex items-center gap-1 text-gray-400 cursor-pointer">
+                    <input type="checkbox" id="ping-filter-retry" class="accent-blue-500"> Retry만
+                </label>
+                <span id="ping-full-count" class="text-gray-500 tabular-nums"></span>
+            </div>
+        </div>
         <div class="overflow-x-auto max-h-[600px] overflow-y-auto">
             <table class="w-full text-xs font-mono" id="ping-full-table">
                 <thead class="text-gray-400 border-b border-gray-700 sticky top-0 bg-gray-800">
@@ -256,6 +276,21 @@
         </summary>
         <div class="px-4 pb-4">
             <p class="text-xs text-gray-500 mb-2">단방향 캡처라 짝꿍 frame이 안 보이는 ICMP 요청/응답들. 캡처된 시점·방향·seq는 있으나 RTT 계산 불가.</p>
+            <div class="flex items-center gap-2 text-xs flex-wrap mb-2">
+                <label class="flex items-center gap-1 text-gray-400">방향
+                    <select id="ping-obs-filter-dir" class="bg-gray-700 border border-gray-600 rounded px-2 py-1">
+                        <option value="">전체</option>
+                        <option value="reply">응답 (reply)</option>
+                        <option value="request">요청 (request)</option>
+                    </select>
+                </label>
+                <label class="flex items-center gap-1 text-gray-400">흐름
+                    <select id="ping-obs-filter-flow" class="bg-gray-700 border border-gray-600 rounded px-2 py-1">
+                        <option value="">전체</option>
+                    </select>
+                </label>
+                <span id="ping-obs-filter-count" class="text-gray-500 tabular-nums"></span>
+            </div>
             <div class="overflow-x-auto max-h-[600px] overflow-y-auto">
                 <table class="w-full text-xs font-mono" id="ping-observations-table">
                     <thead class="text-gray-400 border-b border-gray-700 sticky top-0 bg-gray-800">

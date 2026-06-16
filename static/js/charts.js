@@ -775,15 +775,31 @@
         pingHistEl.innerHTML = '<div class="text-center text-gray-500 text-sm py-12">RTT 데이터 없음</div>';
     }
     if (pairs.length > 0 && document.getElementById('chart-ping-hist')) {
+        // RTT 분포는 0~1ms에 극단적으로 쏠리고(모니터 캡처 시각차) 드문 이상치(수백 ms)가
+        // 긴 꼬리를 만든다. 0~max 전체에 균등 bin을 적용하면 첫 막대 하나에 대부분이 몰려
+        // 분포가 안 보인다. → 표시 범위를 p99로 클립하고 bin을 세밀화해 본체 분포를 펼치고,
+        // p99 초과 이상치는 데이터에서 빼지 않고 축만 잘라 카운트로 안내한다.
+        const rtts = pairs.map(p => p.rtt_ms).filter(v => typeof v === 'number');
+        const sorted = [...rtts].sort((a, b) => a - b);
+        const p99 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.99))];
+        const hi = Math.max(p99, 1);                 // 표시 상한 (최소 1ms)
+        const outliers = rtts.filter(v => v > hi).length;
+        const maxRtt = sorted[sorted.length - 1];
+        const annotations = outliers > 0 ? [{
+            xref: 'paper', yref: 'paper', x: 1, y: 1, xanchor: 'right', yanchor: 'top',
+            text: `+${outliers.toLocaleString()}건 > ${hi.toFixed(1)}ms (최대 ${maxRtt.toFixed(1)}ms)`,
+            showarrow: false, font: { size: 10, color: '#9ca3af' },
+        }] : [];
         Plotly.newPlot('chart-ping-hist', [{
-            x: pairs.map(p => p.rtt_ms), type: 'histogram',
+            x: rtts, type: 'histogram',
+            xbins: { start: 0, end: hi, size: (hi / 40) || 0.1 },
             marker: { color: '#3b82f6' },
-            nbinsx: 40,
         }], {
             ...DARK,
-            xaxis: { title: { text: 'RTT (ms)', font: { size: 12 } }, gridcolor: '#374151' },
+            xaxis: { title: { text: 'RTT (ms)', font: { size: 12 } }, gridcolor: '#374151', range: [0, hi] },
             yaxis: { title: { text: '빈도', font: { size: 12 } }, gridcolor: '#374151' },
             margin: { t: 10, r: 10, b: 50, l: 50 },
+            annotations,
         }, { responsive: true, displayModeBar: false });
     }
 
@@ -835,22 +851,29 @@
                 <tr><td class="text-gray-400 py-1">응답 (match)</td><td class="text-right text-green-400">${s.count.toLocaleString()}건</td></tr>
                 <tr><td class="text-gray-400 py-1">미응답 (Loss)</td><td class="text-right text-red-400">${s.loss_count.toLocaleString()}건 (${s.loss_pct}%)</td></tr>
                 <tr class="border-t border-gray-700"><td class="text-gray-400 py-1">Min RTT</td><td class="text-right text-white">${s.min}ms</td></tr>
-                <tr><td class="text-gray-400 py-1">Max RTT</td><td class="text-right text-white">${s.max}ms</td></tr>
                 <tr><td class="text-gray-400 py-1">Avg RTT</td><td class="text-right text-white font-bold">${s.avg != null ? s.avg + 'ms' : '—'}</td></tr>
+                <tr><td class="text-gray-400 py-1">Max RTT</td><td class="text-right text-white">${s.max}ms</td></tr>
                 <tr class="border-t border-gray-700"><td class="text-gray-400 py-1">P50 (중앙값)</td><td class="text-right text-white">${s.p50}ms</td></tr>
                 <tr><td class="text-gray-400 py-1">P95</td><td class="text-right ${s.p95 == null ? 'text-gray-500' : (s.p95 > 10 ? 'text-yellow-400' : 'text-white')}">${s.p95 != null ? s.p95 + 'ms' : '—'}</td></tr>
                 <tr><td class="text-gray-400 py-1">P99</td><td class="text-right ${s.p99 > 20 ? 'text-red-400' : 'text-white'}">${s.p99}ms</td></tr>
-                <tr class="border-t border-gray-700"><td class="text-gray-400 py-1" colspan="2"><span class="text-xs text-gray-500">— Raw 캡처 카운트 (모니터 sniffer 기준) —</span></td></tr>
-                <tr><td class="text-gray-400 py-1">Request 캡처 (raw)</td><td class="text-right text-white">${reqRaw.toLocaleString()}건</td></tr>
-                <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ 첫 송신 (retry 비트 X)</td><td class="text-right text-green-400 text-xs">${reqFirst.toLocaleString()}건</td></tr>
-                <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ 재전송 (retry 비트 O)</td><td class="text-right text-yellow-400 text-xs">${reqRetryBit.toLocaleString()}건</td></tr>
-                <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ 동일 seq dedup (매칭 제외)</td><td class="text-right text-gray-500 text-xs">${reqSkip.toLocaleString()}건</td></tr>
-                <tr><td class="text-gray-400 py-1">Reply 캡처 (raw)</td><td class="text-right text-white">${replyRaw.toLocaleString()}건</td></tr>
-                <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ retry 비트 O</td><td class="text-right text-yellow-400 text-xs">${replyRetryBit.toLocaleString()}건</td></tr>
-                <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ unique seq</td><td class="text-right text-gray-300 text-xs">${replyUnique.toLocaleString()}건</td></tr>
-                <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ 다중 캡처 중복</td><td class="text-right text-gray-500 text-xs">${replyDup.toLocaleString()}건</td></tr>
-                ${crossValidationRows(s)}
-            </table>`;
+            </table>
+            <details class="mt-2 group">
+                <summary class="cursor-pointer select-none text-xs text-gray-500 hover:text-gray-300 py-1 flex items-center gap-1">
+                    <span class="group-open:rotate-90 inline-block transition-transform">▶</span> 세부 — Raw 캡처 카운트 · 교차 검증
+                </summary>
+                <table class="w-full text-sm mt-1">
+                    <tr><td class="text-gray-400 py-1" colspan="2"><span class="text-xs text-gray-500">— Raw 캡처 카운트 (모니터 sniffer 기준) —</span></td></tr>
+                    <tr><td class="text-gray-400 py-1">Request 캡처 (raw)</td><td class="text-right text-white">${reqRaw.toLocaleString()}건</td></tr>
+                    <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ 첫 송신 (retry 비트 X)</td><td class="text-right text-green-400 text-xs">${reqFirst.toLocaleString()}건</td></tr>
+                    <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ 재전송 (retry 비트 O)</td><td class="text-right text-yellow-400 text-xs">${reqRetryBit.toLocaleString()}건</td></tr>
+                    <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ 동일 seq dedup (매칭 제외)</td><td class="text-right text-gray-500 text-xs">${reqSkip.toLocaleString()}건</td></tr>
+                    <tr><td class="text-gray-400 py-1">Reply 캡처 (raw)</td><td class="text-right text-white">${replyRaw.toLocaleString()}건</td></tr>
+                    <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ retry 비트 O</td><td class="text-right text-yellow-400 text-xs">${replyRetryBit.toLocaleString()}건</td></tr>
+                    <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ unique seq</td><td class="text-right text-gray-300 text-xs">${replyUnique.toLocaleString()}건</td></tr>
+                    <tr><td class="text-gray-400 py-1 pl-3 text-xs">└ 다중 캡처 중복</td><td class="text-right text-gray-500 text-xs">${replyDup.toLocaleString()}건</td></tr>
+                    ${crossValidationRows(s)}
+                </table>
+            </details>`;
     }
 
     // 관찰된 ICMP 프레임 (RTT 측정 불가, 단방향 캡처에서만)
@@ -861,8 +884,27 @@
     if (obsDetails && observations.length > 0) {
         obsDetails.style.display = '';
         if (obsCount) obsCount.textContent = `(${observations.length}건)`;
-        if (obsTable) {
-            obsTable.innerHTML = observations.map((o, i) => {
+        const obsDirSel = document.getElementById('ping-obs-filter-dir');
+        const obsFlowSel = document.getElementById('ping-obs-filter-flow');
+        const obsFilterCount = document.getElementById('ping-obs-filter-count');
+        // 흐름 표시 정규화 — reply 프레임의 src/dst가 tshark multi-value(콤마 결합)로
+        // 잡히면 첫 IP만 취해 흐름 라벨·옵션·필터를 하나로 합친다.
+        const firstIp = ip => String(ip || '').split(',')[0].trim();
+        function renderObsTable() {
+            if (!obsTable) return;
+            const fDir = obsDirSel ? obsDirSel.value : '';      // ''=전체 | reply(응답) | request(요청)
+            const fFlow = obsFlowSel ? obsFlowSel.value : '';   // ''=전체 | "src → dst"
+            const rows = observations.filter(o => {
+                if (fDir && o.direction !== fDir) return false;
+                if (fFlow && `${firstIp(o.src)} → ${firstIp(o.dst)}` !== fFlow) return false;
+                return true;
+            });
+            if (obsFilterCount) obsFilterCount.textContent = `${rows.length.toLocaleString()} / ${observations.length.toLocaleString()}건`;
+            if (rows.length === 0) {
+                obsTable.innerHTML = '<tr><td colspan="9" class="text-gray-500 text-center py-6">조건에 맞는 항목이 없습니다.</td></tr>';
+                return;
+            }
+            obsTable.innerHTML = rows.map((o, i) => {
                 const dirBadge = o.direction === 'request'
                     ? '<span class="bg-blue-900 text-blue-300 px-1.5 py-0.5 rounded text-xs">req</span>'
                     : '<span class="bg-purple-900 text-purple-300 px-1.5 py-0.5 rounded text-xs">reply</span>';
@@ -875,19 +917,48 @@
                     <td class="py-1 px-1 text-gray-500">${o.ident || '-'}</td>
                     <td class="py-1 px-1">#${o.frame_num}</td>
                     <td class="py-1 px-1">${o.time || ''}</td>
-                    <td class="py-1 px-1">${o.src} → ${o.dst}</td>
+                    <td class="py-1 px-1">${firstIp(o.src)} → ${firstIp(o.dst)}</td>
                     <td class="py-1 px-1">${o.has_retry ? 'R' : ''}</td>
                 </tr>`;
             }).join('');
         }
+        if (obsFlowSel) {
+            const flows = [...new Set(observations.map(o => `${firstIp(o.src)} → ${firstIp(o.dst)}`))].sort();
+            obsFlowSel.insertAdjacentHTML('beforeend',
+                flows.map(f => `<option value="${f}">${f}</option>`).join(''));
+        }
+        [obsDirSel, obsFlowSel].forEach(el => { if (el) el.addEventListener('change', renderObsTable); });
+        renderObsTable();
     } else if (obsDetails) {
         obsDetails.style.display = 'none';
     }
 
     // Ping 전수검사 테이블
     const pingFullTable = document.querySelector('#ping-full-table tbody');
-    if (pingFullTable && fullList.length > 0) {
-        pingFullTable.innerHTML = fullList.map((p, i) => {
+    const pingStatusSel = document.getElementById('ping-filter-status');
+    const pingFlowSel = document.getElementById('ping-filter-flow');
+    const pingRetryChk = document.getElementById('ping-filter-retry');
+    const pingFullCount = document.getElementById('ping-full-count');
+
+    function renderPingFullTable() {
+        if (!pingFullTable) return;
+        const fStatus = pingStatusSel ? pingStatusSel.value : '';   // ''=전체 | matched | loss
+        const fFlow = pingFlowSel ? pingFlowSel.value : '';         // ''=전체 | "src → dst"
+        const fRetry = pingRetryChk ? pingRetryChk.checked : false;
+        const rows = fullList.filter(p => {
+            // 손실은 loss + loss_gap(단방향 seq gap) 둘 다 포함.
+            if (fStatus === 'loss' && !(p.status === 'loss' || p.status === 'loss_gap')) return false;
+            if (fStatus === 'matched' && p.status !== 'matched') return false;
+            if (fFlow && `${p.src} → ${p.dst}` !== fFlow) return false;
+            if (fRetry && !p.has_retry) return false;
+            return true;
+        });
+        if (pingFullCount) pingFullCount.textContent = `${rows.length.toLocaleString()} / ${fullList.length.toLocaleString()}건`;
+        if (rows.length === 0) {
+            pingFullTable.innerHTML = '<tr><td colspan="10" class="text-gray-500 text-center py-6">조건에 맞는 항목이 없습니다.</td></tr>';
+            return;
+        }
+        pingFullTable.innerHTML = rows.map((p, i) => {
             const isLoss = p.status === 'loss' || p.status === 'loss_gap';
             const isGap = p.status === 'loss_gap';
             const rowClass = isLoss ? 'text-red-400 bg-red-900/20' : (p.has_retry ? 'text-yellow-400' : '');
@@ -916,6 +987,16 @@
             </tr>`;
         }).join('');
     }
+    // 흐름(Src→Dst) 드롭다운 옵션 — 데이터에 등장한 흐름만 채운다.
+    if (pingFlowSel && fullList.length > 0) {
+        const flows = [...new Set(fullList.map(p => `${p.src} → ${p.dst}`))].sort();
+        pingFlowSel.insertAdjacentHTML('beforeend',
+            flows.map(f => `<option value="${f}">${f}</option>`).join(''));
+    }
+    [pingStatusSel, pingFlowSel, pingRetryChk].forEach(el => {
+        if (el) el.addEventListener('change', renderPingFullTable);
+    });
+    if (fullList.length > 0) renderPingFullTable();
 
     /* ── 종합 진단 — 고급 UI ── */
     const diag = DATA.diagnosis || {};
