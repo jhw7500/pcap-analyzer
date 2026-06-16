@@ -621,6 +621,298 @@ class TestStructuredDiagnosis:
             assert pt["retry_pct"] <= 100.0, f"retry_pct 왜곡: {pt['retry_pct']}"
             assert pt["total"] >= pt["retry"]
 
+    def test_mcs_hotspot_issue_emitted(self):
+        """P1-A: device_stats에 고-retry MCS 버킷(total>=30, retry_pct>=50) +
+        매칭 retry 프레임이 있으면 signal_type 'mcs_hotspot' issue가 생성된다."""
+        frames = [
+            make_frame(number=i + 1, epoch=2000.0 + i * 0.01, ta=STA1, ra=AP1,
+                       subtype="40", retry=True, mcs="7", mcs_phy="HE")
+            for i in range(40)
+        ]
+        index = FrameIndex(frames, SAMPLE_ROLES)
+        structured = {
+            "overview": {"total_frames": len(frames), "retry_pct": 5},
+            "ping": {"stats": {"loss_pct": 0}, "losses": []},
+            "roaming": {"sequences": []},
+            "signal": {"stas": {"STA1(0002)": {"mac": STA1, "rssi_avg": -50}}},
+            "device_stats": {
+                "STA1(0002)": {
+                    "retry_pct": 5,
+                    "mcs_retry_by_phy": {
+                        "HE": {"7": {"total": 40, "retry": 40, "retry_pct": 100.0}},
+                    },
+                },
+            },
+            "delay_zones": {"delay_zones": []},
+            "anomaly_frames": {"anomalies": []},
+        }
+        result = _structured_diagnosis(structured, frames, index)
+        sta = result["sta_diags"][0]
+        stypes = [i.get("signal_type") for i in sta["issues"]]
+        assert "mcs_hotspot" in stypes
+        hot = next(i for i in sta["issues"] if i.get("signal_type") == "mcs_hotspot")
+        assert hot["frame_refs"] and hot["time_window"] is not None
+
+    def test_signal_cliff_issue_emitted(self):
+        """P1-B: signal_cliffs에 cliff >=2건 + 매칭 STA 프레임이 있으면
+        signal_type 'signal_cliff' issue가 생성된다."""
+        frames = [
+            make_frame(number=1, epoch=1000.0, ta=STA1, ra=AP1, subtype="40"),
+            make_frame(number=2, epoch=1002.0, ta=STA1, ra=AP1, subtype="40"),
+        ]
+        index = FrameIndex(frames, SAMPLE_ROLES)
+        structured = {
+            "overview": {"total_frames": len(frames), "retry_pct": 0},
+            "ping": {"stats": {"loss_pct": 0}, "losses": []},
+            "roaming": {"sequences": []},
+            "signal": {"stas": {"STA1(0002)": {"mac": STA1, "rssi_avg": -50}}},
+            "device_stats": {"STA1(0002)": {"retry_pct": 0}},
+            "signal_cliffs": {
+                "STA1(0002)": {"cliffs": [
+                    {"epoch": 1000.0, "drop_db": 12},
+                    {"epoch": 1002.0, "drop_db": 18},
+                ]},
+            },
+            "delay_zones": {"delay_zones": []},
+            "anomaly_frames": {"anomalies": []},
+        }
+        result = _structured_diagnosis(structured, frames, index)
+        sta = result["sta_diags"][0]
+        stypes = [i.get("signal_type") for i in sta["issues"]]
+        assert "signal_cliff" in stypes
+        cliff = next(i for i in sta["issues"] if i.get("signal_type") == "signal_cliff")
+        assert cliff["frame_refs"] and cliff["time_window"] is not None
+
+    def test_cliff_high_retry_correlation_built(self):
+        """P1-B: 같은 STA에서 cliff 윈도우가 high_retry 윈도우와 겹치면
+        build_correlations가 correlation을 산출한다."""
+        from analyzer.core.modules.causality import (
+            build_correlations, SIG_SIGNAL_CLIFF, SIG_HIGH_RETRY,
+        )
+        diag = {
+            "sta_diags": [{
+                "name": "STA1", "mac": STA1,
+                "issues": [
+                    {"signal_type": SIG_SIGNAL_CLIFF, "msg": "급강하",
+                     "severity": "high",
+                     "time_window": {"start_epoch": 1000.0, "end_epoch": 1000.0},
+                     "frame_refs": [1, 2]},
+                    {"signal_type": SIG_HIGH_RETRY, "msg": "retry",
+                     "severity": "high",
+                     "time_window": {"start_epoch": 995.0, "end_epoch": 1005.0},
+                     "frame_refs": [3, 4]},
+                ],
+            }],
+            "issues": [],
+        }
+        corrs = build_correlations(diag)
+        assert len(corrs) == 1
+        types = {s["type"] for s in corrs[0]["signals"]}
+        assert SIG_SIGNAL_CLIFF in types and SIG_HIGH_RETRY in types
+        assert corrs[0]["title"] == "신호 급강하로 인한 retry 폭증"
+
+    def test_network_legacy_heavy_issue_emitted(self):
+        """P1-C: system_stats per_bucket의 legacy_pct 평균 >= 30이면
+        network 'legacy_heavy' issue가 생성된다."""
+        frames = [
+            make_frame(number=i + 1, epoch=1000.0 + i, ta=STA1, ra=AP1,
+                       mcs_phy="Legacy", data_rate="6")
+            for i in range(10)
+        ]
+        index = FrameIndex(frames, SAMPLE_ROLES)
+        structured = {
+            "overview": {"total_frames": len(frames), "retry_pct": 0},
+            "ping": {"stats": {"loss_pct": 0}, "losses": []},
+            "roaming": {"sequences": []},
+            "signal": {"stas": {}},
+            "device_stats": {},
+            "system_stats": {
+                "per_bucket": [
+                    {"legacy_pct": 80.0, "tx_total": 10},
+                ],
+            },
+            "delay_zones": {"delay_zones": []},
+            "anomaly_frames": {"anomalies": []},
+        }
+        result = _structured_diagnosis(structured, frames, index)
+        stypes = [i.get("signal_type") for i in result["issues"]]
+        assert "legacy_heavy" in stypes
+
+    def _mcs_structured(self, sta_retry, mcs_map):
+        return {
+            "overview": {"total_frames": 40, "retry_pct": 5},
+            "ping": {"stats": {"loss_pct": 0}, "losses": []},
+            "roaming": {"sequences": []},
+            "signal": {"stas": {"STA1(0002)": {"mac": STA1, "rssi_avg": -50}}},
+            "device_stats": {
+                "STA1(0002)": {"retry_pct": sta_retry, "mcs_retry_by_phy": mcs_map},
+            },
+            "delay_zones": {"delay_zones": []},
+            "anomaly_frames": {"anomalies": []},
+        }
+
+    def test_mcs_hotspot_below_threshold_excluded(self):
+        """P1-A 음성: retry_pct가 max(50, sta_retry*2) 미만이면 미생성(절대 50 arm)."""
+        frames = [
+            make_frame(number=i + 1, epoch=2000.0 + i * 0.01, ta=STA1, ra=AP1,
+                       subtype="40", retry=(i < 18), mcs="7", mcs_phy="HE")
+            for i in range(40)
+        ]
+        index = FrameIndex(frames, SAMPLE_ROLES)
+        # sta_retry=5 → threshold=max(50,10)=50; bucket 45% < 50 → 제외
+        s = self._mcs_structured(5, {"HE": {"7": {"total": 40, "retry": 18, "retry_pct": 45.0}}})
+        result = _structured_diagnosis(s, frames, index)
+        stypes = [i.get("signal_type") for i in result["sta_diags"][0]["issues"]]
+        assert "mcs_hotspot" not in stypes
+
+    def test_mcs_hotspot_sta_retry_arm_excluded(self):
+        """P1-A 음성: 높은 sta_retry면 threshold=sta_retry*2가 적용된다."""
+        frames = [
+            make_frame(number=i + 1, epoch=2000.0 + i * 0.01, ta=STA1, ra=AP1,
+                       subtype="40", retry=True, mcs="7", mcs_phy="HE")
+            for i in range(40)
+        ]
+        index = FrameIndex(frames, SAMPLE_ROLES)
+        # sta_retry=30 → threshold=max(50,60)=60; bucket 55% < 60 → 제외
+        s = self._mcs_structured(30, {"HE": {"7": {"total": 40, "retry": 22, "retry_pct": 55.0}}})
+        result = _structured_diagnosis(s, frames, index)
+        stypes = [i.get("signal_type") for i in result["sta_diags"][0]["issues"]]
+        assert "mcs_hotspot" not in stypes
+
+    def test_mcs_hotspot_low_sample_excluded(self):
+        """P1-A 음성: total<30이면 retry_pct=100이어도 통계적으로 무의미 → 미생성."""
+        frames = [
+            make_frame(number=i + 1, epoch=2000.0 + i * 0.01, ta=STA1, ra=AP1,
+                       subtype="40", retry=True, mcs="7", mcs_phy="HE")
+            for i in range(5)
+        ]
+        index = FrameIndex(frames, SAMPLE_ROLES)
+        s = self._mcs_structured(5, {"HE": {"7": {"total": 5, "retry": 5, "retry_pct": 100.0}}})
+        result = _structured_diagnosis(s, frames, index)
+        stypes = [i.get("signal_type") for i in result["sta_diags"][0]["issues"]]
+        assert "mcs_hotspot" not in stypes
+
+    def test_mcs_hotspot_worst_only(self):
+        """P1-A: 자격 버킷이 둘이면 retry_pct 최대 1건만, 그 버킷을 참조한다."""
+        frames = (
+            [make_frame(number=i + 1, epoch=2000.0 + i * 0.01, ta=STA1, ra=AP1,
+                        subtype="40", retry=True, mcs="7", mcs_phy="HE") for i in range(20)]
+            + [make_frame(number=100 + i, epoch=2001.0 + i * 0.01, ta=STA1, ra=AP1,
+                          subtype="40", retry=True, mcs="3", mcs_phy="HE") for i in range(20)]
+        )
+        index = FrameIndex(frames, SAMPLE_ROLES)
+        s = self._mcs_structured(5, {"HE": {
+            "7": {"total": 40, "retry": 40, "retry_pct": 100.0},
+            "3": {"total": 40, "retry": 28, "retry_pct": 70.0},
+        }})
+        result = _structured_diagnosis(s, frames, index)
+        hot = [i for i in result["sta_diags"][0]["issues"]
+               if i.get("signal_type") == "mcs_hotspot"]
+        assert len(hot) == 1
+        assert "MCS7" in hot[0]["msg"]  # worst(100%) 버킷
+
+    def _cliff_structured(self, cliffs):
+        return {
+            "overview": {"total_frames": 2, "retry_pct": 0},
+            "ping": {"stats": {"loss_pct": 0}, "losses": []},
+            "roaming": {"sequences": []},
+            "signal": {"stas": {"STA1(0002)": {"mac": STA1, "rssi_avg": -50}}},
+            "device_stats": {"STA1(0002)": {"retry_pct": 0}},
+            "signal_cliffs": {"STA1(0002)": {"cliffs": cliffs}},
+            "delay_zones": {"delay_zones": []},
+            "anomaly_frames": {"anomalies": []},
+        }
+
+    def test_signal_cliff_single_large_drop_high(self):
+        """P1-B: 단일 cliff라도 drop>=15면 생성, drop>=20이면 severity high."""
+        frames = [make_frame(number=1, epoch=1000.0, ta=STA1, ra=AP1, subtype="40")]
+        index = FrameIndex(frames, SAMPLE_ROLES)
+        s = self._cliff_structured([{"epoch": 1000.0, "drop_db": 20}])
+        result = _structured_diagnosis(s, frames, index)
+        cliff = [i for i in result["sta_diags"][0]["issues"]
+                 if i.get("signal_type") == "signal_cliff"]
+        assert len(cliff) == 1
+        assert cliff[0]["severity"] == "high"  # max_drop>=20
+
+    def test_signal_cliff_below_threshold_excluded(self):
+        """P1-B 음성: 단일 cliff에 drop<15면 미생성."""
+        frames = [make_frame(number=1, epoch=1000.0, ta=STA1, ra=AP1, subtype="40")]
+        index = FrameIndex(frames, SAMPLE_ROLES)
+        s = self._cliff_structured([{"epoch": 1000.0, "drop_db": 10}])
+        result = _structured_diagnosis(s, frames, index)
+        stypes = [i.get("signal_type") for i in result["sta_diags"][0]["issues"]]
+        assert "signal_cliff" not in stypes
+
+    def test_legacy_heavy_tx_weighted(self):
+        """P1-C: legacy_pct는 tx_total 가중 평균 — 작은 버킷의 높은 비율이 큰
+        버킷에 희석돼 30% 미만이면 미생성(단순 평균이면 45%로 잘못 발화)."""
+        frames = [make_frame(number=1, epoch=1000.0, ta=STA1, ra=AP1)]
+        index = FrameIndex(frames, SAMPLE_ROLES)
+        structured = {
+            "overview": {"total_frames": 1, "retry_pct": 0},
+            "ping": {"stats": {"loss_pct": 0}, "losses": []},
+            "roaming": {"sequences": []},
+            "signal": {"stas": {}},
+            "device_stats": {},
+            "system_stats": {"per_bucket": [
+                {"legacy_pct": 80.0, "tx_total": 1},     # 가중 분자 80
+                {"legacy_pct": 10.0, "tx_total": 100},   # 가중 분자 1000 → (1080/101)≈10.7%
+            ]},
+            "delay_zones": {"delay_zones": []},
+            "anomaly_frames": {"anomalies": []},
+        }
+        result = _structured_diagnosis(structured, frames, index)
+        stypes = [i.get("signal_type") for i in result["issues"]]
+        assert "legacy_heavy" not in stypes
+
+    def test_mcs_hotspot_high_retry_correlation_title(self):
+        """P1: high_retry + mcs_hotspot이 시간 겹치면 전용 결론 제목이 붙는다."""
+        from analyzer.core.modules.causality import (
+            build_correlations, SIG_MCS_HOTSPOT, SIG_HIGH_RETRY,
+        )
+        diag = {
+            "sta_diags": [{
+                "name": "STA1", "mac": STA1,
+                "issues": [
+                    {"signal_type": SIG_MCS_HOTSPOT, "msg": "HE MCS7 retry",
+                     "severity": "high",
+                     "time_window": {"start_epoch": 1000.0, "end_epoch": 1000.0},
+                     "frame_refs": [1]},
+                    {"signal_type": SIG_HIGH_RETRY, "msg": "retry",
+                     "severity": "high",
+                     "time_window": {"start_epoch": 995.0, "end_epoch": 1005.0},
+                     "frame_refs": [2]},
+                ],
+            }],
+            "issues": [],
+        }
+        corrs = build_correlations(diag)
+        assert len(corrs) == 1
+        types = {s["type"] for s in corrs[0]["signals"]}
+        assert SIG_MCS_HOTSPOT in types and SIG_HIGH_RETRY in types
+        assert corrs[0]["title"] != "다중 신호 동시 관찰"  # 전용 룰 매칭(generic 아님)
+
+    def test_correlation_not_built_when_windows_disjoint(self):
+        """P1 음성: 같은 STA라도 신호 윈도우가 안 겹치면 correlation 미생성."""
+        from analyzer.core.modules.causality import (
+            build_correlations, SIG_SIGNAL_CLIFF, SIG_HIGH_RETRY,
+        )
+        diag = {
+            "sta_diags": [{
+                "name": "STA1", "mac": STA1,
+                "issues": [
+                    {"signal_type": SIG_SIGNAL_CLIFF, "msg": "급강하", "severity": "high",
+                     "time_window": {"start_epoch": 1000.0, "end_epoch": 1000.0},
+                     "frame_refs": [1]},
+                    {"signal_type": SIG_HIGH_RETRY, "msg": "retry", "severity": "high",
+                     "time_window": {"start_epoch": 2000.0, "end_epoch": 2005.0},
+                     "frame_refs": [2]},
+                ],
+            }],
+            "issues": [],
+        }
+        assert build_correlations(diag) == []
+
 
 class TestCasefileBuilder:
     def test_casefile_ping_parity_exact(self):

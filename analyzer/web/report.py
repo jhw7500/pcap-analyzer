@@ -21,6 +21,9 @@ SIGNAL_TYPE_LABEL = {
     "high_loss": "Ping Loss",
     "delay_zone": "지연 구간",
     "anomaly": "이상 프레임",
+    "mcs_hotspot": "MCS 핫스팟",
+    "signal_cliff": "신호 급강하",
+    "legacy_heavy": "Legacy 과다",
 }
 
 

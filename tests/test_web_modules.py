@@ -1,7 +1,14 @@
 """웹 시각화 분석 모듈 테스트."""
+from analyzer.core.indexer import FrameIndex
 from analyzer.web.delay_analysis import analyze_delays
 from analyzer.web.anomaly_frames import detect_anomalies
 from analyzer.web.signal_cliff import analyze_signal_cliffs
+from analyzer.web.evidence import (
+    cliff_evidence,
+    mcs_hotspot_evidence,
+    network_legacy_evidence,
+)
+from tests.conftest import make_frame, SAMPLE_ROLES, STA1, AP1
 
 
 class TestAnalyzeDelays:
@@ -123,3 +130,105 @@ class TestSignalCliffs:
         result = analyze_signal_cliffs({"stas": {"STA1": {"rssi_timeline": timeline}}})
         assert result["STA1"]["cliffs"] == []
         assert result["STA1"]["moving_avg"] == []
+
+
+class TestMcsHotspotEvidence:
+    def _index(self, frames):
+        return FrameIndex(frames, dict(SAMPLE_ROLES))
+
+    def test_modern_phy_match(self):
+        # HE MCS7 retry 프레임 3건 + 비매칭 프레임.
+        frames = [
+            make_frame(number=1, epoch=1000.0, ta=STA1, ra=AP1, retry=True,
+                       mcs="7", mcs_phy="HE"),
+            make_frame(number=2, epoch=1001.0, ta=STA1, ra=AP1, retry=True,
+                       mcs="7", mcs_phy="HE"),
+            make_frame(number=3, epoch=1002.0, ta=STA1, ra=AP1, retry=True,
+                       mcs="7", mcs_phy="HE"),
+            # 비매칭: 다른 MCS / non-retry / 다른 PHY.
+            make_frame(number=4, epoch=1003.0, ta=STA1, ra=AP1, retry=True,
+                       mcs="3", mcs_phy="HE"),
+            make_frame(number=5, epoch=1004.0, ta=STA1, ra=AP1, retry=False,
+                       mcs="7", mcs_phy="HE"),
+        ]
+        idx = self._index(frames)
+        refs, window = mcs_hotspot_evidence(STA1, "HE", "7", frames, idx)
+        assert set(refs) == {1, 2, 3}
+        assert window == {"start_epoch": 1000.0, "end_epoch": 1002.0}
+
+    def test_legacy_match(self):
+        frames = [
+            make_frame(number=1, epoch=1000.0, ta=STA1, ra=AP1, retry=True,
+                       mcs="", mcs_phy="Legacy", data_rate="6"),
+            make_frame(number=2, epoch=1001.0, ta=STA1, ra=AP1, retry=True,
+                       mcs="", mcs_phy="", data_rate="6"),
+            make_frame(number=3, epoch=1002.0, ta=STA1, ra=AP1, retry=True,
+                       mcs="", mcs_phy="Legacy", data_rate="54"),
+        ]
+        idx = self._index(frames)
+        refs, window = mcs_hotspot_evidence(STA1, "Legacy", "6", frames, idx)
+        assert set(refs) == {1, 2}
+        assert window is not None
+
+    def test_no_match_returns_empty(self):
+        frames = [
+            make_frame(number=1, epoch=1000.0, ta=STA1, ra=AP1, retry=False,
+                       mcs="7", mcs_phy="HE"),
+        ]
+        idx = self._index(frames)
+        assert mcs_hotspot_evidence(STA1, "HE", "7", frames, idx) == ([], None)
+
+
+class TestCliffEvidence:
+    def _index(self, frames):
+        return FrameIndex(frames, dict(SAMPLE_ROLES))
+
+    def test_frames_near_cliff(self):
+        frames = [
+            make_frame(number=1, epoch=1000.0, ta=STA1, ra=AP1),
+            make_frame(number=2, epoch=1000.5, ta=STA1, ra=AP1),
+            make_frame(number=3, epoch=1005.0, ta=STA1, ra=AP1),  # 멀리
+        ]
+        idx = self._index(frames)
+        cliffs = [{"epoch": 1000.2, "drop_db": 15}]
+        refs, window = cliff_evidence(STA1, cliffs, frames, idx)
+        assert set(refs) == {1, 2}
+        assert window == {"start_epoch": 1000.2, "end_epoch": 1000.2}
+
+    def test_empty_cliffs_returns_empty(self):
+        frames = [make_frame(number=1, epoch=1000.0, ta=STA1, ra=AP1)]
+        idx = self._index(frames)
+        assert cliff_evidence(STA1, [], frames, idx) == ([], None)
+
+    def test_fallback_to_lowest_rssi(self):
+        # cliff epoch 근처(±1s)엔 프레임 없지만 worst cliff ±5s 안에 RSSI 프레임 존재.
+        frames = [
+            make_frame(number=1, epoch=1003.0, ta=STA1, ra=AP1, rssi="-80,-82"),
+            make_frame(number=2, epoch=1004.0, ta=STA1, ra=AP1, rssi="-60,-62"),
+        ]
+        idx = self._index(frames)
+        cliffs = [{"epoch": 1000.0, "drop_db": 20}]
+        refs, window = cliff_evidence(STA1, cliffs, frames, idx)
+        assert refs == [1]  # 최저 RSSI(-80) 프레임
+        assert window == {"start_epoch": 1000.0, "end_epoch": 1000.0}
+
+
+class TestNetworkLegacyEvidence:
+    def test_collects_legacy_frames(self):
+        frames = [
+            make_frame(number=1, epoch=1000.0, ta=STA1, ra=AP1, mcs_phy="Legacy",
+                       data_rate="6"),
+            make_frame(number=2, epoch=1001.0, ta=STA1, ra=AP1, mcs_phy=""),
+            make_frame(number=3, epoch=1002.0, ta=STA1, ra=AP1, mcs_phy="HE", mcs="7"),
+        ]
+        idx = FrameIndex(frames, dict(SAMPLE_ROLES))
+        refs, window = network_legacy_evidence(frames, idx)
+        assert set(refs) == {1, 2}
+        assert window == {"start_epoch": 1000.0, "end_epoch": 1001.0}
+
+    def test_no_legacy_returns_empty(self):
+        frames = [
+            make_frame(number=1, epoch=1000.0, ta=STA1, ra=AP1, mcs_phy="HE", mcs="7"),
+        ]
+        idx = FrameIndex(frames, dict(SAMPLE_ROLES))
+        assert network_legacy_evidence(frames, idx) == ([], None)

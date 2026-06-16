@@ -171,6 +171,109 @@ def network_retry_evidence(
     )
 
 
+_MODERN_PHY = ("HT", "VHT", "HE", "EHT")
+
+
+def mcs_hotspot_evidence(
+    sta_mac: str, phy: str, mcs_key: str, frames: List[Frame], index: Any
+) -> Tuple[List[int], Optional[Dict[str, float]]]:
+    """STA TX 중 특정 PHY+MCS에 해당하는 retry 프레임을 근거로 추출.
+
+    modern PHY(HT/VHT/HE/EHT)는 mcs_int를 mcs_key(str)와 비교, Legacy는
+    data_rate 첫 토큰을 mcs_key와 비교한다(structured의 mcs_retry_by_phy 키 규칙과
+    동일). 매칭되는 retry 프레임이 없으면 ([], None) — _attach가 드롭한다.
+    """
+    if index is not None:
+        tx = index.by_ta.get(sta_mac, [])
+    else:
+        tx = [f for f in frames if f.ta == sta_mac]
+    matches: List[Frame] = []
+    for f in tx:
+        if not f.retry:
+            continue
+        f_phy = getattr(f, "mcs_phy", "") or ""
+        if phy in _MODERN_PHY:
+            if f_phy == phy and f.mcs_int is not None and str(f.mcs_int) == mcs_key:
+                matches.append(f)
+        else:
+            # Legacy: modern PHY가 아닌 프레임의 data_rate 첫 토큰으로 매칭.
+            if f_phy not in _MODERN_PHY and (
+                getattr(f, "data_rate", "") or ""
+            ).split(",")[0].strip() == mcs_key:
+                matches.append(f)
+    if not matches:
+        return [], None
+    return [f.number for f in matches], _window([f.epoch for f in matches])
+
+
+def cliff_evidence(
+    sta_mac: str,
+    cliffs: List[Dict[str, Any]],
+    frames: List[Frame],
+    index: Any,
+    pad_sec: float = 1.0,
+) -> Tuple[List[int], Optional[Dict[str, float]]]:
+    """신호 급강하(cliff) 이벤트 근처 STA 프레임을 근거로 추출.
+
+    cliff 이벤트는 epoch만 가진다(frame.number 없음). 각 cliff epoch ±pad_sec
+    안의 STA 송신 프레임 frame.number를 모으고, time_window는 cliff epoch들의
+    범위로 만든다. 근처 프레임을 못 찾으면 가장 큰 cliff 근처 STA 최저 RSSI
+    프레임으로 fallback해 결론이 드롭되지 않게 한다. 끝내 없으면 ([], None).
+    """
+    if not cliffs:
+        return [], None
+    if index is not None:
+        sta_tx = index.by_ta.get(sta_mac, [])
+    else:
+        sta_tx = [f for f in frames if f.ta == sta_mac]
+    cliff_epochs = [
+        float(c["epoch"]) for c in cliffs
+        if isinstance(c.get("epoch"), (int, float))
+    ]
+    if not cliff_epochs:
+        return [], None
+    nums: List[int] = []
+    for f in sta_tx:
+        if any(abs(f.epoch - ep) <= pad_sec for ep in cliff_epochs):
+            nums.append(f.number)
+    if not nums:
+        # fallback: 가장 큰 drop을 가진 cliff 근처의 STA 최저 RSSI 프레임.
+        worst = max(
+            cliffs,
+            key=lambda c: c.get("drop_db") or 0,
+        )
+        worst_ep = worst.get("epoch")
+        near = [
+            f for f in sta_tx
+            if f.rssi_first is not None
+            and isinstance(worst_ep, (int, float))
+            and abs(f.epoch - worst_ep) <= max(pad_sec * 5, 5.0)
+        ]
+        if near:
+            min_rssi = min(f.rssi_first for f in near)
+            nums = [f.number for f in near if f.rssi_first == min_rssi]
+    if not nums:
+        return [], None
+    return nums, _window(cliff_epochs)
+
+
+def network_legacy_evidence(
+    frames: List[Frame], index: Any
+) -> Tuple[List[int], Optional[Dict[str, float]]]:
+    """네트워크 전체 Legacy 송신(modern PHY 아님) 프레임을 근거로 추출.
+
+    송신은 f.ta가 존재하는 프레임으로 보고, mcs_phy가 HT/VHT/HE/EHT가 아닌
+    프레임을 Legacy로 분류한다(_device_entry_stats의 Legacy 판정과 동일).
+    """
+    legacy = [
+        f for f in frames
+        if f.ta and (getattr(f, "mcs_phy", "") or "") not in _MODERN_PHY
+    ]
+    if not legacy:
+        return [], None
+    return [f.number for f in legacy], _window([f.epoch for f in legacy])
+
+
 def weak_rssi_evidence(
     sta_mac: str, threshold: int, frames: List[Frame], index: Any
 ) -> Tuple[List[int], Optional[Dict[str, float]]]:

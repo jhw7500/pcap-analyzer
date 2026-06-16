@@ -57,6 +57,22 @@ def _build_device_section(device_stats: dict) -> list:
             unit = "Mbps" if phy_name == "Legacy" else "MCS"
             top_str = ", ".join(f"{unit}{k}×{_fmt_int(v)}" for k, v in top)
             lines.append(f"  · {phy_name} top: {top_str}")
+        # PHY/MCS retry 핫스팟 — 표본>=30인 (phy, mcs) 중 retry_pct 상위 3.
+        mrbp = s.get("mcs_retry_by_phy", {}) or {}
+        hotspots = []
+        for phy_name, mcs_map in mrbp.items():
+            for mcs_key, r in (mcs_map or {}).items():
+                if r.get("total", 0) >= 30:
+                    hotspots.append((phy_name, mcs_key, r))
+        hotspots.sort(key=lambda x: -x[2].get("retry_pct", 0))
+        if hotspots:
+            hs_str = ", ".join(
+                f"{phy_name} "
+                f"{('MCS' + mcs_key) if phy_name != 'Legacy' else (mcs_key + 'Mbps')} "
+                f"{r.get('retry_pct', 0)}% ({r.get('retry', 0)}/{r.get('total', 0)})"
+                for phy_name, mcs_key, r in hotspots[:3]
+            )
+            lines.append(f"- Retry 핫스팟(표본≥30): {hs_str}")
         # 상위 서브타입 top 5
         sub = s.get("subtype_dist", {}) or {}
         if sub:
@@ -77,6 +93,19 @@ def _build_device_section(device_stats: dict) -> list:
                     for b in peaks
                 )
                 lines.append(f"- Retry 피크 구간 top3: {pk_str}")
+        # 최악 retry 피크의 sub-second MCS 컨텍스트 (worst 1-2 sub-seconds).
+        peaks_detail = s.get("retry_peaks", []) or []
+        if peaks_detail:
+            worst_peak = max(peaks_detail, key=lambda p: p.get("retry_pct", 0))
+            subs = sorted(
+                worst_peak.get("sub_buckets", []) or [],
+                key=lambda b: -b.get("retry_pct", 0),
+            )[:2]
+            for b in subs:
+                lines.append(
+                    f"  · t={b.get('epoch')} {b.get('retry_pct', 0)}% "
+                    f"[{b.get('mcs_breakdown') or '-'}]"
+                )
     return lines
 
 
@@ -369,6 +398,15 @@ def build_review_prompt(structured: dict) -> str:
         )
 
     out.extend(_build_device_section(device_stats))
+    # 네트워크 전체(모든 송신) 통계 — 장치별과 동일 포맷으로 단일 가상 장치 렌더.
+    # _build_device_section은 자체 헤더("## 장치별 상세 통계")를 첫 두 줄로 붙이므로
+    # 네트워크 전체 섹션용 헤더로 교체한다.
+    system_stats = structured.get("system_stats") or {}
+    if isinstance(system_stats, dict) and system_stats:
+        sys_lines = _build_device_section({"🌐 전체 시스템": system_stats})
+        out.append("")
+        out.append("## 네트워크 전체(모든 송신)")
+        out.extend(sys_lines[2:])  # 첫 두 줄(빈 줄 + 장치별 헤더) 제거
     out.extend(_build_roaming_section(roaming))
     out.extend(_build_ping_section(ping))
     out.extend(_build_signal_section(signal, cliffs))
