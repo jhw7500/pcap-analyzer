@@ -43,6 +43,31 @@
         return arr.filter((_, i) => i % step === 0);
     }
 
+    /* 초당 집계 시계열용 — 각 stride에서 valFn 최대 행을 남겨 피크(고-retry/고-loss 초)를
+       보존한다. 균등 솎기(downsampleStep)는 피크 초를 통째로 버릴 수 있어 retry/ping엔 부적합. */
+    function downsamplePeak(arr, maxPoints, valFn) {
+        if (arr.length <= maxPoints) return arr;
+        const step = Math.ceil(arr.length / maxPoints);
+        const out = [];
+        for (let i = 0; i < arr.length; i += step) {
+            let best = arr[i];
+            for (let j = i + 1; j < Math.min(i + step, arr.length); j++) {
+                if (valFn(arr[j]) > valFn(best)) best = arr[j];
+            }
+            out.push(best);
+        }
+        return out;
+    }
+
+    // HTML 이스케이프 — innerHTML/Plotly hovertemplate에 장치명을 넣기 전 거친다(악성 pcap 방어).
+    // '%'도 막는다: Plotly hovertemplate은 %{...}를 데이터 바인딩으로 해석하므로,
+    // 장치명에 %{...}가 있으면 임의 trace 데이터가 새어나갈 수 있다.
+    function escapeHtml(s) {
+        return String(s == null ? '' : s).replace(/[<&>"'%]/g, c => (
+            { '<': '&lt;', '&': '&amp;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '%': '&#37;' }[c]
+        ));
+    }
+
     function epochToDate(epoch) {
         return new Date(epoch * 1000);
     }
@@ -55,97 +80,200 @@
     const apColors  = ['#10b981', '#34d399', '#fbbf24', '#f59e0b'];  // 초록~노랑
     const staNames = Object.keys(signal.stas || {});
     const apNames  = Object.keys(signal.aps  || {});
-    function rssiTrace(node, name, color) {
+    /* RSSI 표시: 구간평균 선(추세) + 반투명 측정점 분포(노이즈).
+       고진동 RSSI를 선으로 이으면 톱니로 뭉치므로, 추세는 평균선이, 산포는
+       점이 담당하도록 분리한다. 둘 다 보이는 줌 범위에 맞춰 재계산된다
+       (redrawRssi). */
+    const RSSI_AVG_BINS = 150;     // 보이는 범위를 이 개수 구간으로 평균
+    const RSSI_SCATTER_MAX = 800;  // 점분포 최대 표시 점수
+    const TIMELINE_MAX = 10800;    // retry/ping 초당 시계열 상한(=3h 무손실). 초과 시 downsamplePeak로 피크 보존.
+    function _rssiHexToRgba(hex, a) {
+        let m = hex.replace('#', '');
+        if (m.length === 3) m = m[0] + m[0] + m[1] + m[1] + m[2] + m[2];  // #abc → aabbcc
+        const r = parseInt(m.substring(0, 2), 16);
+        const g = parseInt(m.substring(2, 4), 16);
+        const b = parseInt(m.substring(4, 6), 16);
+        return `rgba(${r},${g},${b},${a})`;
+    }
+    function _rssiBinAverage(raw, targetBins) {
+        if (!raw.length) return [];
+        const t0 = raw[0].x, t1 = raw[raw.length - 1].x;
+        const span = t1 - t0;
+        if (span <= 0) return raw.map(p => ({ x: p.x, y: p.y }));
+        const binSize = span / targetBins;
+        const buckets = {};
+        for (const p of raw) {
+            // 마지막 점(p.x==t1)은 b=targetBins가 되어 범위를 벗어나므로 clamp.
+            const b = Math.min(targetBins - 1, Math.floor((p.x - t0) / binSize));
+            (buckets[b] = buckets[b] || []).push(p.y);
+        }
+        return Object.keys(buckets).map(Number).sort((a, b) => a - b).map(b => {
+            const arr = buckets[b];
+            return { x: t0 + b * binSize + binSize / 2, y: arr.reduce((s, v) => s + v, 0) / arr.length };
+        });
+    }
+    /* 노드 1개당 trace 2개: [0] 측정점 분포(scattergl markers), [1] 평균선. */
+    function rssiTraces(node, name, color) {
         const raw = (node.rssi_timeline || []).map(p => ({ x: p.epoch, y: p.rssi }));
-        const sampled = downsample(raw, 2000);
-        return {
-            x: sampled.map(p => epochToDate(p.x)),
-            y: sampled.map(p => p.y),
-            type: 'scatter', mode: 'lines',
-            name: name + ' RSSI',
-            line: { color: color, width: 1 },
-            xaxis: 'x', yaxis: 'y',
-            hovertemplate: '%{x|%H:%M:%S} · %{y:.0f} dBm<extra></extra>',
-            _panel: 'rssi',
-        };
+        const scatterPts = downsampleStep(raw, RSSI_SCATTER_MAX);
+        const avgPts = _rssiBinAverage(raw, RSSI_AVG_BINS);
+        return [
+            {
+                x: scatterPts.map(p => epochToDate(p.x)),
+                y: scatterPts.map(p => p.y),
+                type: 'scattergl', mode: 'markers',
+                name: name + ' RSSI 측정점',
+                marker: { color: _rssiHexToRgba(color, 0.30), size: 3 },
+                xaxis: 'x', yaxis: 'y',
+                hovertemplate: '%{x|%H:%M:%S} · %{y:.0f} dBm<extra></extra>',
+                _panel: 'rssi', _rawRssi: raw, _rssiKind: 'scatter',
+            },
+            {
+                x: avgPts.map(p => epochToDate(p.x)),
+                y: avgPts.map(p => p.y),
+                type: 'scatter', mode: 'lines',
+                name: name + ' RSSI 평균',
+                line: { color: color, width: 2 },
+                xaxis: 'x', yaxis: 'y',
+                hovertemplate: '%{x|%H:%M:%S} · 평균 %{y:.1f} dBm<extra></extra>',
+                _panel: 'rssi', _rawRssi: raw, _rssiKind: 'avg',
+            },
+        ];
     }
     staNames.forEach((name, i) => {
-        traces.push(rssiTrace(signal.stas[name], name, staColors[i % staColors.length]));
+        traces.push(...rssiTraces(signal.stas[name], name, staColors[i % staColors.length]));
     });
     apNames.forEach((name, i) => {
-        traces.push(rssiTrace(signal.aps[name], name, apColors[i % apColors.length]));
+        traces.push(...rssiTraces(signal.aps[name], name, apColors[i % apColors.length]));
     });
 
-    /* ── 서브플롯 2: Retry/sec ── */
+    /* ── 서브플롯 2: Retry % ── 전체 retry% 선 1개.
+       hover 시 그 시점(초)의 장치별 retry를 툴팁에 펼쳐 원인 장치를 식별한다. ── */
     const timeline = perSec.timeline || [];
     if (timeline.length > 0) {
-        const sampled = downsample(
-            timeline.map(p => ({ x: p.epoch, y: p.retry })), 2000
-        );
+        // 장치별 retry_timeline을 epoch(초)로 인덱싱 → hover customdata 구성용.
+        const retryDevs = [];
+        staNames.forEach(name => {
+            const map = {};
+            (signal.stas[name].retry_timeline || []).forEach(p => { map[p.epoch] = p; });
+            retryDevs.push({ name, map });
+        });
+        apNames.forEach(name => {
+            const map = {};
+            (signal.aps[name].retry_timeline || []).forEach(p => { map[p.epoch] = p; });
+            retryDevs.push({ name, map });
+        });
+        // 장시간(>3h) 캡처 대비 상한 — 균등 솎기 대신 피크(고-retry 초) 보존 다운샘플.
+        const tl = downsamplePeak(timeline, TIMELINE_MAX, p => (p.total ? p.retry / p.total : 0));
+        // 각 초마다 [장치별 "retry%（retry/total)"] 배열을 customdata로.
+        const customdata = tl.map(p => retryDevs.map(d => {
+            const e = d.map[p.epoch];
+            return (e && e.total) ? `${e.retry_pct}% (${e.retry}/${e.total})` : '0% (0/0)';
+        }));
+        const devLines = retryDevs.map((d, i) => `${escapeHtml(d.name)}: %{customdata[${i}]}`).join('<br>');
         traces.push({
-            x: sampled.map(p => epochToDate(p.x)),
-            y: sampled.map(p => p.y),
+            x: tl.map(p => epochToDate(p.epoch)),
+            y: tl.map(p => p.total ? p.retry / p.total * 100 : 0),
             type: 'scatter', mode: 'lines',
-            name: 'Retry/sec',
-            line: { color: '#ef4444', width: 1 },
+            name: '전체 Retry%',
+            line: { color: '#ef4444', width: 1.5 },
             fill: 'tozeroy', fillcolor: 'rgba(239,68,68,0.1)',
             xaxis: 'x2', yaxis: 'y2',
-            hovertemplate: '%{x|%H:%M:%S} · %{y:.0f} pkt/s<extra></extra>',
+            customdata: customdata,
+            hovertemplate: `%{x|%H:%M:%S} · 전체 %{y:.1f}%<br>${devLines}<extra></extra>`,
             _panel: 'retry',
         });
     }
 
-    /* ── 서브플롯 3: Ping RTT ── 정상은 숨김(legendonly), 지연·loss만 강조 */
-    const allPairs = ping.pairs || [];
-    const rttsSorted = allPairs
-        .map(p => p.rtt_ms).filter(v => v != null && v > 0)
-        .sort((a, b) => a - b);
-    // 임계값: P90(상위 10%) — 단 너무 낮으면 시각적 의미 없으니 50ms 하한
-    const p90 = rttsSorted.length > 0
-        ? rttsSorted[Math.floor(rttsSorted.length * 0.9)]
-        : 50;
-    const PING_DELAY_THRESHOLD = Math.max(p90, 50);
-    const normalPairs  = downsampleStep(allPairs.filter(p => p.rtt_ms != null && p.rtt_ms <  PING_DELAY_THRESHOLD), 2000);
-    const delayedPairs = allPairs.filter(p => p.rtt_ms != null && p.rtt_ms >= PING_DELAY_THRESHOLD);
-    if (normalPairs.length > 0) {
-        traces.push({
-            x: normalPairs.map(p => epochToDate(p.epoch)),
-            y: normalPairs.map(p => p.rtt_ms),
-            type: 'scatter', mode: 'markers',
-            name: `Ping 정상 (<${PING_DELAY_THRESHOLD.toFixed(0)}ms)`,
-            marker: { color: 'rgba(16,185,129,0.6)', size: 2 },  // 살짝 투명한 녹색
-            xaxis: 'x3', yaxis: 'y3',
-            hovertemplate: '%{x|%H:%M:%S} · %{y:.1f} ms<extra></extra>',
-            _panel: 'rtt',
+    /* ── 서브플롯 3: Ping ── 평균 RTT(주축 y3, ms) + Loss%(보조축 y5, 우측).
+       hover 시 그 시점 장치별 loss/RTT를 펼쳐 손실·지연 원인 STA를 식별한다. ── */
+    /* ping.timeline은 백엔드 신규 필드 — 기존(재분석 전) 결과엔 없으므로 full_list로
+       즉석 계산해 호환성을 보장한다(full_list는 모든 분석에 존재). 백엔드 _ping_per_sec와
+       동일 로직: MAC 있는 항목에서 IP↔장치를 학습해 IP로 STA를 식별. */
+    function computePingTimeline(fullList) {
+        const ipDev = {};
+        fullList.forEach(p => {
+            if (p.src && p.src_mac) ipDev[p.src] = p.src_mac;
+            if (p.dst && p.dst_mac) ipDev[p.dst] = p.dst_mac;
+        });
+        const staOf = (p) => {
+            for (const ip of [p.dst, p.src]) { const d = ipDev[ip]; if (d && d.startsWith('STA')) return d; }
+            for (const ip of [p.dst, p.src]) { if (ip && !(ipDev[ip] || '').startsWith('AP')) return ip; }
+            return '?';
+        };
+        const secs = {};
+        fullList.forEach(p => {
+            if (typeof p.epoch !== 'number') return;
+            let isLoss;
+            if (p.status === 'matched') isLoss = false;
+            else if (p.status === 'loss' || p.status === 'loss_gap') isLoss = true;
+            else return;
+            const sec = Math.floor(p.epoch);  // 백엔드 _ping_per_sec의 int(epoch)와 동등(epoch는 양수)
+            const b = secs[sec] || (secs[sec] = { agg: { loss: 0, matched: 0, rtt: 0, rtt_count: 0 }, dev: {} });
+            const dev = staOf(p);
+            const db = b.dev[dev] || (b.dev[dev] = { loss: 0, matched: 0, rtt: 0, rtt_count: 0 });
+            [b.agg, db].forEach(bb => {
+                if (isLoss) { bb.loss++; }
+                else { bb.matched++; if (typeof p.rtt_ms === 'number') { bb.rtt += p.rtt_ms; bb.rtt_count++; } }
+            });
+        });
+        const summ = (b) => {
+            const total = b.loss + b.matched;
+            return {
+                loss: b.loss, matched: b.matched, total,
+                loss_pct: total ? Math.round(b.loss * 1000 / total) / 10 : 0,
+                avg_rtt: b.rtt_count ? Math.round(b.rtt / b.rtt_count * 100) / 100 : null,
+            };
+        };
+        return Object.keys(secs).map(Number).sort((a, b) => a - b).map(sec => {
+            const b = secs[sec];
+            const row = Object.assign({ epoch: sec }, summ(b.agg));
+            row.by_dev = {};
+            for (const dev in b.dev) row.by_dev[dev] = summ(b.dev[dev]);
+            return row;
         });
     }
-    if (delayedPairs.length > 0) {
+    const pingRaw = (ping.timeline && ping.timeline.length)
+        ? ping.timeline
+        : computePingTimeline(ping.full_list || []);
+    const pingTl = downsamplePeak(pingRaw, TIMELINE_MAX, p => p.loss_pct);  // >3h 대비 상한(피크 보존)
+    if (pingTl.length > 0) {
+        const pingDevs = [...staNames, ...apNames];  // RSSI/retry와 동일한 장치 순서
+        // 두 선의 hover를 역할별로 분리 — RTT 선은 장치별 RTT, Loss 선은 장치별 loss.
+        const rttCd = pingTl.map(p => pingDevs.map(name => {
+            const d = (p.by_dev || {})[name];
+            if (!d || !d.matched) return '–';
+            return `${d.avg_rtt}ms (n=${d.matched})`;
+        }));
+        const lossCd = pingTl.map(p => pingDevs.map(name => {
+            const d = (p.by_dev || {})[name];
+            return (d && d.total) ? `${d.loss_pct}% (${d.loss}/${d.total})` : '–';
+        }));
+        const devLines = pingDevs.map((name, i) => `${escapeHtml(name)}: %{customdata[${i}]}`).join('<br>');
+        // 평균 RTT 선 (주축 y3) — matched 없는 초는 null이라 gap. hover에 장치별 RTT.
         traces.push({
-            x: delayedPairs.map(p => epochToDate(p.epoch)),
-            y: delayedPairs.map(p => p.rtt_ms),
-            type: 'scatter', mode: 'markers',
-            name: `Ping 지연 (≥${PING_DELAY_THRESHOLD.toFixed(0)}ms)`,
-            marker: { color: '#f97316', size: 5 },
+            x: pingTl.map(p => epochToDate(p.epoch)),
+            y: pingTl.map(p => p.avg_rtt),
+            type: 'scatter', mode: 'lines',
+            name: '평균 RTT',
+            line: { color: '#10b981', width: 1.5 },
+            connectgaps: false,
             xaxis: 'x3', yaxis: 'y3',
-            hovertemplate: '%{x|%H:%M:%S} · %{y:.1f} ms<extra></extra>',
+            customdata: rttCd,
+            hovertemplate: `평균 RTT %{y:.1f}ms<br>${devLines}<extra></extra>`,
             _panel: 'rtt',
         });
-    }
-    // Ping loss 마커 — 항상 × 마커로 표시 (막대는 저-RTT pair 영역을 가려 오해 유발)
-    // 손실 위치는 차트 상단(rtt_max * 1.1)에 찍어 RTT trace 위에 떠 있게 함.
-    const losses = downsampleStep(ping.losses || [], 1000);
-    if (losses.length > 0) {
-        const rttMax = rttsSorted.length > 0 ? rttsSorted[rttsSorted.length - 1] : 1;
-        const lossY = rttMax > 0 ? rttMax * 1.1 : 1;
+        // Loss% 선 (보조축 y5) — hover에 장치별 loss.
         traces.push({
-            x: losses.map(p => epochToDate(p.epoch)),
-            y: losses.map(() => lossY),
-            type: 'scatter', mode: 'markers',
-            name: `Ping Loss (${losses.length}건)`,
-            marker: { symbol: 'x', color: '#ef4444', size: 10, line: { width: 2 } },
-            xaxis: 'x3', yaxis: 'y3',
-            hovertemplate: '%{x|%H:%M:%S} · loss seq=%{customdata}<extra></extra>',
-            customdata: losses.map(p => p.seq || '?'),
+            x: pingTl.map(p => epochToDate(p.epoch)),
+            y: pingTl.map(p => p.loss_pct),
+            type: 'scatter', mode: 'lines',
+            name: 'Loss%',
+            line: { color: '#f97316', width: 1.5 },
+            fill: 'tozeroy', fillcolor: 'rgba(249,115,22,0.1)',
+            xaxis: 'x3', yaxis: 'y5',
+            customdata: lossCd,
+            hovertemplate: `Loss %{y:.1f}%<br>${devLines}<extra></extra>`,
             _panel: 'rtt',
         });
     }
@@ -241,9 +369,11 @@
         xaxis3: { anchor: 'y3', domain: [0, 1], showticklabels: false, matches: 'x', gridcolor: GRID, ...SPIKE, ...HOVER_X },
         xaxis4: { anchor: 'y4', domain: [0, 1], matches: 'x', gridcolor: GRID, ...SPIKE, ...HOVER_X },
         yaxis:  { title: 'RSSI (dBm)', domain: [0.78, 1.0], gridcolor: GRID },
-        yaxis2: { title: 'Retry/s',    domain: [0.53, 0.75], gridcolor: GRID },
+        yaxis2: { title: 'Retry %',    domain: [0.53, 0.75], gridcolor: GRID },
         yaxis3: { title: 'RTT (ms)',   domain: [0.28, 0.50], gridcolor: GRID },
         yaxis4: { title: 'Frames/s',   domain: [0.00, 0.25], gridcolor: GRID },
+        // Ping 패널 보조축: Loss%(우측). RTT(y3)와 같은 칸에 겹쳐 그린다.
+        yaxis5: { title: 'Loss %', overlaying: 'y3', side: 'right', range: [0, 100], showgrid: false, color: '#f97316' },
         shapes: allShapes.map(({ _kind, ...rest }) => rest),
         margin: { t: 20, r: 20, b: 40, l: 60 },
     };
@@ -261,68 +391,41 @@
         modeBarButtonsToRemove: ['lasso2d', 'select2d'],
     });
 
-    /* ── 패널 토글 ── 체크박스 변경 시 도메인 재배치 + trace visible ── */
-    function applyPanelLayout(enabled) {
-        if (enabled.length === 0) return;
-        const order = PANELS.filter(p => enabled.includes(p));
+    /* ── 패널 on/off 상태 ── 사이드바 그룹 체크가 관리(상단 패널 표시 제거됨). ── */
+    const panelOn = {};
+    PANELS.forEach(p => { panelOn[p] = true; });
+
+    /* ── 패널 레이아웃 ── panelOn 기준으로 켜진 패널만 도메인 분배 + 꺼진 패널 숨김.
+       꺼진 패널(서브플롯)은 칸을 비우고 나머지가 공간을 채운다. 0개면 전체 빈다. ── */
+    function applyPanelLayout() {
+        const enabled = PANELS.filter(p => panelOn[p]);
         const gap = 0.04;
-        const each = (1 - gap * Math.max(0, order.length - 1)) / order.length;
+        const each = enabled.length ? (1 - gap * Math.max(0, enabled.length - 1)) / enabled.length : 0;
         const updates = {};
         let top = 1.0;
-        order.forEach(p => {
+        enabled.forEach(p => {
             const axis = PANEL_AXIS[p];
             const bot = top - each;
             updates[`${axis}.domain`] = [Number(bot.toFixed(4)), Number(top.toFixed(4))];
             updates[`${axis}.visible`] = true;
+            if (p === 'rtt') updates['yaxis5.visible'] = true;  // Ping 보조축(Loss%) 동기화
             top = bot - gap;
         });
-        PANELS.filter(p => !enabled.includes(p)).forEach(p => {
+        PANELS.filter(p => !panelOn[p]).forEach(p => {
             const axis = PANEL_AXIS[p];
             updates[`${axis}.visible`] = false;
             updates[`${axis}.domain`] = [0, 0.001];
+            if (p === 'rtt') updates['yaxis5.visible'] = false;
         });
         Plotly.relayout(timelineEl, updates);
-        // 트레이스 visible: 비활성 패널 트레이스만 숨김. 사이드바 체크박스 상태는 보존.
+        // 꺼진 패널 트레이스는 숨김, 켜진 패널은 사이드바 개별 상태(_userVisible)대로.
         const visibleArr = timelineEl.data.map(t => {
             if (!t._panel) return t.visible !== false ? true : false;
-            if (!enabled.includes(t._panel)) return false;
-            // 패널은 켜져 있고 — 사이드바 상태대로
+            if (!panelOn[t._panel]) return false;
             return t._userVisible !== false;
         });
         Plotly.restyle(timelineEl, { visible: visibleArr });
-        renderTraceLegend();  // 사이드바 활성/비활성 갱신
-    }
-
-    const toggleBoxes = document.querySelectorAll('.timeline-toggle');
-    toggleBoxes.forEach(cb => {
-        cb.addEventListener('change', () => {
-            const enabled = Array.from(toggleBoxes).filter(x => x.checked).map(x => x.dataset.panel);
-            if (enabled.length === 0) {
-                cb.checked = true;
-                return;
-            }
-            applyPanelLayout(enabled);
-        });
-    });
-
-    /* ── 단독 보기 버튼 ── 그 패널만 켜고 나머지 끔 ── */
-    document.querySelectorAll('.timeline-solo').forEach(btn => {
-        btn.addEventListener('click', e => {
-            e.preventDefault();
-            const target = btn.dataset.panel;
-            toggleBoxes.forEach(cb => { cb.checked = cb.dataset.panel === target; });
-            applyPanelLayout([target]);
-        });
-    });
-
-    /* ── 전체 표시 버튼 ── */
-    const showAllBtn = document.querySelector('.timeline-show-all');
-    if (showAllBtn) {
-        showAllBtn.addEventListener('click', e => {
-            e.preventDefault();
-            toggleBoxes.forEach(cb => { cb.checked = true; });
-            applyPanelLayout(PANELS.slice());
-        });
+        renderTraceLegend();
     }
 
     /* ── 오버레이 토글 ── 로밍 점선 / 이상 구간 / RSSI Cliff ── */
@@ -340,8 +443,8 @@
         const visibleArr = timelineEl.data.map(t => {
             if (t._overlay === 'cliff' && !want.cliff) return false;
             if (t._panel) {
-                const cb = document.querySelector(`.timeline-toggle[data-panel="${t._panel}"]`);
-                return !cb || cb.checked;
+                if (t._panel !== 'misc' && panelOn[t._panel] === false) return false;
+                return t._userVisible !== false;
             }
             return true;
         });
@@ -360,38 +463,82 @@
     function renderTraceLegend() {
         const lg = document.getElementById('timeline-legend');
         if (!lg) return;
+        const isVisible = (t) => t.visible !== false && t.visible !== 'legendonly';
         const groups = {};
         timelineEl.data.forEach((t, idx) => {
             const p = t._panel || 'misc';
             (groups[p] = groups[p] || []).push({ t, idx });
         });
-        const PANEL_LABELS = { rssi: 'RSSI', retry: 'Retry/s', rtt: 'Ping RTT', frames: 'Frames/s', misc: '기타' };
-        const html = PANELS.concat(['misc']).filter(p => groups[p]).map(p => {
-            const enabled = !document.querySelector(`.timeline-toggle[data-panel="${p}"]`)
-                || document.querySelector(`.timeline-toggle[data-panel="${p}"]`).checked;
+        const PANEL_LABELS = { rssi: 'RSSI', retry: 'Retry %', rtt: 'Ping RTT', frames: 'Frames/s', misc: '기타' };
+        const groupsHtml = PANELS.concat(['misc']).filter(p => groups[p]).map(p => {
+            // 그룹 헤더 체크 = 패널 on/off (서브플롯 표시/숨김). misc는 패널이 아니라 토글 없음.
+            const panelEnabled = (p === 'misc') ? true : !!panelOn[p];
             const items = groups[p].map(({ t, idx }) => {
-                const visible = t.visible !== false && t.visible !== 'legendonly';
+                const visible = isVisible(t);
                 const c = traceColor(t);
-                return `<label class="flex items-center gap-2 py-0.5 px-2 hover:bg-gray-700 rounded cursor-pointer text-xs ${visible && enabled ? '' : 'opacity-40'}" data-trace-idx="${idx}">
-                    <input type="checkbox" ${visible ? 'checked' : ''} ${enabled ? '' : 'disabled'} class="trace-toggle accent-blue-500" data-trace-idx="${idx}">
+                // disabled 제거 — 패널이 꺼져 있어도 하위를 체크하면 그 패널을 자동 ON.
+                return `<label class="flex items-center gap-2 py-0.5 px-2 hover:bg-gray-700 rounded cursor-pointer text-xs ${visible ? '' : 'opacity-40'}" data-trace-idx="${idx}">
+                    <input type="checkbox" ${visible ? 'checked' : ''} class="trace-toggle accent-blue-500" data-trace-idx="${idx}">
                     <span class="inline-block w-3 h-3 rounded flex-shrink-0" style="background:${c}"></span>
-                    <span class="truncate" title="${t.name}">${t.name}</span>
+                    <span class="truncate" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</span>
                 </label>`;
             }).join('');
+            const panelToggle = (p === 'misc') ? ''
+                : `<input type="checkbox" class="panel-toggle accent-blue-500" data-panel="${p}" ${panelEnabled ? 'checked' : ''}>`;
             return `<div class="mb-2">
-                <div class="text-[10px] uppercase tracking-wide text-gray-500 px-2 mb-1">${PANEL_LABELS[p] || p}</div>
+                <label class="flex items-center gap-2 px-2 mb-1 cursor-pointer hover:bg-gray-700/50 rounded">
+                    ${panelToggle}
+                    <span class="text-[10px] uppercase tracking-wide text-gray-400 font-semibold">${PANEL_LABELS[p] || p}</span>
+                </label>
                 ${items}
             </div>`;
         }).join('');
-        lg.innerHTML = html;
+        const allPanelsOn = PANELS.every(p => panelOn[p]);
+        const totalVis = timelineEl.data.filter(isVisible).length;
+        const totalAll = allPanelsOn && totalVis === timelineEl.data.length;
+        const anyOn = PANELS.some(p => panelOn[p]) || totalVis > 0;
+        lg.innerHTML = `
+            <label class="flex items-center gap-2 px-2 py-1 mb-2 border-b border-gray-700 cursor-pointer sticky top-0 bg-gray-800 z-10">
+                <input type="checkbox" id="trace-toggle-all" class="accent-blue-500" ${totalAll ? 'checked' : ''}>
+                <span class="text-xs font-semibold text-gray-300">전체 선택/해제</span>
+            </label>
+            ${groupsHtml}`;
+
+        // 일부만 켜진 전체 체크박스는 indeterminate(중간) 표시
+        const allCb = lg.querySelector('#trace-toggle-all');
+        if (allCb) allCb.indeterminate = anyOn && !totalAll;
+
+        // 개별 트레이스 visible 토글. 꺼진 패널의 하위를 켜면 그 패널을 자동 ON.
         lg.querySelectorAll('.trace-toggle').forEach(cb => {
             cb.addEventListener('change', () => {
                 const idx = parseInt(cb.dataset.traceIdx, 10);
+                const panel = timelineEl.data[idx]._panel;
                 timelineEl.data[idx]._userVisible = cb.checked;
-                Plotly.restyle(timelineEl, { visible: cb.checked }, [idx]);
-                cb.closest('label').classList.toggle('opacity-40', !cb.checked);
+                if (cb.checked && panel && panel !== 'misc' && !panelOn[panel]) {
+                    panelOn[panel] = true;        // 하위 체크 → 상위 패널 자동 ON
+                    applyPanelLayout();           // 재배치 + _userVisible 반영 + 범례 갱신
+                } else {
+                    Plotly.restyle(timelineEl, { visible: cb.checked }, [idx]);
+                    renderTraceLegend();
+                }
             });
         });
+        // 그룹 체크 = 패널 on/off → 서브플롯 숨김 + 레이아웃 재배치
+        lg.querySelectorAll('.panel-toggle').forEach(cb => {
+            cb.addEventListener('change', () => {
+                panelOn[cb.dataset.panel] = cb.checked;
+                applyPanelLayout();
+            });
+        });
+        // 전체 선택/해제 = 모든 패널 on/off + 모든 트레이스 visible
+        if (allCb) {
+            allCb.addEventListener('change', () => {
+                const on = allCb.checked;
+                PANELS.forEach(p => { panelOn[p] = on; });
+                timelineEl.data.forEach((_, i) => { timelineEl.data[i]._userVisible = on; });
+                applyPanelLayout();
+            });
+        }
     }
     renderTraceLegend();
 
@@ -651,12 +798,6 @@
     // 필요하므로 debug.frames 각 행에 epoch을 함께 싣지 않은 경우 전체만 보여준다.
     let highlightSet = new Set();
 
-    function escapeHtml(s) {
-        return String(s == null ? '' : s).replace(/[<&>]/g, c => (
-            { '<': '&lt;', '&': '&amp;', '>': '&gt;' }[c]
-        ));
-    }
-
     function rowEpoch(row) {
         // frame_to_row는 epoch을 직접 싣지 않지만, pipeline이 debug.frames에 epoch을
         // 부가하면 사용. 없으면 null(필터 시 항상 포함).
@@ -704,6 +845,36 @@
     }
     renderFrameTable(null, null);
 
+    /* ── RSSI 줌 적응형 재계산 ──
+     * 보이는 x범위의 raw RSSI를 매번 다시 계산한다 — 평균선(_rssiKind 'avg')은
+     * 그 범위를 RSSI_AVG_BINS구간으로 평균, 측정점 분포('scatter')는
+     * RSSI_SCATTER_MAX개로 솎는다. 줌인하면 그 구간만으로 다시 채워 평균
+     * 해상도·산포가 상세해진다. cliff 마커 등 _rssiKind 없는 trace는 제외. */
+    function redrawRssi(x0Epoch, x1Epoch) {
+        const idxs = [], newX = [], newY = [];
+        timelineEl.data.forEach((t, i) => {
+            if (t._panel !== 'rssi' || t._overlay || !t._rawRssi || !t._rssiKind) return;
+            const vis = (x0Epoch == null || x1Epoch == null)
+                ? t._rawRssi
+                : t._rawRssi.filter(p => p.x >= x0Epoch && p.x <= x1Epoch);
+            const s = (t._rssiKind === 'avg')
+                ? _rssiBinAverage(vis, RSSI_AVG_BINS)
+                : downsampleStep(vis, RSSI_SCATTER_MAX);
+            idxs.push(i);
+            newX.push(s.map(p => epochToDate(p.x)));
+            newY.push(s.map(p => p.y));
+        });
+        if (idxs.length) Plotly.restyle(timelineEl, { x: newX, y: newY }, idxs);
+    }
+
+    // pan/zoom 중 plotly_relayout이 매 프레임 발생 — redraw(전 RSSI trace restyle)를
+    // 120ms debounce로 묶어 jank 방지. 인터랙션엔 거의 지각되지 않는 지연.
+    let _rssiRedrawTimer = null;
+    function redrawRssiDebounced(x0, x1) {
+        if (_rssiRedrawTimer) clearTimeout(_rssiRedrawTimer);
+        _rssiRedrawTimer = setTimeout(() => redrawRssi(x0, x1), 120);
+    }
+
     /* ── 타임라인 x축 범위 변경 → 표 필터 (브러시/줌/팬) ── */
     let _syncingFromTable = false;
     timelineEl.on && timelineEl.on('plotly_relayout', (ev) => {
@@ -716,6 +887,7 @@
             r0 = ev['xaxis.range'][0];
             r1 = ev['xaxis.range'][1];
         } else if (ev['xaxis.autorange']) {
+            redrawRssiDebounced(null, null);
             renderFrameTable(null, null);
             if (startInput) startInput.value = '';
             if (endInput) endInput.value = '';
@@ -733,6 +905,7 @@
         const e = new Date(r1).getTime() / 1000;
         // invalid range(예: new Date(undefined) → NaN)는 표 필터를 깨뜨리므로 방어
         if (isNaN(s) || isNaN(e)) return;
+        redrawRssiDebounced(s, e);
         if (startInput) startInput.value = s.toFixed(1);
         if (endInput) endInput.value = e.toFixed(1);
         renderFrameTable(s, e);
@@ -758,6 +931,7 @@
             Plotly.relayout(debugMiniEl, { [`${debugMiniMasterKey}.range`]: range })
                 .catch(err => console.debug('[debug-mini]', err));
         }
+        redrawRssi(s, e);
         renderFrameTable(s, e);
     }
     const applyBtn = document.getElementById('debug-range-apply');
@@ -781,6 +955,7 @@
                 Plotly.relayout(debugMiniEl, { [`${debugMiniMasterKey}.autorange`]: true })
                     .catch(err => console.debug('[debug-mini]', err));
             }
+            redrawRssi(null, null);
             renderFrameTable(null, null);
         });
     }
