@@ -9,6 +9,7 @@ from analyzer.pipeline import (
     _structured_roaming,
     _structured_per_second,
     _structured_device_stats,
+    _structured_system_stats,
     _structured_diagnosis,
 )
 from analyzer.casefile_builder import build_casefile
@@ -375,6 +376,31 @@ class TestStructuredDeviceStats:
         for name, stats in result.items():
             assert "total_frames" in stats
             assert "retry_pct" in stats
+
+
+class TestStructuredSystemStats:
+    def test_empty(self):
+        assert _structured_system_stats([], None) == {}
+
+    def test_stats(self, sample_frames, sample_index):
+        result = _structured_system_stats(sample_frames, sample_index)
+        # 전체 시스템 = 가상 단일 장치 (mac 없음, role=SYSTEM)
+        assert result["mac"] == ""
+        assert result["role"] == "SYSTEM"
+        assert result["total_frames"] == len(sample_frames)
+        # 시스템 송신 = f.ta가 존재하는 모든 프레임
+        assert result["tx_frames"] == sum(1 for f in sample_frames if f.ta)
+
+    def test_mcs_retry_by_phy_shape(self, sample_frames, sample_index):
+        result = _structured_system_stats(sample_frames, sample_index)
+        # mcs_retry_by_phy는 mcs_by_phy와 동일 키 구조여야 한다 (charts.js가 의존).
+        assert set(result["mcs_retry_by_phy"]) == set(result["mcs_by_phy"])
+        for phy, mcs_map in result["mcs_retry_by_phy"].items():
+            assert set(mcs_map) == set(result["mcs_by_phy"][phy])
+            for entry in mcs_map.values():
+                assert set(entry) == {"total", "retry", "retry_pct"}
+                assert entry["retry"] <= entry["total"]
+                assert 0 <= entry["retry_pct"] <= 100
 
 
 class TestStructuredDiagnosis:

@@ -326,201 +326,243 @@ def _structured_per_second(frames: List[Frame]) -> Dict[str, Any]:
     return {"timeline": timeline}
 
 
+def _device_entry_stats(dev_frames, is_tx, mac: str, role: str) -> Dict[str, Any]:
+    """단일 장치(또는 전체 시스템)의 프레임 통계 entry를 만든다.
+
+    is_tx(f) = 그 프레임이 이 주체의 '송신'인지 판별. 장치는 f.ta == mac, 전체
+    시스템은 f.ta가 존재하는 모든 프레임(송신자 있는 프레임)을 송신으로 본다.
+    장치별/전체가 동일 로직·동일 구조를 공유하도록 한 곳에 모은다.
+    """
+    from collections import Counter
+    from ..core.models import SUBTYPE_NAMES
+
+    type_dist = Counter(f.frame_type for f in dev_frames)
+    subtype_dist = Counter(f.subtype for f in dev_frames)
+    retry_count = sum(1 for f in dev_frames if f.retry)
+
+    subtype_named = {}
+    for st, cnt in subtype_dist.most_common(20):
+        name = SUBTYPE_NAMES.get(st, f"type={st}")
+        subtype_named[name] = cnt
+
+    tx_frames = [f for f in dev_frames if is_tx(f)]
+    mcs_dist = Counter(f.mcs_int for f in tx_frames if f.mcs_int is not None)
+    mcs_named = {str(k): v for k, v in sorted(mcs_dist.items())}
+
+    # PHY 모드별 분리 + MCS별 retry 집계. HT/VHT/HE/EHT는 MCS index, Legacy는 Mbps rate.
+    # 한 주체가 mode를 섞어 송신하는 경우(예: HE 데이터 + 6Mbps mgmt)도 정직하게 표현.
+    phy_buckets: Dict[str, "Counter[str]"] = {
+        "HT": Counter(), "VHT": Counter(), "HE": Counter(),
+        "EHT": Counter(), "Legacy": Counter(),
+    }
+    phy_retry: Dict[str, "Counter[str]"] = {
+        "HT": Counter(), "VHT": Counter(), "HE": Counter(),
+        "EHT": Counter(), "Legacy": Counter(),
+    }
+    phy_frame_count: "Counter[str]" = Counter()
+    for f in tx_frames:
+        phy = getattr(f, "mcs_phy", "") or ""
+        if phy in ("HT", "VHT", "HE", "EHT"):
+            m = f.mcs_int
+            if m is None:
+                continue
+            key = str(m)
+        else:
+            phy = "Legacy"
+            key = (getattr(f, "data_rate", "") or "").split(",")[0].strip()
+            if not key:
+                continue
+        phy_buckets[phy][key] += 1
+        phy_frame_count[phy] += 1
+        if f.retry:
+            phy_retry[phy][key] += 1
+    mcs_by_phy = {
+        phy: dict(sorted(c.items(), key=lambda kv: float(kv[0])))
+        for phy, c in phy_buckets.items() if c
+    }
+    # MCS별 retry: 각 PHY+MCS의 {total, retry, retry_pct} (mcs_by_phy와 동일 키 구조).
+    mcs_retry_by_phy = {
+        phy: {
+            k: {
+                "total": phy_buckets[phy][k],
+                "retry": phy_retry[phy][k],
+                "retry_pct": round(phy_retry[phy][k] * 100 / phy_buckets[phy][k], 1)
+                if phy_buckets[phy][k] else 0,
+            }
+            for k in sorted(phy_buckets[phy], key=lambda x: float(x))
+        }
+        for phy in phy_buckets if phy_buckets[phy]
+    }
+    phy_summary = dict(phy_frame_count)
+
+    rssis = [f.rssi_first for f in tx_frames if f.rssi_first is not None]
+    rssi_stats = {}
+    if rssis:
+        rssi_sorted = sorted(rssis)
+        rssi_stats = {
+            "min": rssi_sorted[0],
+            "max": rssi_sorted[-1],
+            "avg": round(sum(rssis) / len(rssis), 1),
+            "count": len(rssis),
+        }
+
+    per_bucket = []
+    retry_peaks: list = []
+    if dev_frames:
+        start_epoch = int(dev_frames[0].epoch)
+        end_epoch = int(dev_frames[-1].epoch)
+        bucket_size = 10  # 10초 구간
+        for bucket_start in range(start_epoch, end_epoch + 1, bucket_size):
+            bucket_end = bucket_start + bucket_size
+            bucket_frames = [
+                f for f in dev_frames if bucket_start <= f.epoch < bucket_end
+            ]
+            total = len(bucket_frames)
+            retries = sum(1 for f in bucket_frames if f.retry)
+            # bucket별 MCS / PHY 통계 (송신 프레임 기준)
+            bucket_tx = [f for f in bucket_frames if is_tx(f)]
+            phy_mcs_counts: "Counter[str]" = Counter()
+            legacy_counts: "Counter[str]" = Counter()
+            phy_mode_dist: "Counter[str]" = Counter()
+            mcs_sum, mcs_n = 0, 0
+            for f in bucket_tx:
+                phy = getattr(f, "mcs_phy", "") or ""
+                if phy in ("HT", "VHT", "HE", "EHT"):
+                    m = f.mcs_int
+                    if m is not None:
+                        phy_mcs_counts[f"{phy} MCS{m}"] += 1
+                        phy_mode_dist[phy] += 1
+                        mcs_sum += m
+                        mcs_n += 1
+                else:
+                    rate = (getattr(f, "data_rate", "") or "").split(",")[0].strip()
+                    if rate:
+                        legacy_counts[f"Legacy {rate}Mbps"] += 1
+                        phy_mode_dist["Legacy"] += 1
+            combined = phy_mcs_counts + legacy_counts
+            mcs_breakdown = ", ".join(
+                f"{k}×{v:,}" for k, v in combined.most_common(5)
+            )
+            avg_mcs = round(mcs_sum / mcs_n, 1) if mcs_n else None
+            tx_total = len(bucket_tx)
+            legacy_n = sum(legacy_counts.values())
+            legacy_pct = round(legacy_n * 100 / tx_total, 1) if tx_total else 0
+            per_bucket.append(
+                {
+                    "epoch": bucket_start,
+                    "total": total,
+                    "retry": retries,
+                    "retry_pct": round(retries * 100 / total, 1) if total else 0,
+                    "mcs_breakdown": mcs_breakdown,
+                    "avg_mcs": avg_mcs,
+                    "legacy_pct": legacy_pct,
+                    "tx_total": tx_total,
+                    "phy_mode_dist": dict(phy_mode_dist),
+                }
+            )
+
+        # retry 피크 구간 zoom-in (top 3 retry%, total>50인 bucket)
+        candidate_peaks = sorted(
+            [b for b in per_bucket if b.get("total", 0) > 50],
+            key=lambda b: -b.get("retry_pct", 0),
+        )[:3]
+        for pk in candidate_peaks:
+            if pk.get("retry_pct", 0) < 10:
+                break
+            pk_start = pk["epoch"]
+            pk_end = pk_start + bucket_size
+            pk_frames = [
+                f for f in dev_frames if pk_start <= f.epoch < pk_end
+            ]
+            sub_buckets = []
+            for sub_start in range(pk_start, pk_end):
+                sub_end = sub_start + 1
+                sub = [f for f in pk_frames if sub_start <= f.epoch < sub_end]
+                if not sub:
+                    continue
+                sub_total = len(sub)
+                sub_retry = sum(1 for f in sub if f.retry)
+                sub_tx = [f for f in sub if is_tx(f)]
+                sub_mcs_counts: "Counter[str]" = Counter()
+                for f in sub_tx:
+                    phy = getattr(f, "mcs_phy", "") or ""
+                    if phy in ("HT", "VHT", "HE", "EHT") and f.mcs_int is not None:
+                        sub_mcs_counts[f"{phy} MCS{f.mcs_int}"] += 1
+                    else:
+                        rate = (
+                            getattr(f, "data_rate", "") or ""
+                        ).split(",")[0].strip()
+                        if rate:
+                            sub_mcs_counts[f"Legacy {rate}Mbps"] += 1
+                sub_breakdown = ", ".join(
+                    f"{k}×{v:,}" for k, v in sub_mcs_counts.most_common(4)
+                )
+                sub_buckets.append({
+                    "epoch": sub_start,
+                    "total": sub_total,
+                    "retry": sub_retry,
+                    "retry_pct": round(sub_retry * 100 / sub_total, 1) if sub_total else 0,
+                    "tx_total": len(sub_tx),
+                    "mcs_breakdown": sub_breakdown,
+                })
+            retry_peaks.append({
+                "start": pk_start,
+                "duration": bucket_size,
+                "total": pk.get("total", 0),
+                "retry": pk.get("retry", 0),
+                "retry_pct": pk.get("retry_pct", 0),
+                "sub_buckets": sub_buckets,
+            })
+
+    return {
+        "mac": mac,
+        "role": role,
+        "total_frames": len(dev_frames),
+        "tx_frames": len(tx_frames),
+        "type_dist": dict(type_dist),
+        "subtype_dist": subtype_named,
+        "retry_count": retry_count,
+        "retry_pct": round(retry_count * 100 / len(dev_frames), 1)
+        if dev_frames
+        else 0,
+        "mcs_dist": mcs_named,
+        "mcs_by_phy": mcs_by_phy,
+        "mcs_retry_by_phy": mcs_retry_by_phy,
+        "phy_summary": phy_summary,
+        "rssi_stats": rssi_stats,
+        "per_bucket": per_bucket if dev_frames else [],
+        "retry_peaks": retry_peaks if dev_frames else [],
+    }
+
+
 def _structured_device_stats(
     frames: List[Frame], roles: Dict[str, Dict[str, Any]], index
 ) -> Dict[str, Any]:
     """장치별 프레임 타입/서브타입/MCS/RSSI/시간대별 통계."""
-    from collections import Counter
-    from ..core.models import SUBTYPE_NAMES
-
     result = {}
     for mac, info in roles.items():
         if index:
             dev_frames = index.by_ta.get(mac, []) + index.by_ra.get(mac, [])
         else:
             dev_frames = [f for f in frames if f.ta == mac or f.ra == mac]
-
         if not dev_frames:
             continue
-
-        type_dist = Counter(f.frame_type for f in dev_frames)
-        subtype_dist = Counter(f.subtype for f in dev_frames)
-        retry_count = sum(1 for f in dev_frames if f.retry)
-
-        subtype_named = {}
-        for st, cnt in subtype_dist.most_common(20):
-            name = SUBTYPE_NAMES.get(st, f"type={st}")
-            subtype_named[name] = cnt
-
-        tx_frames = [f for f in dev_frames if f.ta == mac]
-        mcs_dist = Counter(f.mcs_int for f in tx_frames if f.mcs_int is not None)
-        mcs_named = {str(k): v for k, v in sorted(mcs_dist.items())}
-
-        # PHY 모드별 분리: HT/VHT/HE/EHT는 MCS index, Legacy는 Mbps rate.
-        # 한 디바이스가 mode를 섞어 송신하는 경우(예: HE 데이터 + 6Mbps mgmt)도 정직하게 표현.
-        phy_buckets: Dict[str, "Counter[str]"] = {
-            "HT": Counter(), "VHT": Counter(), "HE": Counter(),
-            "EHT": Counter(), "Legacy": Counter(),
-        }
-        phy_frame_count: "Counter[str]" = Counter()
-        for f in tx_frames:
-            phy = getattr(f, "mcs_phy", "") or ""
-            if phy in ("HT", "VHT", "HE", "EHT"):
-                m = f.mcs_int
-                if m is not None:
-                    phy_buckets[phy][str(m)] += 1
-                    phy_frame_count[phy] += 1
-            else:
-                rate = (getattr(f, "data_rate", "") or "").split(",")[0].strip()
-                if rate:
-                    phy_buckets["Legacy"][rate] += 1
-                    phy_frame_count["Legacy"] += 1
-        mcs_by_phy = {
-            phy: dict(sorted(c.items(), key=lambda kv: float(kv[0])))
-            for phy, c in phy_buckets.items() if c
-        }
-        phy_summary = dict(phy_frame_count)
-
-        rssis = [f.rssi_first for f in tx_frames if f.rssi_first is not None]
-        rssi_stats = {}
-        if rssis:
-            rssi_sorted = sorted(rssis)
-            rssi_stats = {
-                "min": rssi_sorted[0],
-                "max": rssi_sorted[-1],
-                "avg": round(sum(rssis) / len(rssis), 1),
-                "count": len(rssis),
-            }
-
-        per_bucket = []
-        retry_peaks: list = []
-        if dev_frames:
-            start_epoch = int(dev_frames[0].epoch)
-            end_epoch = int(dev_frames[-1].epoch)
-            bucket_size = 10  # 10초 구간
-            per_bucket = []
-            for bucket_start in range(start_epoch, end_epoch + 1, bucket_size):
-                bucket_end = bucket_start + bucket_size
-                bucket_frames = [
-                    f for f in dev_frames if bucket_start <= f.epoch < bucket_end
-                ]
-                total = len(bucket_frames)
-                retries = sum(1 for f in bucket_frames if f.retry)
-                # bucket별 MCS / PHY 통계 (송신 프레임 기준)
-                bucket_tx = [f for f in bucket_frames if f.ta == mac]
-                phy_mcs_counts: "Counter[str]" = Counter()
-                legacy_counts: "Counter[str]" = Counter()
-                phy_mode_dist: "Counter[str]" = Counter()
-                mcs_sum, mcs_n = 0, 0
-                for f in bucket_tx:
-                    phy = getattr(f, "mcs_phy", "") or ""
-                    if phy in ("HT", "VHT", "HE", "EHT"):
-                        m = f.mcs_int
-                        if m is not None:
-                            phy_mcs_counts[f"{phy} MCS{m}"] += 1
-                            phy_mode_dist[phy] += 1
-                            mcs_sum += m
-                            mcs_n += 1
-                    else:
-                        rate = (getattr(f, "data_rate", "") or "").split(",")[0].strip()
-                        if rate:
-                            legacy_counts[f"Legacy {rate}Mbps"] += 1
-                            phy_mode_dist["Legacy"] += 1
-                combined = phy_mcs_counts + legacy_counts
-                mcs_breakdown = ", ".join(
-                    f"{k}×{v:,}" for k, v in combined.most_common(5)
-                )
-                avg_mcs = round(mcs_sum / mcs_n, 1) if mcs_n else None
-                tx_total = len(bucket_tx)
-                legacy_n = sum(legacy_counts.values())
-                legacy_pct = round(legacy_n * 100 / tx_total, 1) if tx_total else 0
-                per_bucket.append(
-                    {
-                        "epoch": bucket_start,
-                        "total": total,
-                        "retry": retries,
-                        "retry_pct": round(retries * 100 / total, 1) if total else 0,
-                        "mcs_breakdown": mcs_breakdown,
-                        "avg_mcs": avg_mcs,
-                        "legacy_pct": legacy_pct,
-                        "tx_total": tx_total,
-                        "phy_mode_dist": dict(phy_mode_dist),
-                    }
-                )
-
-            # retry 피크 구간 zoom-in (top 3 retry%, total>50인 bucket)
-            retry_peaks = []
-            candidate_peaks = sorted(
-                [b for b in per_bucket if b.get("total", 0) > 50],
-                key=lambda b: -b.get("retry_pct", 0),
-            )[:3]
-            for pk in candidate_peaks:
-                if pk.get("retry_pct", 0) < 10:
-                    break
-                pk_start = pk["epoch"]
-                pk_end = pk_start + bucket_size
-                pk_frames = [
-                    f for f in dev_frames if pk_start <= f.epoch < pk_end
-                ]
-                sub_buckets = []
-                for sub_start in range(pk_start, pk_end):
-                    sub_end = sub_start + 1
-                    sub = [f for f in pk_frames if sub_start <= f.epoch < sub_end]
-                    if not sub:
-                        continue
-                    sub_total = len(sub)
-                    sub_retry = sum(1 for f in sub if f.retry)
-                    sub_tx = [f for f in sub if f.ta == mac]
-                    sub_mcs_counts: "Counter[str]" = Counter()
-                    for f in sub_tx:
-                        phy = getattr(f, "mcs_phy", "") or ""
-                        if phy in ("HT", "VHT", "HE", "EHT") and f.mcs_int is not None:
-                            sub_mcs_counts[f"{phy} MCS{f.mcs_int}"] += 1
-                        else:
-                            rate = (
-                                getattr(f, "data_rate", "") or ""
-                            ).split(",")[0].strip()
-                            if rate:
-                                sub_mcs_counts[f"Legacy {rate}Mbps"] += 1
-                    sub_breakdown = ", ".join(
-                        f"{k}×{v:,}" for k, v in sub_mcs_counts.most_common(4)
-                    )
-                    sub_buckets.append({
-                        "epoch": sub_start,
-                        "total": sub_total,
-                        "retry": sub_retry,
-                        "retry_pct": round(sub_retry * 100 / sub_total, 1) if sub_total else 0,
-                        "tx_total": len(sub_tx),
-                        "mcs_breakdown": sub_breakdown,
-                    })
-                retry_peaks.append({
-                    "start": pk_start,
-                    "duration": bucket_size,
-                    "total": pk.get("total", 0),
-                    "retry": pk.get("retry", 0),
-                    "retry_pct": pk.get("retry_pct", 0),
-                    "sub_buckets": sub_buckets,
-                })
-
-        result[info["name"]] = {
-            "mac": mac,
-            "role": info["role"],
-            "total_frames": len(dev_frames),
-            "tx_frames": len(tx_frames),
-            "type_dist": dict(type_dist),
-            "subtype_dist": subtype_named,
-            "retry_count": retry_count,
-            "retry_pct": round(retry_count * 100 / len(dev_frames), 1)
-            if dev_frames
-            else 0,
-            "mcs_dist": mcs_named,
-            "mcs_by_phy": mcs_by_phy,
-            "phy_summary": phy_summary,
-            "rssi_stats": rssi_stats,
-            "per_bucket": per_bucket if dev_frames else [],
-            "retry_peaks": retry_peaks if dev_frames else [],
-        }
+        result[info["name"]] = _device_entry_stats(
+            dev_frames, lambda f, m=mac: f.ta == m, mac, info["role"]
+        )
     return result
+
+
+def _structured_system_stats(frames: List[Frame], index) -> Dict[str, Any]:
+    """네트워크 전체(모든 송신 프레임) 통계 — 장치별과 동일 구조의 단일 entry.
+
+    전체 시스템을 하나의 가상 장치처럼 보고, 송신은 f.ta가 존재하는 모든 프레임으로
+    집계한다(특정 장치가 아니라 캡처 전체의 MCS/retry 분포). frames는 시간순 정렬
+    가정(pipeline에서 정렬됨).
+    """
+    if not frames:
+        return {}
+    return _device_entry_stats(frames, lambda f: bool(f.ta), "", "SYSTEM")
 
 
 def _structured_diagnosis(
