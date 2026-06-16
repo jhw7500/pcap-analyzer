@@ -43,6 +43,22 @@
         return arr.filter((_, i) => i % step === 0);
     }
 
+    /* 초당 집계 시계열용 — 각 stride에서 valFn 최대 행을 남겨 피크(고-retry/고-loss 초)를
+       보존한다. 균등 솎기(downsampleStep)는 피크 초를 통째로 버릴 수 있어 retry/ping엔 부적합. */
+    function downsamplePeak(arr, maxPoints, valFn) {
+        if (arr.length <= maxPoints) return arr;
+        const step = Math.ceil(arr.length / maxPoints);
+        const out = [];
+        for (let i = 0; i < arr.length; i += step) {
+            let best = arr[i];
+            for (let j = i + 1; j < Math.min(i + step, arr.length); j++) {
+                if (valFn(arr[j]) > valFn(best)) best = arr[j];
+            }
+            out.push(best);
+        }
+        return out;
+    }
+
     // HTML 이스케이프 — innerHTML/Plotly hovertemplate에 장치명을 넣기 전 거친다(악성 pcap 방어).
     // '%'도 막는다: Plotly hovertemplate은 %{...}를 데이터 바인딩으로 해석하므로,
     // 장치명에 %{...}가 있으면 임의 trace 데이터가 새어나갈 수 있다.
@@ -70,7 +86,7 @@
        (redrawRssi). */
     const RSSI_AVG_BINS = 150;     // 보이는 범위를 이 개수 구간으로 평균
     const RSSI_SCATTER_MAX = 800;  // 점분포 최대 표시 점수
-    const TIMELINE_MAX = 10800;    // retry/ping 초당 시계열 상한(=3h). 이미 초당 집계라 그 이하는 무손실.
+    const TIMELINE_MAX = 10800;    // retry/ping 초당 시계열 상한(=3h 무손실). 초과 시 downsamplePeak로 피크 보존.
     function _rssiHexToRgba(hex, a) {
         let m = hex.replace('#', '');
         if (m.length === 3) m = m[0] + m[0] + m[1] + m[1] + m[2] + m[2];  // #abc → aabbcc
@@ -147,8 +163,8 @@
             (signal.aps[name].retry_timeline || []).forEach(p => { map[p.epoch] = p; });
             retryDevs.push({ name, map });
         });
-        // 장시간 캡처(초당 시계열) 대비 상한으로 솎는다 — RSSI 다운샘플과 동일 취지.
-        const tl = downsampleStep(timeline, TIMELINE_MAX);
+        // 장시간(>3h) 캡처 대비 상한 — 균등 솎기 대신 피크(고-retry 초) 보존 다운샘플.
+        const tl = downsamplePeak(timeline, TIMELINE_MAX, p => (p.total ? p.retry / p.total : 0));
         // 각 초마다 [장치별 "retry%（retry/total)"] 배열을 customdata로.
         const customdata = tl.map(p => retryDevs.map(d => {
             const e = d.map[p.epoch];
@@ -220,7 +236,7 @@
     const pingRaw = (ping.timeline && ping.timeline.length)
         ? ping.timeline
         : computePingTimeline(ping.full_list || []);
-    const pingTl = downsampleStep(pingRaw, TIMELINE_MAX);  // 장시간 캡처 대비 상한
+    const pingTl = downsamplePeak(pingRaw, TIMELINE_MAX, p => p.loss_pct);  // >3h 대비 상한(피크 보존)
     if (pingTl.length > 0) {
         const pingDevs = [...staNames, ...apNames];  // RSSI/retry와 동일한 장치 순서
         // 두 선의 hover를 역할별로 분리 — RTT 선은 장치별 RTT, Loss 선은 장치별 loss.

@@ -187,24 +187,24 @@ def _ping_per_sec(full_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     # ping의 다수(역방향·seq-gap 추정손실)는 src/dst MAC이 비어 장치를 못 가른다.
     # src/dst IP는 항상 있으므로, MAC이 있는 항목에서 IP→장치명을 학습해 IP로 식별한다.
     # (값은 MAC이 아니라 장치명 문자열 — 예: "STA1(aa)")
-    ip_to_dev: Dict[str, str] = {}
+    ip_to_name: Dict[str, str] = {}
     for p in full_list:
         if p.get("src") and p.get("src_mac"):
-            ip_to_dev[p["src"]] = p["src_mac"]
+            ip_to_name[p["src"]] = p["src_mac"]
         if p.get("dst") and p.get("dst_mac"):
-            ip_to_dev[p["dst"]] = p["dst_mac"]
+            ip_to_name[p["dst"]] = p["dst_mac"]
 
     def _sta_of(p: Dict[str, Any]) -> str:
         # ping 상대 STA = src/dst 중 STA로 매핑되는 IP의 장치명.
         for ip in (p.get("dst"), p.get("src")):
-            dev = ip_to_dev.get(ip)
+            dev = ip_to_name.get(ip)
             if dev and dev.startswith("STA"):
                 return dev
         # STA 매핑 실패 시 AP가 아닌 IP를 STA 후보로(IP 그대로 표시), 끝내 없으면 '?'.
         # → by_dev 키에 IP/'?' 가 섞일 수 있다. 프론트는 staNames/apNames(장치명)만
         #   hover에 펼치므로 IP/'?' 키는 hover에서 빠진다(전체 집계 agg에는 포함).
         for ip in (p.get("dst"), p.get("src")):
-            if ip and not ip_to_dev.get(ip, "").startswith("AP"):
+            if ip and not ip_to_name.get(ip, "").startswith("AP"):
                 return ip
         return "?"
 
