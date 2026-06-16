@@ -45,6 +45,7 @@ class Frame:
     data_rate: str = ""  # Mbps (legacy 송신 식별용)
     icmp_ident: str = ""  # ICMP echo identifier — 같은 src/dst 안의 흐름 구분용
     reason_code: str = ""  # wlan.fixed.reason_code — Deauth/Disassoc 사유 코드 (디버그 증거용)
+    current_ap: str = ""  # wlan.fixed.current_ap — Reassoc Request의 직전 AP (로밍 전 AP)
 
     @property
     def subtype_name(self) -> str:

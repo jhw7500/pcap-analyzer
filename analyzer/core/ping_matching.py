@@ -12,8 +12,12 @@
    "실제 무선구간 손실"로 카운트. 갭이 아닌 정상 송신 사이클은 measurable에는
    포함되지만 RTT는 측정 불가(unmeasurable RTT)로 표시.
 
-loss_pct = (양방향 unmatched + 단방향 seq_gap) / (RTT 측정 가능한 총 시도) × 100
-        = loss_count / (count + loss_count) × 100  (역호환)
+loss_pct = (확정 손실 reply_missing + 단방향 seq_gap) / (matched + 그 손실 + unmeasurable) × 100
+
+양쪽 모두 미관측(fully_unobserved) seq 갭은 request조차 캡처되지 않아 "보냈는데 응답
+없음(손실)"인지 "monitor가 request를 못 잡음(캡처 누락)"인지 구분할 수 없으므로 손실에
+넣지 않고 fully_unobserved로만 별도 집계한다. (같은 캡처에서 reply만 잡힌 seq=
+request_missing가 다수 존재하는 것이 후자의 직접 증거 — request를 놓쳐도 ping은 정상.)
 """
 from typing import Dict, List, Any, Tuple
 
@@ -217,7 +221,7 @@ def build_ping_matches(
     #   verified_cycle   = req_seqs ∩ reply_seqs   → 양쪽 다 관측, 무선 손실 0
     #   reply_missing    = req_seqs − reply_seqs   → req만 관측, **확정 무선 손실 후보**
     #   request_missing  = reply_seqs − req_seqs   → reply만 관측, **캡처 누락** (무선 OK)
-    #   fully_unobserved = seq range gap           → 양쪽 모두 미관측 (구분 불가)
+    #   fully_unobserved = seq range gap           → 양쪽 모두 미관측, 손실서 제외(캡처 한계)
     # 단방향 흐름은 seq gap만 loss로 잡고 나머지는 unmeasurable.
 
     seq_gap_losses = 0
@@ -258,13 +262,13 @@ def build_ping_matches(
                 if rep.icmp_seq in request_missing_set:
                     observations.append(_observation_entry(rep, roles, "reply"))
 
-            # 양쪽 모두 미관측 seq 갭 (capture 또는 wireless 둘 다 가능, 구분 불가)
+            # 양쪽 모두 미관측 seq 갭 — request도 reply도 캡처되지 않은 seq.
+            # request를 못 본 이상 "응답 없음(손실)"으로 단정할 수 없다(monitor가
+            # request를 대량 누락하는 캡처에선 정상 송수신된 ping도 안 잡힌다 —
+            # 같은 캡처의 request_missing가 그 증거). 손실에 넣지 않고 별도 집계만.
             union_seqs_int = sorted(({_seq_int(s) for s in (req_seq_set | reply_seq_set)} - {None}))
             missing_seqs = _detect_gaps(union_seqs_int)
-            for ms in missing_seqs:
-                _record_phantom_loss(losses, full_list, reqs, ms, "unknown")
             fully_unobserved_count += len(missing_seqs)
-            seq_gap_losses += len(missing_seqs)
 
             flow_diag.append({
                 "flow": list(flow_key),

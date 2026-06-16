@@ -278,8 +278,15 @@
         });
     }
 
-    /* ── 서브플롯 4: 프레임/sec ── */
+    /* ── 서브플롯 4: 프레임/sec ──
+       전체 합(회색, 비교 기준) + 장치별 송신(TX) 프레임율 개별 선.
+       장치별 초당 프레임 수 = signal.{stas,aps}[name].retry_timeline 의 total
+       (= index.by_ta 송신 프레임의 초당 집계). RSSI 패널과 같은 색 팔레트를
+       재사용해 같은 장치가 모든 패널에서 같은 색으로 묶인다. 누적이 아니라
+       독립 선이라 STA/AP 프레임이 이중 계상될 일이 없고, 전체 선과 장치별
+       선의 '갭'이 곧 TA 없는 ACK/제어·미식별(roles 밖) 프레임이다. */
     if (timeline.length > 0) {
+        // 전체 합 선 (회색) — 비교 기준. 장치별 선과의 갭으로 미귀속 트래픽이 드러난다.
         const sampled = downsample(
             timeline.map(p => ({ x: p.epoch, y: p.total })), 2000
         );
@@ -287,12 +294,39 @@
             x: sampled.map(p => epochToDate(p.x)),
             y: sampled.map(p => p.y),
             type: 'scatter', mode: 'lines',
-            name: 'Frames/sec',
-            line: { color: '#6b7280', width: 1 },
+            name: '전체 Frames/s',
+            line: { color: '#6b7280', width: 1.5 },
             fill: 'tozeroy', fillcolor: 'rgba(107,114,128,0.1)',
             xaxis: 'x4', yaxis: 'y4',
-            hovertemplate: '%{x|%H:%M:%S} · %{y:.0f} pkt/s<extra></extra>',
+            hovertemplate: '%{x|%H:%M:%S} · 전체 %{y:.0f} pkt/s<extra></extra>',
             _panel: 'frames',
+        });
+        // 장치별 송신 프레임율 개별 선 (STA 파랑 / AP 초록 — RSSI 색 재사용).
+        // retry_timeline의 total은 그 장치가 그 초에 송신(TA)한 전체 프레임 수.
+        function framesTrace(node, name, color) {
+            const raw = (node.retry_timeline || [])
+                .map(p => ({ x: p.epoch, y: p.total }))
+                .filter(p => typeof p.x === 'number');
+            if (!raw.length) return null;
+            const s = downsample(raw, 2000);
+            return {
+                x: s.map(p => epochToDate(p.x)),
+                y: s.map(p => p.y),
+                type: 'scatter', mode: 'lines',
+                name: name + ' Frames/s',
+                line: { color: color, width: 1 },
+                xaxis: 'x4', yaxis: 'y4',
+                hovertemplate: `%{x|%H:%M:%S} · ${escapeHtml(name)} %{y:.0f} pkt/s<extra></extra>`,
+                _panel: 'frames',
+            };
+        }
+        staNames.forEach((name, i) => {
+            const t = framesTrace(signal.stas[name], name, staColors[i % staColors.length]);
+            if (t) traces.push(t);
+        });
+        apNames.forEach((name, i) => {
+            const t = framesTrace(signal.aps[name], name, apColors[i % apColors.length]);
+            if (t) traces.push(t);
         });
     }
 
@@ -791,6 +825,32 @@
     const countEl = document.getElementById('debug-frames-count');
     const startInput = document.getElementById('debug-range-start');
     const endInput = document.getElementById('debug-range-end');
+    const deviceSel = document.getElementById('debug-filter-device');
+    const typesCont = document.getElementById('debug-filter-types');
+
+    // 증거표 필터 상태 — 시간 범위(curStart/curEnd)는 종류/장치 토글 시 재사용하고,
+    // activeTypes(체크된 Type/Subtype 집합)·activeDevice(선택 장치, ''=전체)와 AND로 묶는다.
+    let curStart = null, curEnd = null;
+    const activeTypes = new Set();   // 표시할 type_subtype. 칩 생성 시 전부 채움.
+    let activeDevice = '';
+
+    // epoch(초) ↔ datetime-local 입력값("YYYY-MM-DDTHH:MM:SS", 로컬 타임존) 변환.
+    // epochToDate(로컬 표시)와 동일 타임존이라 줌→입력→줌 round-trip이 어긋나지 않는다.
+    function epochToLocalInput(epoch) {
+        const d = epochToDate(epoch);
+        const p = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    }
+    function localInputToEpoch(v) {
+        if (!v) return NaN;
+        // datetime-local "YYYY-MM-DDTHH:MM(:SS)" — new Date(str)는 일부 브라우저(Safari 등)에서
+        // Invalid Date거나 UTC로 오해석될 수 있어, 분할 후 로컬 생성자로 안전하게 파싱한다.
+        const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/.exec(v);
+        const t = m
+            ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0)).getTime()
+            : new Date(v).getTime();
+        return isNaN(t) ? NaN : t / 1000;
+    }
 
     // frame.number → epoch 매핑 (필터/하이라이트용). debug.axis로 epoch 추정 불가한
     // 행은 timestamp 문자열만 있고 epoch이 없을 수 있어, ping/roaming series의 epoch도
@@ -804,11 +864,22 @@
         return (typeof row.epoch === 'number') ? row.epoch : null;
     }
 
+    function passType(r) {
+        // activeTypes는 칩 생성 시 모든 종류로 채워지므로 has()=체크된 종류만 통과.
+        // 모두 해제하면 빈 집합 → 빈 표(의도적 전체 해제).
+        return activeTypes.has(r.type_subtype);
+    }
+    function passDevice(r) {
+        // 선택 장치가 송신(ta_name) 또는 수신(ra_name)인 프레임만. ''=전체 통과.
+        return !activeDevice || r.ta_name === activeDevice || r.ra_name === activeDevice;
+    }
+
     function renderFrameTable(rangeStart, rangeEnd) {
         if (!tbody) return;
-        let rows = debugFrames;
+        curStart = rangeStart; curEnd = rangeEnd;  // 종류/장치 토글 시 재사용
+        let rows = debugFrames.filter(r => passType(r) && passDevice(r));
         if (rangeStart != null && rangeEnd != null) {
-            rows = debugFrames.filter(r => {
+            rows = rows.filter(r => {
                 const e = rowEpoch(r);
                 if (e == null) return true;  // epoch 미상 행은 항상 표시
                 return e >= rangeStart && e <= rangeEnd;
@@ -843,6 +914,74 @@
             </tr>`;
         }).join('');
     }
+
+    // 종류 칩(다중 체크박스) 생성 — 데이터에 등장한 Type/Subtype을 정렬해 칩으로.
+    // activeTypes를 모든 종류로 채워 시작(전부 체크 = 필터 없음).
+    const typeAllCb = document.getElementById('debug-type-all');
+    // 개별 칩 상태로 '전체' 체크박스를 동기화(전부=체크, 일부=중간, 없음=해제).
+    function syncTypeAll() {
+        if (!typeAllCb || !typesCont) return;
+        const chips = [...typesCont.querySelectorAll('.debug-type-chip')];
+        const on = chips.filter(c => c.checked).length;
+        typeAllCb.checked = chips.length > 0 && on === chips.length;
+        typeAllCb.indeterminate = on > 0 && on < chips.length;
+    }
+    function buildTypeChips() {
+        if (!typesCont) return;
+        const types = [...new Set(debugFrames.map(r => r.type_subtype))].sort();
+        types.forEach(t => activeTypes.add(t));
+        typesCont.innerHTML = types.map(t => `
+            <label class="inline-flex items-center gap-1 px-1.5 py-0.5 bg-gray-700/50 rounded cursor-pointer hover:bg-gray-700">
+                <input type="checkbox" class="debug-type-chip accent-blue-500" data-type="${escapeHtml(t)}" checked>
+                <span>${escapeHtml(t)}</span>
+            </label>`).join('');
+        typesCont.querySelectorAll('.debug-type-chip').forEach(cb => {
+            cb.addEventListener('change', () => {
+                if (cb.checked) activeTypes.add(cb.dataset.type);
+                else activeTypes.delete(cb.dataset.type);
+                syncTypeAll();
+                renderFrameTable(curStart, curEnd);
+            });
+        });
+        // 전체 선택/해제 — 모든 칩을 일괄 토글.
+        if (typeAllCb) {
+            typeAllCb.addEventListener('change', () => {
+                const on = typeAllCb.checked;
+                typeAllCb.indeterminate = false;
+                typesCont.querySelectorAll('.debug-type-chip').forEach(cb => {
+                    cb.checked = on;
+                    if (on) activeTypes.add(cb.dataset.type);
+                    else activeTypes.delete(cb.dataset.type);
+                });
+                renderFrameTable(curStart, curEnd);
+            });
+        }
+        syncTypeAll();
+    }
+    // 장치 드롭다운 — RSSI/frame 패널과 동일한 STA→AP 순서로 옵션 추가.
+    // ta_name/ra_name(백엔드 build_debug_block이 mac_name으로 환원)과 매칭한다.
+    function buildDeviceOptions() {
+        if (!deviceSel) return;
+        // 재분석 전 결과는 행에 ta_name/ra_name이 없어 어떤 장치를 골라도 전부 걸러진다.
+        // 빈 표 대신 드롭다운을 비활성화하고 재분석이 필요함을 안내한다.
+        const hasDev = debugFrames.some(r => r.ta_name != null || r.ra_name != null);
+        if (!hasDev) {
+            deviceSel.disabled = true;
+            deviceSel.title = '장치 필터는 이 분석을 재분석한 뒤부터 사용할 수 있습니다.';
+            const opt = deviceSel.querySelector('option');
+            if (opt) opt.textContent = '전체 (재분석 필요)';
+            return;
+        }
+        const names = [...staNames, ...apNames];
+        deviceSel.insertAdjacentHTML('beforeend',
+            names.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join(''));
+        deviceSel.addEventListener('change', () => {
+            activeDevice = deviceSel.value;
+            renderFrameTable(curStart, curEnd);
+        });
+    }
+    buildTypeChips();
+    buildDeviceOptions();
     renderFrameTable(null, null);
 
     /* ── RSSI 줌 적응형 재계산 ──
@@ -906,8 +1045,8 @@
         // invalid range(예: new Date(undefined) → NaN)는 표 필터를 깨뜨리므로 방어
         if (isNaN(s) || isNaN(e)) return;
         redrawRssiDebounced(s, e);
-        if (startInput) startInput.value = s.toFixed(1);
-        if (endInput) endInput.value = e.toFixed(1);
+        if (startInput) startInput.value = epochToLocalInput(s);
+        if (endInput) endInput.value = epochToLocalInput(e);
         renderFrameTable(s, e);
         // 메인 차트를 마우스로 직접 줌/팬할 때도 미니차트가 같이 움직이도록 동기화.
         // (applyRangeToTimeline 경로와는 별개 — 이 핸들러는 메인→미니 단방향 동기화 담당)
@@ -937,8 +1076,8 @@
     const applyBtn = document.getElementById('debug-range-apply');
     if (applyBtn) {
         applyBtn.addEventListener('click', () => {
-            const s = parseFloat(startInput.value);
-            const e = parseFloat(endInput.value);
+            const s = localInputToEpoch(startInput.value);
+            const e = localInputToEpoch(endInput.value);
             applyRangeToTimeline(s, e);
         });
     }
@@ -948,6 +1087,16 @@
             highlightSet = new Set();
             if (startInput) startInput.value = '';
             if (endInput) endInput.value = '';
+            // 종류·장치 필터도 전체로 리셋("전체 보기").
+            if (deviceSel) deviceSel.value = '';
+            activeDevice = '';
+            if (typesCont) {
+                typesCont.querySelectorAll('.debug-type-chip').forEach(cb => {
+                    cb.checked = true;
+                    activeTypes.add(cb.dataset.type);
+                });
+            }
+            if (typeAllCb) { typeAllCb.checked = true; typeAllCb.indeterminate = false; }
             _syncingFromTable = true;
             Plotly.relayout(timelineEl, { 'xaxis.autorange': true })
                 .finally(() => { _syncingFromTable = false; });
@@ -987,8 +1136,8 @@
             if (s != null && e != null) {
                 const pad = Math.max((e - s) * 0.25, 1.0);  // 가독성 ±패딩
                 const ps = s - pad, pe = e + pad;
-                if (startInput) startInput.value = ps.toFixed(1);
-                if (endInput) endInput.value = pe.toFixed(1);
+                if (startInput) startInput.value = epochToLocalInput(ps);
+                if (endInput) endInput.value = epochToLocalInput(pe);
                 // 탭 전환 직후 차트 resize 타이밍을 고려해 다음 프레임에 적용
                 requestAnimationFrame(() => applyRangeToTimeline(ps, pe));
                 // 하이라이트는 줌과 무관하게 전체 범위에서도 보이도록 즉시 렌더

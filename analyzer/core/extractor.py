@@ -50,6 +50,7 @@ TSHARK_FIELDS = [
     "wlan_radio.data_rate",       # cols[24] — Mbps (legacy 폴백 표시용)
     "icmp.ident",                 # cols[25] — ICMP echo identifier (흐름 분리용)
     "wlan.fixed.reason_code",     # cols[26] — Deauth/Disassoc 사유 코드 (디버그 증거용)
+    "wlan.fixed.current_ap",      # cols[27] — Reassoc Request의 직전 연결 AP (로밍 전 AP)
 ]
 
 
@@ -265,6 +266,7 @@ def parse_tsv_line(line: str) -> Optional[FrameType]:
             data_rate=data_rate,
             icmp_ident=cols[25] if len(cols) > 25 else "",
             reason_code=cols[26] if len(cols) > 26 else "",
+            current_ap=cols[27] if len(cols) > 27 else "",
         )
     except (ValueError, IndexError):
         return None
