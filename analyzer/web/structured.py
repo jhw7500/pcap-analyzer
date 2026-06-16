@@ -4,7 +4,7 @@ pipeline.run_analysis가 오케스트레이션 중 호출한다. 각 함수는 f
 (필요 시 FrameIndex)를 받아 UI가 소비하는 중첩 dict를 반환한다.
 """
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any, Dict, List
 
 from ..core.models import Frame
@@ -19,7 +19,6 @@ def _structured_overview(
     if n == 0:
         return {"total_frames": 0}
 
-    from collections import Counter
 
     proto_counts = Counter(f.protocol for f in frames)
     subtype_counts = Counter(f.subtype for f in frames)
@@ -54,7 +53,6 @@ def _structured_overview(
     #   TA=mac frame의 ip.src   → 송신측 자기 IP (가장 신뢰) — 가중치 2
     #   RA=mac frame의 ip.dst   → 수신측 자기 IP (보조 신호) — 가중치 1
     # 빈도 ↓ 정렬 후 상위 N개만 노출. forwarded/broadcast 잔재 제거 효과.
-    from collections import Counter
     dev_ip_counts: Dict[str, "Counter[str]"] = {}
     for f in frames:
         if f.ta and f.ip_src:
@@ -310,7 +308,6 @@ def _structured_per_second(frames: List[Frame]) -> Dict[str, Any]:
     """초당 프레임 수 시계열."""
     if not frames:
         return {"timeline": []}
-    from collections import Counter
 
     sec_counts = Counter(int(f.epoch) for f in frames)
     retry_counts = Counter(int(f.epoch) for f in frames if f.retry)
@@ -335,7 +332,6 @@ def _device_entry_stats(dev_frames, is_tx, mac: str, role: str) -> Dict[str, Any
     시스템은 f.ta가 존재하는 모든 프레임(송신자 있는 프레임)을 송신으로 본다.
     장치별/전체가 동일 로직·동일 구조를 공유하도록 한 곳에 모은다.
     """
-    from collections import Counter
     from ..core.models import SUBTYPE_NAMES
 
     type_dist = Counter(f.frame_type for f in dev_frames)

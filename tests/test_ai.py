@@ -429,3 +429,35 @@ class TestRetryPeakMcsInPrompt:
         assert "Retry 피크" in prompt
         assert "7.5" in prompt        # avg_mcs — 과거엔 orphan key라 'MCS -'
         assert "MCS -)" not in prompt
+
+
+class TestDiagnosisSectionInPrompt:
+    """_build_diagnosis_section: 실제 _structured_diagnosis 형태(dict health/summary).
+    dead elif(비-dict stringify) 제거 후, 비-dict는 누락되는지(report.py와 동일 정책)."""
+
+    def test_full_diagnosis_rendered(self):
+        s = _base_structured(diagnosis={
+            "health": {"score": 75, "grade": "주의", "color": "yellow"},
+            "component_scores": {"retry": 60, "loss": 80, "roaming": 70},
+            "summary": {"total_frames": 1000, "retry_pct": 12, "loss_pct": 3,
+                        "roaming_total": 5, "roaming_slow": 2,
+                        "delay_zones": 1, "anomaly_count": 0},
+            "issues": [{"severity": "high", "category": "Retry",
+                        "msg": "retry 폭증", "action": "확인"}],
+            "sta_diags": [],
+        })
+        prompt = build_review_prompt(s)
+        assert "사전 계산된 진단" in prompt
+        assert "score=75" in prompt
+        assert "retry_pct=12" in prompt        # summary dict 분기
+        assert "컴포넌트 점수" in prompt
+
+    def test_non_dict_health_summary_dropped(self):
+        s = _base_structured(diagnosis={
+            "health": "BADHEALTH", "summary": "BADSUMMARY",
+            "issues": [], "sta_diags": [],
+        })
+        prompt = build_review_prompt(s)
+        # dead elif 제거 — 비-dict는 stringify되지 않고 그냥 누락
+        assert "BADHEALTH" not in prompt
+        assert "BADSUMMARY" not in prompt

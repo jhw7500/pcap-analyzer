@@ -227,13 +227,13 @@ def _build_diagnosis_section(diagnosis: Any) -> list:
     lines = ["", "## 사전 계산된 진단"]
     health = diagnosis.get("health") or {}
     summary = diagnosis.get("summary") or {}
+    # health/summary는 _structured_diagnosis가 항상 dict로 만든다. 비-dict는
+    # (report.py _health_section과 동일 정책으로) 그냥 누락 — stringify하지 않는다.
     if isinstance(health, dict) and health:
         lines.append(
             f"- 전체 health: score={health.get('score','-')} "
             f"({health.get('grade','-')})"
         )
-    elif health:
-        lines.append(f"- 전체 health: {health}")
     scores = diagnosis.get("component_scores") or {}
     if scores:
         score_str = " / ".join(f"{k}={v}" for k, v in scores.items())
@@ -248,8 +248,6 @@ def _build_diagnosis_section(diagnosis: Any) -> list:
                 summary_parts.append(f"{k}={summary[k]}")
         if summary_parts:
             lines.append(f"- 핵심 지표: {', '.join(summary_parts)}")
-    elif summary:
-        lines.append(f"- 요약: {summary}")
     issues = diagnosis.get("issues") or diagnosis.get("findings") or []
     if issues:
         lines.append("")
