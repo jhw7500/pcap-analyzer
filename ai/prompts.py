@@ -73,7 +73,7 @@ def _build_device_section(device_stats: dict) -> list:
             if peaks:
                 pk_str = " / ".join(
                     f"{b.get('retry_pct',0)}% (frames {_fmt_int(b.get('total',0))}, "
-                    f"MCS {b.get('top_mcs','-')})"
+                    f"MCS {b.get('avg_mcs') or '-'} [{b.get('mcs_breakdown') or '-'}])"
                     for b in peaks
                 )
                 lines.append(f"- Retry 피크 구간 top3: {pk_str}")
@@ -167,15 +167,28 @@ def _build_signal_section(signal: dict, cliffs: Any) -> list:
         lines.append(
             f"- {name}: RSSI avg={avg} / min={minv} / max={maxv} dBm (n={_fmt_int(fc)})"
         )
-    # signal_cliffs: dict 또는 list 가능
-    cliff_list = cliffs.get("cliffs", []) if isinstance(cliffs, dict) else (cliffs or [])
-    if cliff_list:
-        lines.append(f"- 신호 절벽(RSSI 급강하) {len(cliff_list)}건")
-        for c in cliff_list[:5]:
-            sta = c.get("sta", "?")
-            drop = c.get("drop_db") or c.get("drop", "?")
-            ts = c.get("timestamp") or c.get("time", "?")
-            lines.append(f"  · {ts} {sta}: {drop}dB drop")
+    # signal_cliffs는 {STA명: {cliffs:[{epoch, rssi_before, rssi_after, drop_db,
+    # duration_sec}], moving_avg:[...]}} 구조(analyze_signal_cliffs)다. STA명을
+    # 외부 키로 붙여 평탄화하고 drop이 큰 순으로 상위 5건을 노출한다.
+    cliff_items = []
+    if isinstance(cliffs, dict):
+        for sta_name, cd in cliffs.items():
+            for c in (cd.get("cliffs", []) if isinstance(cd, dict) else []):
+                if isinstance(c, dict):
+                    cliff_items.append((sta_name, c))
+    if cliff_items:
+        cliff_items.sort(key=lambda x: -(x[1].get("drop_db") or 0))
+        lines.append(f"- 신호 절벽(RSSI 급강하) {len(cliff_items)}건")
+        for sta_name, c in cliff_items[:5]:
+            drop = c.get("drop_db", "?")
+            ts = c.get("epoch", "?")
+            before, after = c.get("rssi_before"), c.get("rssi_after")
+            ctx = (
+                f" ({before}→{after}dBm)"
+                if before is not None and after is not None
+                else ""
+            )
+            lines.append(f"  · t={ts} {sta_name}: {drop}dB drop{ctx}")
     return lines
 
 
@@ -229,17 +242,25 @@ def _build_diagnosis_section(diagnosis: Any) -> list:
                 lines.append(line)
             else:
                 lines.append(f"- {it}")
-    sta_diags = diagnosis.get("sta_diags") or {}
-    if sta_diags and isinstance(sta_diags, dict):
+    # sta_diags는 list — 각 원소 {name, mac, score, scores{}, metrics{retry_pct,
+    # rssi_avg, rssi_min, roaming_count, slow_roaming, ...}, issues[]}. 메트릭은
+    # metrics 아래 nested다(report.py의 _sta_diags_section과 동일 계약).
+    sta_diags = diagnosis.get("sta_diags") or []
+    if isinstance(sta_diags, list) and sta_diags:
         lines.append("")
         lines.append("### STA별 사전 진단")
-        for sta_name, sd in list(sta_diags.items())[:5]:
-            if isinstance(sd, dict):
-                parts = []
-                for k in ("roaming_count", "retry_pct", "rssi_avg", "loss_pct", "verdict"):
-                    if sd.get(k) is not None:
-                        parts.append(f"{k}={sd[k]}")
-                lines.append(f"- {sta_name}: {', '.join(parts)}")
+        for sd in sta_diags[:5]:
+            if not isinstance(sd, dict):
+                continue
+            name = sd.get("name", "?")
+            m = sd.get("metrics") or {}
+            parts = []
+            if sd.get("score") is not None:
+                parts.append(f"score={sd['score']}")
+            for k in ("retry_pct", "rssi_avg", "rssi_min", "roaming_count", "slow_roaming"):
+                if m.get(k) is not None:
+                    parts.append(f"{k}={m[k]}")
+            lines.append(f"- {name}: {', '.join(parts)}")
 
     # 종합 결론(correlation) — LLM이 결합 컨텍스트를 보고 사용자 환경
     # (설정·튜닝·간섭) 가설을 자연어로 추정할 수 있도록 노출.

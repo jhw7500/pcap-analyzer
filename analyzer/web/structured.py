@@ -23,6 +23,7 @@ def _structured_overview(
 
     proto_counts = Counter(f.protocol for f in frames)
     subtype_counts = Counter(f.subtype for f in frames)
+    type_counts = Counter(f.frame_type for f in frames)
     retry_count = sum(1 for f in frames if f.retry)
 
     # MAC ↔ IP 매핑 — 관찰된 IP 양측 추출:
@@ -92,6 +93,7 @@ def _structured_overview(
         "time_end": frames[-1].timestamp,
         "retry_count": retry_count,
         "retry_pct": round(retry_count * 100.0 / n, 2) if n else 0,
+        "type_dist": dict(type_counts),
         "protocol_dist": dict(proto_counts.most_common(20)),
         "subtype_dist": dict(subtype_counts.most_common(20)),
         "devices": devices,
