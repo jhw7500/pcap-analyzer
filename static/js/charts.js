@@ -2,6 +2,14 @@
 (function () {
     if (typeof DATA === 'undefined') return;
 
+    // pcap에서 파싱된 문자열(IP·sta_name 등)을 innerHTML/Plotly에 주입하기 전 HTML
+    // 특수문자 escape — 악의적 pcap 문자열이 XSS로 번지지 않도록 boundary 방어.
+    // 전역에서 쓰도록 IIFE 상단에 정의. (gemini security-high 권고 반영)
+    const escapeHtml = (str) => String(str == null ? '' : str)
+        .replace(/[&<>"']/g, m => (
+            { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]
+        ));
+
     const DARK = {
         paper_bgcolor: 'rgba(0,0,0,0)',
         plot_bgcolor: 'rgba(0,0,0,0)',
@@ -781,7 +789,9 @@
         // p99 초과 이상치는 데이터에서 빼지 않고 축만 잘라 카운트로 안내한다.
         const rtts = pairs.map(p => p.rtt_ms).filter(v => typeof v === 'number');
         const sorted = [...rtts].sort((a, b) => a - b);
-        const p99 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.99))];
+        // pairs는 있으나 유효 RTT(rtt_ms 숫자)가 하나도 없으면 sorted가 비어
+        // p99=undefined→hi=NaN이 되어 Plotly 렌더가 깨진다. 빈 경우 1ms로 폴백.
+        const p99 = sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.99))] : 1;
         const hi = Math.max(p99, 1);                 // 표시 상한 (최소 1ms)
         const outliers = rtts.filter(v => v > hi).length;
         const maxRtt = sorted[sorted.length - 1];
@@ -925,7 +935,7 @@
         if (obsFlowSel) {
             const flows = [...new Set(observations.map(o => `${firstIp(o.src)} → ${firstIp(o.dst)}`))].sort();
             obsFlowSel.insertAdjacentHTML('beforeend',
-                flows.map(f => `<option value="${f}">${f}</option>`).join(''));
+                flows.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join(''));
         }
         [obsDirSel, obsFlowSel].forEach(el => { if (el) el.addEventListener('change', renderObsTable); });
         renderObsTable();
@@ -991,7 +1001,7 @@
     if (pingFlowSel && fullList.length > 0) {
         const flows = [...new Set(fullList.map(p => `${p.src} → ${p.dst}`))].sort();
         pingFlowSel.insertAdjacentHTML('beforeend',
-            flows.map(f => `<option value="${f}">${f}</option>`).join(''));
+            flows.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join(''));
     }
     [pingStatusSel, pingFlowSel, pingRetryChk].forEach(el => {
         if (el) el.addEventListener('change', renderPingFullTable);
@@ -1021,14 +1031,6 @@
         delay_zone: '지연 구간',
         anomaly: '이상 프레임',
     };
-    // pcap에서 파싱된 문자열(sta_name, title, explanation 등)을 innerHTML로
-    // 주입하기 전 HTML 특수문자 escape. 현재 분석 파이프라인에서는 안전한
-    // 값만 흘러오지만, 악의적 pcap이 만든 문자열이 들어와도 XSS로 번지지
-    // 않도록 boundary에서 방어. (gemini security-high 권고 반영)
-    const escapeHtml = (str) => String(str == null ? '' : str)
-        .replace(/[&<>"']/g, m => (
-            { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]
-        ));
     const corrCountEl = document.getElementById('correlations-count');
     if (corrCountEl) {
         corrCountEl.textContent = correlations.length

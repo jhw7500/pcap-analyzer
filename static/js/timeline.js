@@ -843,7 +843,12 @@
     }
     function localInputToEpoch(v) {
         if (!v) return NaN;
-        const t = new Date(v).getTime();  // datetime-local은 로컬 타임존으로 파싱
+        // datetime-local "YYYY-MM-DDTHH:MM(:SS)" — new Date(str)는 일부 브라우저(Safari 등)에서
+        // Invalid Date거나 UTC로 오해석될 수 있어, 분할 후 로컬 생성자로 안전하게 파싱한다.
+        const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/.exec(v);
+        const t = m
+            ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0)).getTime()
+            : new Date(v).getTime();
         return isNaN(t) ? NaN : t / 1000;
     }
 
