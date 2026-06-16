@@ -178,7 +178,7 @@ def run_analysis(
     structured["diagnosis"] = _structured_diagnosis(structured, frames, index)
 
     # 디버그 타임라인용 증거 블록 (공유 시간축 + 다운샘플 시계열 + 근거 프레임)
-    structured["debug"] = build_debug_block(structured, frames, index)
+    structured["debug"] = build_debug_block(structured, frames, index, roles)
 
     # 텍스트 리포트 (호환용)
     text_report = []

@@ -137,19 +137,32 @@
         <div class="flex items-center justify-between flex-wrap gap-2 mb-3">
             <div>
                 <h3 class="text-sm font-semibold text-gray-400 mb-1">증거 프레임 테이블</h3>
-                <p class="text-xs text-gray-500">타임라인 구간 드래그(범위 선택)=표 필터 · 표 상단 시간범위 입력=타임라인 선택 · 진단 탭의 "증거 보기"로 점프하면 해당 프레임이 하이라이트됩니다.</p>
+                <p class="text-xs text-gray-500">타임라인 구간 드래그(범위 선택)=표 필터 · 표 상단 시간/장치/종류 필터로 좁히기 · 진단 탭의 "증거 보기"로 점프하면 해당 프레임이 하이라이트됩니다.</p>
             </div>
             <div class="flex items-center gap-2 text-xs flex-wrap">
                 <label class="flex items-center gap-1 text-gray-400">시작
-                    <input type="number" step="0.1" id="debug-range-start" class="bg-gray-700 border border-gray-600 rounded px-2 py-1 w-28 tabular-nums" placeholder="epoch">
+                    <input type="datetime-local" step="1" id="debug-range-start" class="bg-gray-700 border border-gray-600 rounded px-2 py-1 tabular-nums">
                 </label>
                 <label class="flex items-center gap-1 text-gray-400">끝
-                    <input type="number" step="0.1" id="debug-range-end" class="bg-gray-700 border border-gray-600 rounded px-2 py-1 w-28 tabular-nums" placeholder="epoch">
+                    <input type="datetime-local" step="1" id="debug-range-end" class="bg-gray-700 border border-gray-600 rounded px-2 py-1 tabular-nums">
+                </label>
+                <label class="flex items-center gap-1 text-gray-400">장치
+                    <select id="debug-filter-device" class="bg-gray-700 border border-gray-600 rounded px-2 py-1">
+                        <option value="">전체</option>
+                    </select>
                 </label>
                 <button type="button" id="debug-range-apply" class="px-2 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white">필터 적용</button>
                 <button type="button" id="debug-range-clear" class="px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-200">전체 보기</button>
                 <span id="debug-frames-count" class="text-gray-500 tabular-nums"></span>
             </div>
+        </div>
+        <div class="flex items-start gap-2 flex-wrap text-xs mb-2">
+            <span class="text-gray-500 mt-1 flex-shrink-0">종류</span>
+            <label class="inline-flex items-center gap-1 px-1.5 py-0.5 bg-gray-700 rounded cursor-pointer flex-shrink-0">
+                <input type="checkbox" id="debug-type-all" class="accent-blue-500" checked>
+                <span class="font-semibold text-gray-300">전체</span>
+            </label>
+            <div id="debug-filter-types" class="flex items-center gap-1 flex-wrap"></div>
         </div>
         <div class="overflow-x-auto max-h-[480px] overflow-y-auto">
             <table class="w-full text-xs font-mono" id="debug-frames-table">

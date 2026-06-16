@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..core.models import Frame
 from .frame_table import frame_to_row
+from ..core.detector import mac_name
 from .timeline_axis import build_time_axis
 from .timeline_series import (
     project_ping_series,
@@ -221,6 +222,7 @@ def build_debug_block(
     structured: Dict[str, Any],
     frames: List[Frame],
     index: Any,
+    roles: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """디버그 타임라인용 structured["debug"] 블록을 만든다.
 
@@ -337,11 +339,19 @@ def build_debug_block(
     )
 
     # frame_to_row는 표시용 8개 컬럼만 담는다. 타임라인↔표 시간 동기화를 위해
-    # 행마다 epoch을 부가(표에는 렌더되지 않는 보조 키)한다.
+    # 행마다 epoch을, 장치 필터를 위해 ta_name/ra_name을 부가한다(표에는 렌더되지
+    # 않는 보조 키). roles가 없으면(단위 테스트 등) 이름 해석 없이 raw MAC을 싣고,
+    # roles가 있으면 mac_name으로 STA/AP 표시명(장치 드롭다운 값과 동일)으로 환원한다.
     frame_rows: List[Dict[str, Any]] = []
     for f in ordered:
         row = frame_to_row(f)
         row["epoch"] = f.epoch
+        if roles is not None:
+            row["ta_name"] = mac_name(f.ta, roles) if f.ta else ""
+            row["ra_name"] = mac_name(f.ra, roles) if f.ra else ""
+        else:
+            row["ta_name"] = f.ta or ""
+            row["ra_name"] = f.ra or ""
         frame_rows.append(row)
 
     return {
