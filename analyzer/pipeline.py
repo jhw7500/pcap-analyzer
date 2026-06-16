@@ -25,6 +25,7 @@ from .web.structured import (
     _structured_roaming,
     _structured_per_second,
     _structured_device_stats,
+    _structured_system_stats,
     _structured_diagnosis,
 )
 
@@ -37,6 +38,7 @@ __all__ = [
     "_structured_roaming",
     "_structured_per_second",
     "_structured_device_stats",
+    "_structured_system_stats",
     "_structured_diagnosis",
 ]
 
@@ -166,6 +168,7 @@ def run_analysis(
 
     _progress("시각화: 장치별 통계 생성 중...", 96)
     structured["device_stats"] = _structured_device_stats(frames, roles, index)
+    structured["system_stats"] = _structured_system_stats(frames, index)
     if _cancelled():
         return {"cancelled": True}
 

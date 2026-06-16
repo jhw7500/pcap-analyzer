@@ -349,6 +349,8 @@
     const staNames_dev = allDevNames.filter(n => deviceStats[n].role === 'STA');
 
     // AP별 프레임 비교 (스택 바)
+    // 장치 비교(AP/STA 프레임 + retry/RSSI) — 전체 시스템 뷰에서만 렌더(renderDeviceDetail이 제어).
+    function renderDeviceCompare() {
     if (apNames.length > 0 && document.getElementById('chart-ap-compare')) {
         const types = ['Management', 'Control', 'Data'];
         const typeColors = { Management: '#3b82f6', Control: '#f59e0b', Data: '#10b981' };
@@ -419,22 +421,45 @@
             legend: { font: { size: 11 } },
         }, { responsive: true, displayModeBar: false });
     }
+    }
 
     // 개별 장치 상세
     const deviceSelect = document.getElementById('device-select');
     if (deviceSelect) {
-        deviceSelect.innerHTML = allDevNames.map(n => {
+        // 전체 시스템(모든 송신 프레임)을 가상 장치처럼 맨 위 옵션으로. system_stats 있을 때만.
+        const sysStat = DATA.system_stats;
+        const sysOpt = (sysStat && sysStat.total_frames)
+            ? `<option value="__system__">🌐 전체 시스템 - ${sysStat.total_frames.toLocaleString()} frames, Retry ${sysStat.retry_pct}%</option>`
+            : '';
+        deviceSelect.innerHTML = sysOpt + allDevNames.map(n => {
             const s = deviceStats[n];
             return `<option value="${n}">${n} (${s.role}) - ${s.total_frames.toLocaleString()} frames, Retry ${s.retry_pct}%</option>`;
         }).join('');
         deviceSelect.addEventListener('change', renderDeviceDetail);
-        if (allDevNames.length > 0) renderDeviceDetail();
+        if (allDevNames.length > 0 || (sysStat && sysStat.total_frames)) renderDeviceDetail();
     }
 
     function renderDeviceDetail() {
         const name = deviceSelect.value;
-        const s = deviceStats[name];
+        const s = (name === '__system__') ? (DATA.system_stats || {}) : deviceStats[name];
         if (!s) return;
+
+        // "장치 비교"는 비교할 장치(allDevNames)가 있을 때만 의미가 있다.
+        // - system_stats가 있는(신규) 결과: 전체 시스템 뷰에서만 표시(개별 장치 선택 시 숨김).
+        // - system_stats가 없는(구버전 직렬화) 결과: __system__ 옵션이 없으므로 과거처럼 항상 표시.
+        const cmpSection = document.getElementById('device-compare-section');
+        if (cmpSection) {
+            const hasSystem = !!(DATA.system_stats && DATA.system_stats.total_frames);
+            const showCompare = allDevNames.length > 0 &&
+                (hasSystem ? name === '__system__' : true);
+            if (showCompare) {
+                cmpSection.style.display = '';
+                if (name === '__system__') cmpSection.open = true;
+                renderDeviceCompare();
+            } else {
+                cmpSection.style.display = 'none';
+            }
+        }
 
         // 요약 KPI
         const detailEl = document.getElementById('device-detail-stats');
@@ -460,7 +485,9 @@
         // MCS / 레거시 레이트 분포 (PHY 모드별 grouped bar)
         const byPhy = s.mcs_by_phy || {};
         const PHY_COLORS = { HT: '#facc15', VHT: '#06b6d4', HE: '#8b5cf6', EHT: '#ec4899', Legacy: '#9ca3af' };
-        const PHY_ORDER = ['HT', 'VHT', 'HE', 'EHT', 'Legacy'];
+        // 802.11 세대순: Legacy(b/g/a) → HT(11n) → VHT(11ac) → HE(11ax) → EHT(11be).
+        // 데이터 없는 PHY는 아래 루프에서 자동 생략된다.
+        const PHY_ORDER = ['Legacy', 'HT', 'VHT', 'HE', 'EHT'];
         const phyTraces = [];
         for (const phy of PHY_ORDER) {
             const dist = byPhy[phy];
@@ -478,6 +505,37 @@
                 hovertemplate: '%{x}<br>프레임 %{y:,}<extra></extra>',
             });
         }
+        // MCS별 retry% overlay (보조축 y2) — 각 PHY+MCS의 retry_pct를 마커+선으로.
+        // 빈도(막대)와 retry%(점)를 함께 봐 "많이 쓴 MCS인데 retry도 높은가"를 판단.
+        // 표본이 적은 MCS(total<MIN_SAMPLE)는 retry%가 통계적으로 불안정하므로(예: 6개
+        // 중 5개=83%는 노이즈) 마커를 작고 흐리게 처리하고 hover에 표본 부족을 표기한다.
+        const MIN_SAMPLE = 30;
+        const byPhyRetry = s.mcs_retry_by_phy || {};
+        const retryX = [], retryY = [], retryText = [], retryColor = [], retrySize = [];
+        for (const phy of PHY_ORDER) {
+            const dist = byPhy[phy];
+            if (!dist || Object.keys(dist).length === 0) continue;
+            const rmap = byPhyRetry[phy] || {};
+            Object.keys(dist).sort((a, b) => parseFloat(a) - parseFloat(b)).forEach(k => {
+                const r = rmap[k] || { total: dist[k], retry: 0, retry_pct: 0 };
+                const weak = r.total < MIN_SAMPLE;
+                retryX.push(phy === 'Legacy' ? `Legacy ${k}Mbps` : `${phy} MCS${k}`);
+                retryY.push(r.retry_pct);
+                retryText.push(`retry ${r.retry_pct}% (${r.retry.toLocaleString()}/${r.total.toLocaleString()})${weak ? ' ⚠ 표본 부족' : ''}`);
+                retryColor.push(weak ? 'rgba(239,68,68,0.25)' : '#ef4444');
+                retrySize.push(weak ? 4 : 8);
+            });
+        }
+        if (retryX.length) {
+            phyTraces.push({
+                type: 'scatter', mode: 'markers+lines', name: `Retry% (표본<${MIN_SAMPLE}은 흐림)`,
+                x: retryX, y: retryY, yaxis: 'y2',
+                marker: { color: retryColor, size: retrySize, symbol: 'diamond' },
+                line: { color: 'rgba(239,68,68,0.2)', width: 1 },
+                text: retryText,
+                hovertemplate: '%{x}<br>%{text}<extra></extra>',
+            });
+        }
         if (phyTraces.length > 0) {
             const summary = s.phy_summary || {};
             const summaryStr = PHY_ORDER
@@ -489,6 +547,11 @@
                 title: { text: summaryStr, font: { size: 11, color: '#9ca3af' }, x: 0.02, xanchor: 'left' },
                 xaxis: { title: 'PHY 모드 · MCS / Legacy Mbps', tickangle: -30, tickfont: { size: 10 } },
                 yaxis: { title: '프레임 수' },
+                yaxis2: {
+                    title: 'Retry %', overlaying: 'y', side: 'right',
+                    range: [0, Math.max(10, (retryY.length ? Math.max(...retryY) : 0) * 1.15)],
+                    color: '#ef4444', showgrid: false,
+                },
                 barmode: 'group',
                 showlegend: true,
                 legend: { orientation: 'h', y: 1.12 },
