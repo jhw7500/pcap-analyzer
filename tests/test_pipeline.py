@@ -913,6 +913,44 @@ class TestStructuredDiagnosis:
         }
         assert build_correlations(diag) == []
 
+    def test_signal_cliffs_none_does_not_crash(self):
+        """구버전 result에서 signal_cliffs가 null이어도 진단이 죽지 않는다(or {} 방어)."""
+        frames = [make_frame(number=1, epoch=1000.0, ta=STA1, ra=AP1, subtype="40")]
+        index = FrameIndex(frames, SAMPLE_ROLES)
+        structured = {
+            "overview": {"total_frames": 1, "retry_pct": 0},
+            "ping": {"stats": {"loss_pct": 0}, "losses": []},
+            "roaming": {"sequences": []},
+            "signal": {"stas": {"STA1(0002)": {"mac": STA1, "rssi_avg": -50}}},
+            "device_stats": {"STA1(0002)": {"retry_pct": 0}},
+            "signal_cliffs": None,  # ← 직렬화 라운드트립에서 발생 가능
+            "delay_zones": {"delay_zones": []},
+            "anomaly_frames": {"anomalies": []},
+        }
+        result = _structured_diagnosis(structured, frames, index)  # AttributeError 없이
+        assert "sta_diags" in result
+
+    def test_signal_cliffs_non_dict_entries_ignored(self):
+        """cliffs 리스트에 dict 아닌 항목이 섞여도 무시하고 dict만 집계."""
+        frames = [make_frame(number=1, epoch=1000.0, ta=STA1, ra=AP1, subtype="40")]
+        index = FrameIndex(frames, SAMPLE_ROLES)
+        structured = {
+            "overview": {"total_frames": 1, "retry_pct": 0},
+            "ping": {"stats": {"loss_pct": 0}, "losses": []},
+            "roaming": {"sequences": []},
+            "signal": {"stas": {"STA1(0002)": {"mac": STA1, "rssi_avg": -50}}},
+            "device_stats": {"STA1(0002)": {"retry_pct": 0}},
+            "signal_cliffs": {"STA1(0002)": {"cliffs": [
+                "stale-not-a-dict", {"epoch": 1000.0, "drop_db": 20},
+            ]}},
+            "delay_zones": {"delay_zones": []},
+            "anomaly_frames": {"anomalies": []},
+        }
+        result = _structured_diagnosis(structured, frames, index)
+        sta = result["sta_diags"][0]
+        # dict 1건(drop 20>=15)만 집계 → signal_cliff issue 생성
+        assert any(i.get("signal_type") == "signal_cliff" for i in sta["issues"])
+
 
 class TestCasefileBuilder:
     def test_casefile_ping_parity_exact(self):

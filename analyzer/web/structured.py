@@ -693,9 +693,15 @@ def _structured_diagnosis(
                 refs, window, signal_type="mcs_hotspot",
             )
         # 신호 급강하(cliff) — RSSI 급강하가 2건 이상이거나 단일 drop>=15dB.
-        sta_cliffs = (
-            structured.get("signal_cliffs", {}).get(sta_name, {}).get("cliffs", [])
-        )
+        # signal_cliffs는 직렬화 라운드트립에서 null이거나 dict 아닌 항목을 포함할 수
+        # 있다(구버전 result 호환). `or {}` + isinstance로 방어해 진단 전체가 죽지 않게.
+        sc_map = structured.get("signal_cliffs") or {}
+        sta_cd = sc_map.get(sta_name) if isinstance(sc_map, dict) else None
+        sta_cliffs = [
+            c
+            for c in ((sta_cd.get("cliffs") if isinstance(sta_cd, dict) else None) or [])
+            if isinstance(c, dict)
+        ]
         max_drop = max((c.get("drop_db", 0) for c in sta_cliffs), default=0)
         if len(sta_cliffs) >= 2 or max_drop >= 15:
             refs, window = ev.cliff_evidence(mac, sta_cliffs, frames, index)

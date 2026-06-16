@@ -17,11 +17,15 @@ def _fmt_int(v: Any, default: str = "-") -> str:
         return default
 
 
-def _build_device_section(device_stats: dict) -> list:
-    """장치별 상세 통계 — 자동차 환경에서 가장 진단가치가 높은 섹션."""
+def _build_device_section(device_stats: dict, header: str = "## 장치별 상세 통계") -> list:
+    """장치별 상세 통계 — 자동차 환경에서 가장 진단가치가 높은 섹션.
+
+    header=None이면 헤더 두 줄을 생략하고 본문만 반환한다(네트워크 전체 섹션이
+    자체 헤더를 붙여 재사용 — 호출 측의 취약한 슬라이스 의존 제거).
+    """
     if not device_stats:
         return []
-    lines = ["", "## 장치별 상세 통계"]
+    lines = ["", header] if header else []
     for name, s in device_stats.items():
         role = s.get("role", "?")
         total = s.get("total_frames", 0)
@@ -94,11 +98,12 @@ def _build_device_section(device_stats: dict) -> list:
                 )
                 lines.append(f"- Retry 피크 구간 top3: {pk_str}")
         # 최악 retry 피크의 sub-second MCS 컨텍스트 (worst 1-2 sub-seconds).
-        peaks_detail = s.get("retry_peaks", []) or []
+        # dict 아닌 항목 방어(직렬화 잔재로 .get() AttributeError 방지).
+        peaks_detail = [p for p in (s.get("retry_peaks") or []) if isinstance(p, dict)]
         if peaks_detail:
             worst_peak = max(peaks_detail, key=lambda p: p.get("retry_pct", 0))
             subs = sorted(
-                worst_peak.get("sub_buckets", []) or [],
+                (b for b in (worst_peak.get("sub_buckets") or []) if isinstance(b, dict)),
                 key=lambda b: -b.get("retry_pct", 0),
             )[:2]
             for b in subs:
@@ -397,14 +402,15 @@ def build_review_prompt(structured: dict) -> str:
 
     out.extend(_build_device_section(device_stats))
     # 네트워크 전체(모든 송신) 통계 — 장치별과 동일 포맷으로 단일 가상 장치 렌더.
-    # _build_device_section은 자체 헤더("## 장치별 상세 통계")를 첫 두 줄로 붙이므로
-    # 네트워크 전체 섹션용 헤더로 교체한다.
+    # header=None으로 _build_device_section의 자체 헤더를 끄고 전용 헤더를 붙인다
+    # (예전 sys_lines[2:] 슬라이스는 헤더 줄 수 가정에 취약했음 — 제거).
     system_stats = structured.get("system_stats") or {}
     if isinstance(system_stats, dict) and system_stats:
-        sys_lines = _build_device_section({"🌐 전체 시스템": system_stats})
         out.append("")
         out.append("## 네트워크 전체(모든 송신)")
-        out.extend(sys_lines[2:])  # 첫 두 줄(빈 줄 + 장치별 헤더) 제거
+        out.extend(
+            _build_device_section({"🌐 전체 시스템": system_stats}, header=None)
+        )
     out.extend(_build_roaming_section(roaming))
     out.extend(_build_ping_section(ping))
     out.extend(_build_signal_section(signal, cliffs))

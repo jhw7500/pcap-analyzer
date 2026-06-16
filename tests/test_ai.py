@@ -461,3 +461,36 @@ class TestDiagnosisSectionInPrompt:
         # dead elif 제거 — 비-dict는 stringify되지 않고 그냥 누락
         assert "BADHEALTH" not in prompt
         assert "BADSUMMARY" not in prompt
+
+
+class TestSystemStatsSectionInPrompt:
+    """system_stats를 _build_device_section(header=None)로 렌더 — 취약 슬라이스 제거 회귀."""
+
+    def test_system_stats_section_rendered(self):
+        s = _base_structured(system_stats={
+            "role": "SYSTEM", "total_frames": 1000, "tx_frames": 900,
+            "retry_pct": 10, "retry_count": 90, "phy_summary": {"HE": 900},
+        })
+        prompt = build_review_prompt(s)
+        assert "네트워크 전체(모든 송신)" in prompt
+        assert "🌐 전체 시스템" in prompt
+
+    def test_empty_system_stats_no_crash(self):
+        s = _base_structured(system_stats={})
+        prompt = build_review_prompt(s)  # crash 없이
+        assert "네트워크 전체(모든 송신)" not in prompt
+
+    def test_retry_peaks_non_dict_does_not_crash(self):
+        """retry_peaks/sub_buckets에 dict 아닌 항목이 섞여도 프롬프트 생성이 죽지 않음."""
+        s = _base_structured(device_stats={"STA1": {
+            "role": "STA", "total_frames": 100, "tx_frames": 100,
+            "retry_pct": 30, "retry_count": 30,
+            "retry_peaks": [
+                "stale",
+                {"retry_pct": 50, "sub_buckets": [
+                    "bad", {"epoch": 1, "retry_pct": 60, "mcs_breakdown": "HE MCS7"},
+                ]},
+            ],
+        }})
+        prompt = build_review_prompt(s)  # AttributeError 없이
+        assert isinstance(prompt, str) and "분석 개요" in prompt

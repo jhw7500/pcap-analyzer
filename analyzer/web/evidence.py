@@ -222,6 +222,10 @@ def cliff_evidence(
     """
     if not cliffs:
         return [], None
+    # cliffs에 dict 아닌 항목(직렬화 잔재/오염)이 섞여도 c.get()이 터지지 않도록 필터.
+    cliffs = [c for c in cliffs if isinstance(c, dict)]
+    if not cliffs:
+        return [], None
     if index is not None:
         sta_tx = index.by_ta.get(sta_mac, [])
     else:
