@@ -284,6 +284,8 @@ def _structured_roaming(
                 {
                     "sta": frame.ta,
                     "sta_name": mac_name(frame.ta, roles),
+                    "prev_ap": frame.current_ap or "",
+                    "prev_ap_name": mac_name(frame.current_ap, roles) if frame.current_ap else "",
                     "ap": frame.ra,
                     "ap_name": mac_name(frame.ra, roles),
                     "auth_epoch": auth_frame.epoch,

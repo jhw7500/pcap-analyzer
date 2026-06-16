@@ -283,6 +283,9 @@
     } else if (roaming.sequences && roaming.sequences.length > 0) {
         if (roamingTableEl) roamingTableEl.style.display = '';
         const seqs = roaming.sequences;
+        // AP 라벨: 로밍 전 AP(prev_ap_name) → 로밍 후 AP(ap_name). 직전 AP가 없으면
+        // (최초 연결 또는 재분석 전 데이터) 후 AP만 표시.
+        const roamAp = s => (s.prev_ap_name ? `${s.prev_ap_name} → ${s.ap_name}` : s.ap_name);
         Plotly.newPlot('chart-roaming-gap', [{
             type: 'bar',
             x: seqs.map((_, i) => i + 1),
@@ -290,7 +293,7 @@
             marker: {
                 color: seqs.map(s => s.is_slow ? '#ef4444' : '#3b82f6'),
             },
-            text: seqs.map(s => s.sta_name + ' \u2192 ' + s.ap_name),
+            text: seqs.map(s => s.sta_name + ': ' + roamAp(s)),
             hovertemplate: '%{text}<br>%{y:.1f}ms<extra></extra>',
         }], {
             ...DARK,
@@ -323,7 +326,7 @@
                     <td class="py-1">${i + 1}</td>
                     <td class="py-1 font-mono text-xs">${fmtTime(s.auth_epoch)}</td>
                     <td class="py-1 font-mono text-xs">${s.sta_name}</td>
-                    <td class="py-1 font-mono text-xs">${s.ap_name}</td>
+                    <td class="py-1 font-mono text-xs">${roamAp(s)}</td>
                     <td class="py-1 text-right">${s.gap_ms.toFixed(1)}</td>
                     <td class="py-1">${s.assoc_type}</td>
                 </tr>`
