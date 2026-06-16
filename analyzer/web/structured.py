@@ -4,7 +4,7 @@ pipeline.run_analysis가 오케스트레이션 중 호출한다. 각 함수는 f
 (필요 시 FrameIndex)를 받아 UI가 소비하는 중첩 dict를 반환한다.
 """
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any, Dict, List
 
 from ..core.models import Frame
@@ -19,10 +19,10 @@ def _structured_overview(
     if n == 0:
         return {"total_frames": 0}
 
-    from collections import Counter
 
     proto_counts = Counter(f.protocol for f in frames)
     subtype_counts = Counter(f.subtype for f in frames)
+    type_counts = Counter(f.frame_type for f in frames)
     retry_count = sum(1 for f in frames if f.retry)
 
     # MAC ↔ IP 매핑 — 관찰된 IP 양측 추출:
@@ -53,7 +53,6 @@ def _structured_overview(
     #   TA=mac frame의 ip.src   → 송신측 자기 IP (가장 신뢰) — 가중치 2
     #   RA=mac frame의 ip.dst   → 수신측 자기 IP (보조 신호) — 가중치 1
     # 빈도 ↓ 정렬 후 상위 N개만 노출. forwarded/broadcast 잔재 제거 효과.
-    from collections import Counter
     dev_ip_counts: Dict[str, "Counter[str]"] = {}
     for f in frames:
         if f.ta and f.ip_src:
@@ -92,6 +91,7 @@ def _structured_overview(
         "time_end": frames[-1].timestamp,
         "retry_count": retry_count,
         "retry_pct": round(retry_count * 100.0 / n, 2) if n else 0,
+        "type_dist": dict(type_counts),
         "protocol_dist": dict(proto_counts.most_common(20)),
         "subtype_dist": dict(subtype_counts.most_common(20)),
         "devices": devices,
@@ -308,7 +308,6 @@ def _structured_per_second(frames: List[Frame]) -> Dict[str, Any]:
     """초당 프레임 수 시계열."""
     if not frames:
         return {"timeline": []}
-    from collections import Counter
 
     sec_counts = Counter(int(f.epoch) for f in frames)
     retry_counts = Counter(int(f.epoch) for f in frames if f.retry)
@@ -333,7 +332,6 @@ def _device_entry_stats(dev_frames, is_tx, mac: str, role: str) -> Dict[str, Any
     시스템은 f.ta가 존재하는 모든 프레임(송신자 있는 프레임)을 송신으로 본다.
     장치별/전체가 동일 로직·동일 구조를 공유하도록 한 곳에 모은다.
     """
-    from collections import Counter
     from ..core.models import SUBTYPE_NAMES
 
     type_dist = Counter(f.frame_type for f in dev_frames)
@@ -667,6 +665,55 @@ def _structured_diagnosis(
                 },
                 refs, window, signal_type="high_retry",
             )
+        # PHY/MCS retry 핫스팟 — 특정 PHY+MCS에 retry가 집중된 경우. 표본>=30 &
+        # retry_pct가 STA 평균의 2배 또는 50% 이상인 버킷 중 최악 1건만 emit
+        # (issue flooding 방지). 근거는 그 PHY+MCS의 retry 프레임.
+        mcs_retry_by_phy = ds.get("mcs_retry_by_phy", {})
+        hotspot_threshold = max(50, sta_retry * 2)
+        hotspots = []
+        for phy, mcs_map in mcs_retry_by_phy.items():
+            for mcs_key, r in mcs_map.items():
+                if r.get("total", 0) >= 30 and r.get("retry_pct", 0) >= hotspot_threshold:
+                    hotspots.append((phy, mcs_key, r))
+        if hotspots:
+            phy, mcs_key, r = max(hotspots, key=lambda x: x[2].get("retry_pct", 0))
+            retry_pct_h = r.get("retry_pct", 0)
+            total_h = r.get("total", 0)
+            retry_h = r.get("retry", 0)
+            label = (
+                f"Legacy {mcs_key}Mbps" if phy == "Legacy" else f"{phy} MCS{mcs_key}"
+            )
+            refs, window = ev.mcs_hotspot_evidence(mac, phy, mcs_key, frames, index)
+            _add_issue(
+                {
+                    "severity": "high" if retry_pct_h >= 60 else "medium",
+                    "msg": f"{label} retry {retry_pct_h}% ({retry_h}/{total_h}) — 특정 MCS 집중 재전송",
+                    "action": "rate adaptation/간섭 점검, 해당 MCS 고정 사용 여부 확인",
+                },
+                refs, window, signal_type="mcs_hotspot",
+            )
+        # 신호 급강하(cliff) — RSSI 급강하가 2건 이상이거나 단일 drop>=15dB.
+        # signal_cliffs는 직렬화 라운드트립에서 null이거나 dict 아닌 항목을 포함할 수
+        # 있다(구버전 result 호환). `or {}` + isinstance로 방어해 진단 전체가 죽지 않게.
+        sc_map = structured.get("signal_cliffs") or {}
+        sta_cd = sc_map.get(sta_name) if isinstance(sc_map, dict) else None
+        sta_cliffs = [
+            c
+            for c in ((sta_cd.get("cliffs") if isinstance(sta_cd, dict) else None) or [])
+            if isinstance(c, dict)
+        ]
+        max_drop = max((c.get("drop_db", 0) for c in sta_cliffs), default=0)
+        if len(sta_cliffs) >= 2 or max_drop >= 15:
+            refs, window = ev.cliff_evidence(mac, sta_cliffs, frames, index)
+            severe = len(sta_cliffs) >= 3 or max_drop >= 20
+            _add_issue(
+                {
+                    "severity": "high" if severe else "medium",
+                    "msg": f"신호 급강하 {len(sta_cliffs)}건 (최대 {max_drop}dB)",
+                    "action": "AP 커버리지/간섭 점검, 로밍 임계값 조정",
+                },
+                refs, window, signal_type="signal_cliff",
+            )
         if rssi_avg is not None and rssi_avg < -70:
             refs, window = ev.weak_rssi_evidence(mac, -70, frames, index)
             _add_issue(
@@ -751,6 +798,27 @@ def _structured_diagnosis(
                 "action": "채널 간섭 또는 AP 과부하 확인",
             },
             refs, window, signal_type="high_retry",
+        )
+    # 네트워크 Legacy 송신 과다 — system_stats per_bucket의 legacy_pct를 tx-weighted
+    # 평균. 30% 이상이면 채널 전반 레거시 오염으로 보고(기존 retry issue와 중복 X).
+    system_stats = structured.get("system_stats", {})
+    sys_buckets = system_stats.get("per_bucket", []) if system_stats else []
+    legacy_num = sum(
+        b.get("legacy_pct", 0) * b.get("tx_total", 0)
+        for b in sys_buckets if b.get("tx_total", 0) > 0
+    )
+    legacy_den = sum(b.get("tx_total", 0) for b in sys_buckets if b.get("tx_total", 0) > 0)
+    avg_legacy_pct = round(legacy_num / legacy_den, 1) if legacy_den else 0
+    if avg_legacy_pct >= 30:
+        refs, window = ev.network_legacy_evidence(frames, index)
+        _add_net_issue(
+            {
+                "severity": "medium",
+                "category": "PHY",
+                "msg": f"네트워크 Legacy 송신 비율 {avg_legacy_pct}%",
+                "action": "레거시 단말/브로드캐스트 레이트·기본 rate 설정 점검",
+            },
+            refs, window, signal_type="legacy_heavy",
         )
     if loss_pct > 5:
         refs, window = ev.ping_loss_evidence(ping_losses)

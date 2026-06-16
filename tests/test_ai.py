@@ -329,3 +329,168 @@ class TestCorrelationsInPrompt:
         assert "BadTW" in prompt
         # duration은 빠진 채로 헤더 라인이 만들어진다
         assert "duration=" not in prompt
+
+
+def _base_structured(**extra):
+    """build_review_prompt가 요구하는 최소 구조 + extra 키 병합."""
+    base = {
+        "overview": {"total_frames": 100, "duration_sec": 10, "retry_pct": 0, "devices": []},
+        "ping": {"pairs": [], "losses": []},
+        "roaming": {"sequences": []},
+        "signal": {"stas": {}},
+        "delay_zones": {"delay_zones": []},
+        "anomaly_frames": {"anomalies": []},
+    }
+    base.update(extra)
+    return base
+
+
+class TestSignalCliffsInPrompt:
+    """signal_cliffs는 {STA명: {cliffs:[...]}} 구조 — 평탄화 렌더 회귀 가드."""
+
+    def test_sta_keyed_cliffs_rendered(self):
+        s = _base_structured(signal_cliffs={
+            "STA1": {"cliffs": [
+                {"epoch": 1001.5, "rssi_before": -50, "rssi_after": -70,
+                 "drop_db": 20, "duration_sec": 0.5},
+            ]},
+        })
+        prompt = build_review_prompt(s)
+        assert "신호 절벽" in prompt
+        assert "STA1" in prompt
+        assert "20" in prompt  # drop_db — 과거엔 shape 불일치로 0건이라 누락
+
+    def test_empty_cliffs_no_section(self):
+        s = _base_structured(signal_cliffs={"STA1": {"cliffs": []}})
+        assert "신호 절벽" not in build_review_prompt(s)
+
+    def test_non_dict_cliff_entries_skipped(self):
+        s = _base_structured(signal_cliffs={
+            "STA1": {"cliffs": ["stale", {"epoch": 1, "drop_db": 12}]},
+        })
+        prompt = build_review_prompt(s)
+        assert "신호 절벽(RSSI 급강하) 1건" in prompt  # dict 1건만 집계
+
+
+class TestStaDiagsInPrompt:
+    """sta_diags는 list + nested metrics — report.py와 동일 계약 회귀 가드."""
+
+    def test_list_shape_rendered_with_nested_metrics(self):
+        s = _base_structured(diagnosis={"sta_diags": [
+            {"name": "STA1", "mac": "aa:bb", "score": 72,
+             "scores": {"retry": 60, "rssi": 80, "roaming": 75},
+             "metrics": {"retry_pct": 27.3, "rssi_avg": -68, "roaming_count": 4},
+             "issues": []},
+        ]})
+        prompt = build_review_prompt(s)
+        assert "STA별 사전 진단" in prompt
+        assert "STA1" in prompt
+        assert "27.3" in prompt   # nested metric — dict로 소비하던 과거엔 누락
+        assert "score=72" in prompt
+
+    def test_non_dict_element_skipped(self):
+        s = _base_structured(diagnosis={"sta_diags": [
+            "stale", {"name": "STA2", "metrics": {"retry_pct": 10}},
+        ]})
+        prompt = build_review_prompt(s)
+        assert "STA2" in prompt and "10" in prompt
+
+    def test_empty_list_no_section(self):
+        s = _base_structured(diagnosis={"sta_diags": []})
+        assert "STA별 사전 진단" not in build_review_prompt(s)
+
+
+class TestOverviewTypeDistInPrompt:
+    """overview.type_dist가 프롬프트의 '프레임 타입 분포'로 렌더되는지(#7)."""
+
+    def test_type_dist_rendered(self):
+        ov = {"total_frames": 100, "duration_sec": 10, "retry_pct": 0,
+              "devices": [], "type_dist": {"Management": 60, "Data": 40}}
+        prompt = build_review_prompt(_base_structured(overview=ov))
+        assert "프레임 타입 분포" in prompt
+        assert "Management" in prompt
+
+
+class TestRetryPeakMcsInPrompt:
+    """per_bucket의 retry 피크에 avg_mcs/mcs_breakdown이 렌더되는지(#11)."""
+
+    def test_avg_mcs_rendered_in_peak(self):
+        s = _base_structured(device_stats={
+            "STA1": {
+                "role": "STA", "total_frames": 200, "tx_frames": 200,
+                "retry_count": 60, "retry_pct": 30,
+                "per_bucket": [
+                    {"total": 100, "retry": 40, "retry_pct": 40.0,
+                     "avg_mcs": 7.5, "mcs_breakdown": "HE MCS7×80"},
+                ],
+            },
+        })
+        prompt = build_review_prompt(s)
+        assert "Retry 피크" in prompt
+        assert "7.5" in prompt        # avg_mcs — 과거엔 orphan key라 'MCS -'
+        assert "MCS -)" not in prompt
+
+
+class TestDiagnosisSectionInPrompt:
+    """_build_diagnosis_section: 실제 _structured_diagnosis 형태(dict health/summary).
+    dead elif(비-dict stringify) 제거 후, 비-dict는 누락되는지(report.py와 동일 정책)."""
+
+    def test_full_diagnosis_rendered(self):
+        s = _base_structured(diagnosis={
+            "health": {"score": 75, "grade": "주의", "color": "yellow"},
+            "component_scores": {"retry": 60, "loss": 80, "roaming": 70},
+            "summary": {"total_frames": 1000, "retry_pct": 12, "loss_pct": 3,
+                        "roaming_total": 5, "roaming_slow": 2,
+                        "delay_zones": 1, "anomaly_count": 0},
+            "issues": [{"severity": "high", "category": "Retry",
+                        "msg": "retry 폭증", "action": "확인"}],
+            "sta_diags": [],
+        })
+        prompt = build_review_prompt(s)
+        assert "사전 계산된 진단" in prompt
+        assert "score=75" in prompt
+        assert "retry_pct=12" in prompt        # summary dict 분기
+        assert "컴포넌트 점수" in prompt
+
+    def test_non_dict_health_summary_dropped(self):
+        s = _base_structured(diagnosis={
+            "health": "BADHEALTH", "summary": "BADSUMMARY",
+            "issues": [], "sta_diags": [],
+        })
+        prompt = build_review_prompt(s)
+        # dead elif 제거 — 비-dict는 stringify되지 않고 그냥 누락
+        assert "BADHEALTH" not in prompt
+        assert "BADSUMMARY" not in prompt
+
+
+class TestSystemStatsSectionInPrompt:
+    """system_stats를 _build_device_section(header=None)로 렌더 — 취약 슬라이스 제거 회귀."""
+
+    def test_system_stats_section_rendered(self):
+        s = _base_structured(system_stats={
+            "role": "SYSTEM", "total_frames": 1000, "tx_frames": 900,
+            "retry_pct": 10, "retry_count": 90, "phy_summary": {"HE": 900},
+        })
+        prompt = build_review_prompt(s)
+        assert "네트워크 전체(모든 송신)" in prompt
+        assert "🌐 전체 시스템" in prompt
+
+    def test_empty_system_stats_no_crash(self):
+        s = _base_structured(system_stats={})
+        prompt = build_review_prompt(s)  # crash 없이
+        assert "네트워크 전체(모든 송신)" not in prompt
+
+    def test_retry_peaks_non_dict_does_not_crash(self):
+        """retry_peaks/sub_buckets에 dict 아닌 항목이 섞여도 프롬프트 생성이 죽지 않음."""
+        s = _base_structured(device_stats={"STA1": {
+            "role": "STA", "total_frames": 100, "tx_frames": 100,
+            "retry_pct": 30, "retry_count": 30,
+            "retry_peaks": [
+                "stale",
+                {"retry_pct": 50, "sub_buckets": [
+                    "bad", {"epoch": 1, "retry_pct": 60, "mcs_breakdown": "HE MCS7"},
+                ]},
+            ],
+        }})
+        prompt = build_review_prompt(s)  # AttributeError 없이
+        assert isinstance(prompt, str) and "분석 개요" in prompt

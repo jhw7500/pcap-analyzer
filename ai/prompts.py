@@ -17,11 +17,15 @@ def _fmt_int(v: Any, default: str = "-") -> str:
         return default
 
 
-def _build_device_section(device_stats: dict) -> list:
-    """장치별 상세 통계 — 자동차 환경에서 가장 진단가치가 높은 섹션."""
+def _build_device_section(device_stats: dict, header: str = "## 장치별 상세 통계") -> list:
+    """장치별 상세 통계 — 자동차 환경에서 가장 진단가치가 높은 섹션.
+
+    header=None이면 헤더 두 줄을 생략하고 본문만 반환한다(네트워크 전체 섹션이
+    자체 헤더를 붙여 재사용 — 호출 측의 취약한 슬라이스 의존 제거).
+    """
     if not device_stats:
         return []
-    lines = ["", "## 장치별 상세 통계"]
+    lines = ["", header] if header else []
     for name, s in device_stats.items():
         role = s.get("role", "?")
         total = s.get("total_frames", 0)
@@ -57,6 +61,22 @@ def _build_device_section(device_stats: dict) -> list:
             unit = "Mbps" if phy_name == "Legacy" else "MCS"
             top_str = ", ".join(f"{unit}{k}×{_fmt_int(v)}" for k, v in top)
             lines.append(f"  · {phy_name} top: {top_str}")
+        # PHY/MCS retry 핫스팟 — 표본>=30인 (phy, mcs) 중 retry_pct 상위 3.
+        mrbp = s.get("mcs_retry_by_phy", {}) or {}
+        hotspots = []
+        for phy_name, mcs_map in mrbp.items():
+            for mcs_key, r in (mcs_map or {}).items():
+                if r.get("total", 0) >= 30:
+                    hotspots.append((phy_name, mcs_key, r))
+        hotspots.sort(key=lambda x: -x[2].get("retry_pct", 0))
+        if hotspots:
+            hs_str = ", ".join(
+                f"{phy_name} "
+                f"{('MCS' + mcs_key) if phy_name != 'Legacy' else (mcs_key + 'Mbps')} "
+                f"{r.get('retry_pct', 0)}% ({r.get('retry', 0)}/{r.get('total', 0)})"
+                for phy_name, mcs_key, r in hotspots[:3]
+            )
+            lines.append(f"- Retry 핫스팟(표본≥30): {hs_str}")
         # 상위 서브타입 top 5
         sub = s.get("subtype_dist", {}) or {}
         if sub:
@@ -73,10 +93,24 @@ def _build_device_section(device_stats: dict) -> list:
             if peaks:
                 pk_str = " / ".join(
                     f"{b.get('retry_pct',0)}% (frames {_fmt_int(b.get('total',0))}, "
-                    f"MCS {b.get('top_mcs','-')})"
+                    f"MCS {b.get('avg_mcs') or '-'} [{b.get('mcs_breakdown') or '-'}])"
                     for b in peaks
                 )
                 lines.append(f"- Retry 피크 구간 top3: {pk_str}")
+        # 최악 retry 피크의 sub-second MCS 컨텍스트 (worst 1-2 sub-seconds).
+        # dict 아닌 항목 방어(직렬화 잔재로 .get() AttributeError 방지).
+        peaks_detail = [p for p in (s.get("retry_peaks") or []) if isinstance(p, dict)]
+        if peaks_detail:
+            worst_peak = max(peaks_detail, key=lambda p: p.get("retry_pct", 0))
+            subs = sorted(
+                (b for b in (worst_peak.get("sub_buckets") or []) if isinstance(b, dict)),
+                key=lambda b: -b.get("retry_pct", 0),
+            )[:2]
+            for b in subs:
+                lines.append(
+                    f"  · t={b.get('epoch')} {b.get('retry_pct', 0)}% "
+                    f"[{b.get('mcs_breakdown') or '-'}]"
+                )
     return lines
 
 
@@ -167,15 +201,28 @@ def _build_signal_section(signal: dict, cliffs: Any) -> list:
         lines.append(
             f"- {name}: RSSI avg={avg} / min={minv} / max={maxv} dBm (n={_fmt_int(fc)})"
         )
-    # signal_cliffs: dict 또는 list 가능
-    cliff_list = cliffs.get("cliffs", []) if isinstance(cliffs, dict) else (cliffs or [])
-    if cliff_list:
-        lines.append(f"- 신호 절벽(RSSI 급강하) {len(cliff_list)}건")
-        for c in cliff_list[:5]:
-            sta = c.get("sta", "?")
-            drop = c.get("drop_db") or c.get("drop", "?")
-            ts = c.get("timestamp") or c.get("time", "?")
-            lines.append(f"  · {ts} {sta}: {drop}dB drop")
+    # signal_cliffs는 {STA명: {cliffs:[{epoch, rssi_before, rssi_after, drop_db,
+    # duration_sec}], moving_avg:[...]}} 구조(analyze_signal_cliffs)다. STA명을
+    # 외부 키로 붙여 평탄화하고 drop이 큰 순으로 상위 5건을 노출한다.
+    cliff_items = []
+    if isinstance(cliffs, dict):
+        for sta_name, cd in cliffs.items():
+            for c in (cd.get("cliffs", []) if isinstance(cd, dict) else []):
+                if isinstance(c, dict):
+                    cliff_items.append((sta_name, c))
+    if cliff_items:
+        cliff_items.sort(key=lambda x: -(x[1].get("drop_db") or 0))
+        lines.append(f"- 신호 절벽(RSSI 급강하) {len(cliff_items)}건")
+        for sta_name, c in cliff_items[:5]:
+            drop = c.get("drop_db", "?")
+            ts = c.get("epoch", "?")
+            before, after = c.get("rssi_before"), c.get("rssi_after")
+            ctx = (
+                f" ({before}→{after}dBm)"
+                if before is not None and after is not None
+                else ""
+            )
+            lines.append(f"  · t={ts} {sta_name}: {drop}dB drop{ctx}")
     return lines
 
 
@@ -185,13 +232,13 @@ def _build_diagnosis_section(diagnosis: Any) -> list:
     lines = ["", "## 사전 계산된 진단"]
     health = diagnosis.get("health") or {}
     summary = diagnosis.get("summary") or {}
+    # health/summary는 _structured_diagnosis가 항상 dict로 만든다. 비-dict는
+    # (report.py _health_section과 동일 정책으로) 그냥 누락 — stringify하지 않는다.
     if isinstance(health, dict) and health:
         lines.append(
             f"- 전체 health: score={health.get('score','-')} "
             f"({health.get('grade','-')})"
         )
-    elif health:
-        lines.append(f"- 전체 health: {health}")
     scores = diagnosis.get("component_scores") or {}
     if scores:
         score_str = " / ".join(f"{k}={v}" for k, v in scores.items())
@@ -206,8 +253,6 @@ def _build_diagnosis_section(diagnosis: Any) -> list:
                 summary_parts.append(f"{k}={summary[k]}")
         if summary_parts:
             lines.append(f"- 핵심 지표: {', '.join(summary_parts)}")
-    elif summary:
-        lines.append(f"- 요약: {summary}")
     issues = diagnosis.get("issues") or diagnosis.get("findings") or []
     if issues:
         lines.append("")
@@ -229,17 +274,25 @@ def _build_diagnosis_section(diagnosis: Any) -> list:
                 lines.append(line)
             else:
                 lines.append(f"- {it}")
-    sta_diags = diagnosis.get("sta_diags") or {}
-    if sta_diags and isinstance(sta_diags, dict):
+    # sta_diags는 list — 각 원소 {name, mac, score, scores{}, metrics{retry_pct,
+    # rssi_avg, rssi_min, roaming_count, slow_roaming, ...}, issues[]}. 메트릭은
+    # metrics 아래 nested다(report.py의 _sta_diags_section과 동일 계약).
+    sta_diags = diagnosis.get("sta_diags") or []
+    if isinstance(sta_diags, list) and sta_diags:
         lines.append("")
         lines.append("### STA별 사전 진단")
-        for sta_name, sd in list(sta_diags.items())[:5]:
-            if isinstance(sd, dict):
-                parts = []
-                for k in ("roaming_count", "retry_pct", "rssi_avg", "loss_pct", "verdict"):
-                    if sd.get(k) is not None:
-                        parts.append(f"{k}={sd[k]}")
-                lines.append(f"- {sta_name}: {', '.join(parts)}")
+        for sd in sta_diags[:5]:
+            if not isinstance(sd, dict):
+                continue
+            name = sd.get("name", "?")
+            m = sd.get("metrics") or {}
+            parts = []
+            if sd.get("score") is not None:
+                parts.append(f"score={sd['score']}")
+            for k in ("retry_pct", "rssi_avg", "rssi_min", "roaming_count", "slow_roaming"):
+                if m.get(k) is not None:
+                    parts.append(f"{k}={m[k]}")
+            lines.append(f"- {name}: {', '.join(parts)}")
 
     # 종합 결론(correlation) — LLM이 결합 컨텍스트를 보고 사용자 환경
     # (설정·튜닝·간섭) 가설을 자연어로 추정할 수 있도록 노출.
@@ -348,6 +401,16 @@ def build_review_prompt(structured: dict) -> str:
         )
 
     out.extend(_build_device_section(device_stats))
+    # 네트워크 전체(모든 송신) 통계 — 장치별과 동일 포맷으로 단일 가상 장치 렌더.
+    # header=None으로 _build_device_section의 자체 헤더를 끄고 전용 헤더를 붙인다
+    # (예전 sys_lines[2:] 슬라이스는 헤더 줄 수 가정에 취약했음 — 제거).
+    system_stats = structured.get("system_stats") or {}
+    if isinstance(system_stats, dict) and system_stats:
+        out.append("")
+        out.append("## 네트워크 전체(모든 송신)")
+        out.extend(
+            _build_device_section({"🌐 전체 시스템": system_stats}, header=None)
+        )
     out.extend(_build_roaming_section(roaming))
     out.extend(_build_ping_section(ping))
     out.extend(_build_signal_section(signal, cliffs))

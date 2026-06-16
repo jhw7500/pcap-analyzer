@@ -439,3 +439,134 @@ def test_component_scores_keys_and_values_sanitised():
     # 'bad|key=bad value'라도 list item이라 깨지지 않는다)
     assert "bad\nvalue" not in md
     assert "bad value" in md
+
+
+# ── P2: 디바이스 / Ping / PHY / 요약 커버리지 ───────────────────────────────
+
+def test_devices_section_table_and_distributions():
+    md = build_report_markdown(_result(structured={
+        "overview": {
+            "total_frames": 1000, "duration_sec": 60,
+            "devices": [
+                {"name": "AP1", "mac": "aa:bb:cc:00:00:01", "role": "AP",
+                 "count": 600, "ips": ["192.168.0.1"]},
+                {"name": "STA1", "mac": "aa:bb:cc:00:00:02", "role": "STA",
+                 "count": 400, "ips": ["192.168.0.2", "10.0.0.2"]},
+            ],
+            "protocol_dist": {"wlan": 700, "ARP": 50},
+            "subtype_dist": {"40": 300, "8": 200},
+        },
+        "diagnosis": {},
+    }))
+    assert "## 디바이스 / 프레임 분포" in md
+    assert "AP1" in md and "192.168.0.1" in md
+    assert "(+1)" in md  # STA1은 IP 2개 → 대표 + (+1)
+    assert "프로토콜 분포" in md and "wlan 700" in md
+    assert "서브타입 분포" in md
+
+
+def test_devices_section_omitted_when_no_data():
+    md = build_report_markdown(_result(structured={
+        "overview": {"total_frames": 10, "duration_sec": 1},
+        "diagnosis": {},
+    }))
+    assert "## 디바이스 / 프레임 분포" not in md
+
+
+def test_ping_section_renders_rtt():
+    md = build_report_markdown(_result(structured={
+        "ping": {"stats": {"count": 100, "loss_count": 5, "loss_pct": 4.8,
+                           "avg": 12.3, "p95": 45.0}},
+        "diagnosis": {},
+    }))
+    assert "## Ping / RTT" in md
+    assert "응답 100" in md
+    assert "Loss 4.8%(5)" in md
+    assert "평균 RTT 12.3ms" in md and "P95 RTT 45.0ms" in md
+
+
+def test_ping_section_null_guard_unidirectional():
+    """단방향 캡처: avg/p95가 None이면 'None ms' 없이 loss만 노출."""
+    md = build_report_markdown(_result(structured={
+        "ping": {"stats": {"count": 0, "loss_count": 10, "loss_pct": 100.0,
+                           "avg": None, "p95": None}},
+        "diagnosis": {},
+    }))
+    assert "## Ping / RTT" in md
+    assert "Loss 100.0%" in md
+    assert "None ms" not in md and "평균 RTT" not in md
+
+
+def test_ping_section_omitted_when_no_stats():
+    md = build_report_markdown(_result(structured={"diagnosis": {}}))
+    assert "## Ping / RTT" not in md
+
+
+def test_device_phy_section_table_and_min_sample():
+    md = build_report_markdown(_result(structured={
+        "system_stats": {
+            "phy_summary": {"HE": 800, "Legacy": 200},
+            "mcs_retry_by_phy": {
+                "HE": {
+                    "7": {"total": 100, "retry": 60, "retry_pct": 60.0},
+                    "11": {"total": 5, "retry": 5, "retry_pct": 100.0},
+                },
+            },
+        },
+        "diagnosis": {},
+    }))
+    assert "## 네트워크 PHY / MCS" in md
+    assert "HE 800" in md
+    assert "MCS7" in md and "60.0%" in md
+    assert "MCS11" not in md  # 표본<30 → UI와 동일하게 제외
+
+
+def test_device_phy_section_omitted_when_no_system_stats():
+    md = build_report_markdown(_result(structured={"diagnosis": {}}))
+    assert "## 네트워크 PHY / MCS" not in md
+
+
+def test_health_summary_line_always_present():
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {
+            "health": {"score": 70, "grade": "주의"},
+            "summary": {"retry_pct": 12.5, "loss_pct": 3.0, "roaming_total": 8,
+                        "roaming_slow": 2, "delay_zones": 4, "anomaly_count": 1},
+        },
+    }))
+    assert "전체 Retry 12.5%" in md
+    assert "Ping Loss 3.0%" in md
+    assert "로밍 8회(느린 2)" in md
+    assert "지연구간 4건" in md and "이상프레임 1건" in md
+
+
+def test_sta_diags_sub_scores_rendered():
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {"sta_diags": [
+            {"name": "STA1", "mac": "aa:bb", "score": 72,
+             "scores": {"retry": 60, "rssi": 80, "roaming": 75},
+             "metrics": {"retry_pct": 12}, "issues": []},
+        ]},
+    }))
+    assert "세부 점수: Retry 60 · RSSI 80 · 로밍 75" in md
+
+
+def test_sta_diags_signal_cliffs_rendered():
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {"sta_diags": [
+            {"name": "STA1", "mac": "aa:bb", "score": 60, "metrics": {}, "issues": []},
+        ]},
+        "signal_cliffs": {"STA1": {"cliffs": [
+            {"epoch": 1000, "drop_db": 12}, {"epoch": 1005, "drop_db": 22},
+        ]}},
+    }))
+    assert "신호 급락: 2회 (최대 22dB)" in md
+
+
+def test_sta_diags_no_cliffs_when_structured_absent():
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {"sta_diags": [
+            {"name": "STA1", "mac": "aa:bb", "score": 60, "metrics": {}, "issues": []},
+        ]},
+    }))
+    assert "신호 급락" not in md

@@ -25,6 +25,9 @@ SIG_FREQUENT_ROAMING = "frequent_roaming"
 SIG_HIGH_LOSS = "high_loss"
 SIG_DELAY_ZONE = "delay_zone"
 SIG_ANOMALY = "anomaly"
+SIG_MCS_HOTSPOT = "mcs_hotspot"
+SIG_SIGNAL_CLIFF = "signal_cliff"
+SIG_LEGACY_HEAVY = "legacy_heavy"
 
 # 같은 클러스터로 묶일 수 있는 윈도우 겹침 비율(작은 윈도우 기준).
 DEFAULT_OVERLAP_RATIO = 0.5
@@ -40,6 +43,20 @@ CONF_CAP = 0.95
 # multi-symptom 룰은 로밍 변종(느린/잦은)을 제목에서 차별화 — 두 룰이 같은
 # 제목을 갖던 코드 중복을 제거하면서 사용자에게 로밍 유형 정보를 노출.
 TITLE_RULES: List[Tuple[frozenset, str]] = [
+    # signal_cliff / mcs_hotspot 결합 — 구체 조합을 generic 2-신호 룰보다 먼저
+    # 매칭(.issubset). cliff는 ping loss/retry/로밍/약전계와의 동반을 차별화.
+    (frozenset({SIG_SIGNAL_CLIFF, SIG_HIGH_LOSS}),
+     "신호 급강하로 인한 ping loss"),
+    (frozenset({SIG_SIGNAL_CLIFF, SIG_HIGH_RETRY}),
+     "신호 급강하로 인한 retry 폭증"),
+    (frozenset({SIG_SIGNAL_CLIFF, SIG_SLOW_ROAMING}),
+     "신호 급강하로 인한 로밍 정체"),
+    (frozenset({SIG_SIGNAL_CLIFF, SIG_WEAK_RSSI}),
+     "신호 급강하 동반 약전계"),
+    (frozenset({SIG_WEAK_RSSI, SIG_MCS_HOTSPOT}),
+     "약전계로 인한 특정 MCS 재전송"),
+    (frozenset({SIG_HIGH_RETRY, SIG_MCS_HOTSPOT}),
+     "특정 MCS 집중 retry"),
     (frozenset({SIG_WEAK_RSSI, SIG_HIGH_RETRY, SIG_SLOW_ROAMING}),
      "약전계로 인한 multi-symptom (느린 로밍 동반)"),
     (frozenset({SIG_WEAK_RSSI, SIG_HIGH_RETRY, SIG_FREQUENT_ROAMING}),
