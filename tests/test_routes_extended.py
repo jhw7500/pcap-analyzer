@@ -1,10 +1,12 @@
 """라우트 추가 테스트 — 분석 결과가 있는 시나리오."""
 
 import json
+import threading
 from fastapi.testclient import TestClient
 
 from app import app
 import config
+from routes.upload import _sanitize_job_id, _jobs, _jobs_lock
 
 client = TestClient(app)
 
@@ -412,3 +414,66 @@ class TestAnalysisPagePdfButton:
             assert "인쇄용 리포트" in resp.text
         finally:
             path.unlink(missing_ok=True)
+
+
+class TestJobIdSanitize:
+    def test_valid_ids_pass(self):
+        assert _sanitize_job_id("abcd1234") == "abcd1234"
+        assert _sanitize_job_id("a-b_C-1234567") == "a-b_C-1234567"
+        assert _sanitize_job_id("  pad12345  ") == "pad12345"  # strip 후 유효
+
+    def test_invalid_ids_rejected(self):
+        assert _sanitize_job_id("") == ""
+        assert _sanitize_job_id("short") == ""       # 8자 미만
+        assert _sanitize_job_id("x" * 65) == ""      # 64자 초과
+        assert _sanitize_job_id("bad id!@#") == ""   # 공백/특수문자
+
+
+class TestPerJobCancelIsolation:
+    """진행률/취소가 본인 job에만 적용되는지(동시 사용자 간섭 방지) 회귀 가드."""
+
+    A = "jobAAA1111"
+    B = "jobBBB2222"
+
+    def _inject(self, jid, pct=0, msg=""):
+        with _jobs_lock:
+            _jobs[jid] = {
+                "msg": msg, "pct": pct, "active": True, "created": 0.0,
+                "cancel": threading.Event(), "tmp": "/tmp/none",
+            }
+
+    def teardown_method(self):
+        with _jobs_lock:
+            _jobs.pop(self.A, None)
+            _jobs.pop(self.B, None)
+
+    def test_per_job_cancel_targets_only_own_job(self):
+        self._inject(self.A)
+        self._inject(self.B)
+        resp = client.post(f"/api/cancel/{self.A}")
+        assert resp.status_code == 200
+        with _jobs_lock:
+            assert _jobs[self.A]["cancel"].is_set()       # 본인만 취소
+            assert not _jobs[self.B]["cancel"].is_set()   # 타인 분석 보존
+
+    def test_per_job_progress_returns_own_job(self):
+        self._inject(self.A, pct=42, msg="진행 중")
+        self._inject(self.B, pct=99, msg="다른 사용자")
+        resp = client.get(f"/api/progress/{self.A}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["pct"] == 42 and body["msg"] == "진행 중"
+
+    def test_per_job_cancel_unknown_returns_404(self):
+        resp = client.post("/api/cancel/nonexistent-job-xyz")
+        assert resp.status_code == 404
+
+    def test_legacy_cancel_all_still_cancels_all(self):
+        """하위호환 전역 /api/cancel은 의도적으로 모든 active job을 취소한다."""
+        self._inject(self.A)
+        self._inject(self.B)
+        resp = client.post("/api/cancel")
+        assert resp.status_code == 200
+        with _jobs_lock:
+            assert _jobs[self.A]["cancel"].is_set()
+            assert _jobs[self.B]["cancel"].is_set()
