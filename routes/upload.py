@@ -27,6 +27,21 @@ _jobs: dict = {}
 _jobs_lock = threading.Lock()
 
 
+def _sanitize_job_id(raw: str) -> str:
+    """클라이언트 제공 job_id 검증 — 영숫자/하이픈/언더스코어, 8~64자만 허용.
+
+    클라이언트가 분석 시작 전 미리 job_id를 만들어 보내면(진행률/취소를 본인
+    job에만 한정하기 위함) 그대로 _jobs 키로 쓰이므로, 형식을 제한해 비정상
+    입력을 막는다. 부적합하면 빈 문자열 → 호출 측이 서버 uuid로 대체.
+    """
+    raw = (raw or "").strip()
+    if not (8 <= len(raw) <= 64):
+        return ""
+    if not all(c.isalnum() or c in "-_" for c in raw):
+        return ""
+    return raw
+
+
 def _set_progress(job_id: str, msg: str, pct: int, active: bool = True) -> None:
     with _jobs_lock:
         job = _jobs.get(job_id)
@@ -112,6 +127,7 @@ async def upload_pcap(
     ip_filter: str = Form(""),
     time_start: str = Form(""),
     time_end: str = Form(""),
+    client_job_id: str = Form(""),
 ):
     tshark = config.detect_tshark()
     if not tshark:
@@ -154,10 +170,14 @@ async def upload_pcap(
         Path(tmp.name).unlink(missing_ok=True)
         return JSONResponse(error_payload(ErrorCode.EMPTY_FILE), status_code=400)
 
-    job_id = str(uuid.uuid4())
+    # 클라이언트가 미리 만든 job_id를 우선 사용(본인 job만 폴링/취소하기 위함).
+    # 미제공·형식오류·이미 active한 id와 충돌하면 서버가 uuid를 생성한다.
+    job_id = _sanitize_job_id(client_job_id)
     cancel_event = threading.Event()
 
     with _jobs_lock:
+        if not job_id or (job_id in _jobs and _jobs[job_id].get("active")):
+            job_id = str(uuid.uuid4())
         _jobs[job_id] = {
             "msg": "분석 준비 중...",
             "pct": 0,

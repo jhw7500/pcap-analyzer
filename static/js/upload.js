@@ -12,6 +12,7 @@
     const cancelBtn = document.getElementById('cancel-btn');
 
     let pollTimer = null;
+    let currentJobId = null;
 
     // 옵션 폼 localStorage 캐시 (파일은 제외, 텍스트 옵션만)
     const OPT_KEY = 'pcap.upload.options';
@@ -91,10 +92,12 @@
         fileName.classList.remove('hidden');
     }
 
-    function startPolling() {
+    function startPolling(jobId) {
         pollTimer = setInterval(async () => {
             try {
-                const resp = await fetch('/api/progress');
+                const resp = await fetch(
+                    jobId ? `/api/progress/${encodeURIComponent(jobId)}` : '/api/progress'
+                );
                 const data = await resp.json();
                 if (data.pct !== undefined) {
                     progressBar.style.width = data.pct + '%';
@@ -123,13 +126,19 @@
 
         const formData = new FormData(form);
         formData.set('file', fileInput.files[0]);
+        // 진행률/취소를 본인 분석에만 한정하기 위해 클라이언트가 job_id를 먼저 생성해 전송.
+        const jobId = (window.crypto && crypto.randomUUID)
+            ? crypto.randomUUID()
+            : `job-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        currentJobId = jobId;
+        formData.set('client_job_id', jobId);
 
         uploadBtn.disabled = true;
         uploadBtn.textContent = '분석 중...';
         progressArea.classList.remove('hidden');
         cancelBtn.classList.remove('hidden');
 
-        startPolling();
+        startPolling(jobId);
 
         try {
             const resp = await fetch('/api/upload', { method: 'POST', body: formData });
@@ -165,16 +174,25 @@
         progressText.textContent = '0%';
         progressMsg.textContent = '';
         cancelBtn.classList.add('hidden');
+        currentJobId = null;
     }
-})();
 
-async function cancelAnalysis() {
-    const btn = document.getElementById('cancel-btn');
-    btn.disabled = true;
-    btn.textContent = '중지 중...';
-    try {
-        await fetch('/api/cancel', { method: 'POST' });
-    } catch (e) {
-        /* ignore */
+    // 본인 job만 취소한다(과거 전역 /api/cancel은 동시 사용자의 분석까지 죽였음).
+    // onclick="cancelAnalysis()"가 호출하도록 window에 노출하되 job_id는 클로저로 참조.
+    async function cancelAnalysis() {
+        const btn = document.getElementById('cancel-btn');
+        btn.disabled = true;
+        btn.textContent = '중지 중...';
+        try {
+            await fetch(
+                currentJobId
+                    ? `/api/cancel/${encodeURIComponent(currentJobId)}`
+                    : '/api/cancel',
+                { method: 'POST' }
+            );
+        } catch (e) {
+            /* ignore */
+        }
     }
-}
+    window.cancelAnalysis = cancelAnalysis;
+})();
