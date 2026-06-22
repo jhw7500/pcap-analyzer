@@ -7,13 +7,10 @@ on:
     types: [created]
   issues:
     types: [opened, assigned]
-  # pull_request_review 트리거 제거: 봇이 남긴 리뷰가 이 워크플로우를 다시
-  # 깨워 또 리뷰를 남기는 피드백 루프를 유발했음. @claude 멘션은
-  # issue_comment / pull_request_review_comment 로 계속 처리된다.
 
 jobs:
   claude:
-    uses: 'jhw7500/automation/.github/workflows/claude.yml@v1.30'
+    uses: 'jhw7500/automation/.github/workflows/claude.yml@v1.31'
     permissions:
       contents: read
       pull-requests: read
