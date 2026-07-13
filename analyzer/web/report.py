@@ -567,6 +567,15 @@ def _roaming_section(structured: Dict[str, Any]) -> List[str]:
 def _ping_section(structured: Dict[str, Any]) -> List[str]:
     """Ping/RTT 요약(응답수·Loss·평균·P95). 단방향 캡처는 avg/p95가 None이라 생략."""
     ping = structured.get("ping") or {}
+    # 측정 불가(ICMP 없음) 캡처 — '응답 0 · Loss 0%'는 무결점으로 오독되므로 N/A 명시
+    comp = (structured.get("diagnosis") or {}).get("component_scores") or {}
+    if "loss" in comp and comp.get("loss") is None:
+        return [
+            "## Ping / RTT",
+            "",
+            "- 측정 불가 — ICMP 트래픽 없음 (RTT/Loss 평가 대상 아님)",
+            "",
+        ]
     stats = ping.get("stats")
     if not isinstance(stats, dict) or not stats:
         return []

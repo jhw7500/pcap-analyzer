@@ -291,7 +291,8 @@ def _diagnose_sta(sta_frames: List[Frame], sta: str, matched_set, loss_set):
     # 해당하는 구체적 제안을 모두 출력하고, 구체적 제안이 하나도 없을 때만
     # 일반 점검 제안으로 대체한다.
     specific_suggestion = False
-    if ping_lost > 0 and retry_pct > RETRY_DANGER_PCT:
+    # 단독 retry WARNING(>위험 경계)과의 중복 출력을 피해 복합 제안은 2배 경계에서만
+    if ping_lost > 0 and retry_pct > RETRY_DANGER_PCT * 2:
         evid = ping_lost_frames + retry_frames
         suggestions.append(Conclusion(
             level="WARNING",

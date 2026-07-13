@@ -22,7 +22,10 @@ from ..core.thresholds import (
 
 
 def _structured_overview(
-    frames: List[Frame], roles: Dict[str, Dict[str, Any]], section
+    frames: List[Frame],
+    roles: Dict[str, Dict[str, Any]],
+    section,
+    ap_ch: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """overview 모듈의 텍스트 출력을 구조화된 dict로 변환."""
     n = len(frames)
@@ -110,7 +113,8 @@ def _structured_overview(
         }
         for freq, cnt in freq_counter.most_common()
     ]
-    ap_ch = ap_channel_map(frames, roles)
+    if ap_ch is None:
+        ap_ch = ap_channel_map(frames, roles)
     ap_channels = {
         mac: {
             "name": roles[mac]["name"],
@@ -305,6 +309,7 @@ def _structured_roaming(
     frames: List[Frame],
     roles: Dict[str, Dict[str, Any]],
     handshakes: Optional[List[Dict[str, Any]]] = None,
+    ap_ch: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """roaming 이벤트를 구조화.
 
@@ -317,7 +322,8 @@ def _structured_roaming(
     roaming_frames = [f for f in frames if f.is_roaming_related]
     sta_macs = {mac for mac, role in roles.items() if role.get("role") == "STA"}
     # AP별 대표 채널(beacon 기준) — 이전/이후 AP의 채널·밴드 전환 판정용.
-    ap_ch = ap_channel_map(frames, roles)
+    if ap_ch is None:
+        ap_ch = ap_channel_map(frames, roles)
 
     def _ch_of(mac: str, key: str) -> Optional[Any]:
         info = ap_ch.get(mac)
@@ -363,7 +369,7 @@ def _structured_roaming(
                     "ap_band": new_band,
                     "band_change": band_change,
                     "four_way_ms": match_four_way_ms(
-                        frame.epoch, frame.ta, handshakes or []
+                        frame.epoch, frame.ta, handshakes or [], ap=frame.ra
                     ),
                 }
             )
@@ -689,14 +695,18 @@ def _structured_diagnosis(
     if len(roam_seqs) > 0:
         slow_ratio = len(slow_roams) / len(roam_seqs) * 100
         roam_score = max(0, 100 - slow_ratio * 2)
+    loss_score = max(0, 100 - loss_pct * 10) if ping_available else None
 
-    if ping_available:
-        loss_score = max(0, 100 - loss_pct * 10)
-        health_score = round(retry_score * 0.3 + loss_score * 0.4 + roam_score * 0.3)
-    else:
-        loss_score = None
-        # loss 가중치(0.4)를 제외한 나머지(retry 0.3 + roaming 0.3)로 정규화
-        health_score = round((retry_score * 0.3 + roam_score * 0.3) / 0.6)
+    # 컴포넌트 가중치 단일 정의 — 측정 불가(None) 컴포넌트는 제외하고
+    # 가용 가중치 합으로 정규화한다. 컴포넌트 추가/가중치 변경 시 이 dict만 수정.
+    weighted_scores = {
+        "retry": (retry_score, 0.3),
+        "loss": (loss_score, 0.4),
+        "roaming": (roam_score, 0.3),
+    }
+    available = [(v, w) for v, w in weighted_scores.values() if v is not None]
+    total_weight = sum(w for _, w in available)
+    health_score = round(sum(v * w for v, w in available) / total_weight)
     if health_score >= 80:
         health_grade = "양호"
         health_color = "green"

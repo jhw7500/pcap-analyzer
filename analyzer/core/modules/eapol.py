@@ -145,14 +145,19 @@ def match_four_way_ms(
     sta: str,
     handshakes: List[Dict[str, Any]],
     window_sec: float = HANDSHAKE_GAP_SEC,
+    ap: Optional[str] = None,
 ) -> Optional[float]:
     """assoc 직후 첫 완결 핸드셰이크의 duration_ms. 매칭 실패 시 None.
 
     핸드셰이크 msg1은 assoc과 거의 동시에 캡처될 수 있어 50ms 슬랙을 둔다.
+    ap가 주어지면 해당 AP와의 핸드셰이크만 매칭 — 다중 AP 로밍 캡처에서
+    이전 AP의 핸드셰이크가 새 AP 행에 오귀속되는 것을 방지.
     """
     best = None
     for h in handshakes:
         if h.get("sta") != sta or not h.get("complete"):
+            continue
+        if ap and h.get("ap") != ap:
             continue
         start = h.get("start_epoch")
         if not isinstance(start, (int, float)):

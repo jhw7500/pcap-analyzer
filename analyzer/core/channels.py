@@ -48,7 +48,8 @@ def freq_to_band(freq_mhz: Optional[int]) -> Optional[str]:
         return "2.4GHz"
     if 5150 <= freq_mhz <= 5895:
         return "5GHz"
-    if freq_mhz == 5935 or 5955 <= freq_mhz <= 7115:
+    # 상한 7125 = Wi-Fi 6E/7 대역 끝(마지막 채널 중심 7115 + 여유 가드)
+    if freq_mhz == 5935 or 5955 <= freq_mhz <= 7125:
         return "6GHz"
     return None
 
