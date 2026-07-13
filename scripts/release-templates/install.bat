@@ -1,22 +1,33 @@
-﻿@echo off
-REM pcap-analyzer 설치 스크립트 (Windows)
+@echo off
+REM pcap-analyzer installer (Windows)
 REM Usage: install.bat
+REM NOTE: keep this file ASCII-only. cmd.exe misparses batch lines that
+REM       contain multibyte (Korean) characters, eating parts of lines.
 chcp 65001 >nul 2>&1
 setlocal enabledelayedexpansion
 
-REM 스크립트 위치를 cwd로
+REM cd to script location
 cd /d "%~dp0"
 
 set "VERSION=unknown"
 if exist VERSION set /p VERSION=<VERSION
-echo === pcap-analyzer v%VERSION% 설치 ===
+echo === pcap-analyzer %VERSION% install ===
 
-REM [1/5] 시스템 의존성
-echo [1/5] 시스템 의존성 확인
+REM [1/5] system dependencies
+echo [1/5] Checking system dependencies
 where python >nul 2>&1
 if errorlevel 1 (
-    echo   ERROR: python이 필요합니다.
-    echo     설치: https://www.python.org/downloads/  ^(3.10 이상^)
+    echo   ERROR: python is required.
+    echo     Install: https://www.python.org/downloads/  ^(3.10+, check "Add python.exe to PATH"^)
+    exit /b 1
+)
+REM Reject the Microsoft Store alias: it is found on PATH but exits non-zero.
+python --version >nul 2>&1
+if errorlevel 1 (
+    echo   ERROR: 'python' on PATH is the Microsoft Store alias, not a real installation.
+    echo     Fix 1: install from https://www.python.org/downloads/ with "Add python.exe to PATH" checked.
+    echo     Fix 2: Settings ^> Apps ^> Advanced app settings ^> App execution aliases
+    echo            - turn OFF python.exe / python3.exe, then retry.
     exit /b 1
 )
 for /f "tokens=2" %%i in ('python --version 2^>^&1') do set "PYV=%%i"
@@ -24,73 +35,77 @@ for /f "tokens=1,2 delims=." %%a in ("!PYV!") do (
     set "MAJOR=%%a"
     set "MINOR=%%b"
 )
+if "!MINOR!"=="" (
+    echo   ERROR: could not parse Python version ^(got: "!PYV!"^)
+    exit /b 1
+)
 if !MAJOR! LSS 3 (
-    echo   ERROR: Python 3.10 이상 필요 ^(현재: !PYV!^)
+    echo   ERROR: Python 3.10+ required ^(current: !PYV!^)
     exit /b 1
 )
 if !MAJOR! EQU 3 if !MINOR! LSS 10 (
-    echo   ERROR: Python 3.10 이상 필요 ^(현재: !PYV!^)
+    echo   ERROR: Python 3.10+ required ^(current: !PYV!^)
     exit /b 1
 )
 echo   python: !PYV!
 
 where tshark >nul 2>&1
 if errorlevel 1 (
-    echo   ERROR: tshark가 필요합니다.
-    echo     설치: https://www.wireshark.org/  ^(설치 시 PATH 등록 옵션 체크^)
+    echo   ERROR: tshark is required.
+    echo     Install Wireshark: https://www.wireshark.org/  ^(check "Add Wireshark to system PATH"^)
     exit /b 1
 )
 for /f "delims=" %%i in ('where tshark') do set "TSHARK=%%i"
 echo   tshark: !TSHARK!
 
 REM [2/5] Python venv
-echo [2/5] Python 가상환경 생성
+echo [2/5] Creating Python venv
 if exist .venv (
-    echo   .venv\ 이미 존재 - 재사용
+    echo   .venv\ already exists - reusing
 ) else (
     python -m venv .venv
     if errorlevel 1 (
-        echo   ERROR: venv 생성 실패
+        echo   ERROR: venv creation failed
         exit /b 1
     )
-    echo   .venv\ 생성됨
+    echo   .venv\ created
 )
 
-REM [3/5] 의존성 설치
-echo [3/5] 의존성 설치
+REM [3/5] dependencies
+echo [3/5] Installing dependencies
 call .venv\Scripts\activate.bat
 set "HAS_WHEELS="
 if exist wheels\*.whl set "HAS_WHEELS=1"
 if exist wheels\*.tar.gz set "HAS_WHEELS=1"
 if defined HAS_WHEELS (
-    echo   오프라인 우선 모드 ^(wheels\ + 필요 시 PyPI^)
+    echo   offline-first mode ^(wheels\ + PyPI fallback^)
     pip install --find-links wheels -r requirements.txt
 ) else (
-    echo   PyPI 모드
+    echo   PyPI mode
     python -m pip install --upgrade pip >nul
     pip install -r requirements.txt
 )
 if errorlevel 1 (
-    echo   ERROR: pip install 실패
-    echo   완전 폐쇄망에서 ABI 불일치이면 빌드 호스트와 동일한 Python 마이너 버전을 설치하세요.
+    echo   ERROR: pip install failed
+    echo   Fully offline with an ABI mismatch? Install the same Python minor version as the build host.
     exit /b 1
 )
 
-REM [4/5] Smoke test
-echo [4/5] 설치 확인
+REM [4/5] smoke test
+echo [4/5] Verifying installation
 python -c "import fastapi, uvicorn, jinja2, httpx"
 if errorlevel 1 (
-    echo   ERROR: 필수 패키지 import 실패
+    echo   ERROR: required package import failed
     exit /b 1
 )
-python -c "import config; print('  tshark 감지:', config.detect_tshark() or '미감지')"
+python -c "import config; print('  tshark detected:', config.detect_tshark() or 'NOT FOUND')"
 if errorlevel 1 (
-    echo   WARN: tshark 감지 실패 ^(계속 진행^)
+    echo   WARN: tshark detection failed ^(continuing^)
 )
 
-REM [5/5] 완료
-echo [5/5] 완료
+REM [5/5] done
+echo [5/5] Done
 echo.
-echo 다음 단계:
+echo Next step:
 echo   run.bat
 endlocal
