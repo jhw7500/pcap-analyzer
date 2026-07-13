@@ -56,7 +56,7 @@ def _load_result_checked(
         return json.loads(path.read_text(encoding="utf-8")), None
     except (json.JSONDecodeError, UnicodeDecodeError, OSError):
         return None, JSONResponse(
-            error_payload(ErrorCode.ANALYSIS_NOT_FOUND), status_code=404
+            error_payload(ErrorCode.ANALYSIS_CORRUPTED), status_code=500
         )
 
 

@@ -20,7 +20,7 @@ def _load_structured(analysis_id: str):
     try:
         return json.loads(path.read_text(encoding="utf-8")), None
     except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-        return None, JSONResponse(error_payload(ErrorCode.ANALYSIS_NOT_FOUND), status_code=404)
+        return None, JSONResponse(error_payload(ErrorCode.ANALYSIS_CORRUPTED), status_code=500)
 
 
 @router.get("/api/ai/prompt/{analysis_id}")
@@ -61,7 +61,7 @@ async def ai_review(analysis_id: str):
     try:
         result = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-        return JSONResponse(error_payload(ErrorCode.ANALYSIS_NOT_FOUND), status_code=404)
+        return JSONResponse(error_payload(ErrorCode.ANALYSIS_CORRUPTED), status_code=500)
     structured = result.get("structured", {})
 
     review_result = await run_review(structured)

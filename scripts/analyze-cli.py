@@ -29,6 +29,7 @@ def main():
     else:
         # Windows 콘솔(cp949)에서 비-ASCII 결과 출력 시 UnicodeEncodeError 방지
         if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.flush()
             sys.stdout.reconfigure(encoding="utf-8")
         json.dump(result, sys.stdout, ensure_ascii=False, default=str)
 
