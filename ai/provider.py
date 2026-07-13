@@ -1,6 +1,8 @@
 """AI 프로바이더 — Claude API, Claude CLI(구독), OpenAI API 호출."""
 import asyncio
+import os
 import shutil
+import tempfile
 
 import httpx
 
@@ -32,13 +34,17 @@ async def _call_claude_cli(model: str, prompt: str, system: str) -> str:
     # 도구 호출 차단 (단순 LLM 응답만)
     args += ["--allowedTools", ""]
 
+    # Windows: npm 설치본 claude는 .cmd 배치 파일 — cmd.exe 경유로 실행
+    if os.name == "nt" and claude_bin.lower().endswith((".cmd", ".bat")):
+        args = ["cmd.exe", "/c"] + args
+
     try:
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd="/tmp",  # 프로젝트 CLAUDE.md 자동 로드 회피
+            cwd=tempfile.gettempdir(),  # 프로젝트 CLAUDE.md 자동 로드 회피 (Windows 호환 임시 디렉토리)
         )
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(input=prompt.encode("utf-8")),

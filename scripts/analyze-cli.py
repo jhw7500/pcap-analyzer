@@ -24,9 +24,13 @@ def main():
         sys.exit(1)
 
     if out:
-        Path(out).write_text(json.dumps(result, ensure_ascii=False, default=str))
+        Path(out).write_text(json.dumps(result, ensure_ascii=False, default=str), encoding="utf-8")
         print(f"saved: {out} ({Path(out).stat().st_size:,} bytes)", file=sys.stderr)
     else:
+        # Windows 콘솔(cp949)에서 비-ASCII 결과 출력 시 UnicodeEncodeError 방지
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.flush()
+            sys.stdout.reconfigure(encoding="utf-8")
         json.dump(result, sys.stdout, ensure_ascii=False, default=str)
 
 

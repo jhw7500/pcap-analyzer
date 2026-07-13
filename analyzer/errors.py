@@ -13,6 +13,7 @@ class ErrorCode(str, Enum):
     NO_FRAMES = "NO_FRAMES"
     CANCELLED = "CANCELLED"
     ANALYSIS_NOT_FOUND = "ANALYSIS_NOT_FOUND"
+    ANALYSIS_CORRUPTED = "ANALYSIS_CORRUPTED"
     INVALID_ANALYSIS_ID = "INVALID_ANALYSIS_ID"
     INCIDENT_NOT_FOUND = "INCIDENT_NOT_FOUND"
     CASEFILE_UNAVAILABLE = "CASEFILE_UNAVAILABLE"
@@ -53,6 +54,10 @@ ERROR_CATALOG: Dict[ErrorCode, Dict[str, str]] = {
     ErrorCode.ANALYSIS_NOT_FOUND: {
         "message": "분석 결과를 찾을 수 없습니다.",
         "hint": "분석 ID가 정확한지, data/analyses/에 JSON 파일이 존재하는지 확인하세요.",
+    },
+    ErrorCode.ANALYSIS_CORRUPTED: {
+        "message": "분석 결과 파일을 읽을 수 없습니다.",
+        "hint": "data/analyses/의 해당 JSON이 손상되었거나 인코딩이 올바르지 않습니다. 파일 상태를 확인하거나 재분석하세요.",
     },
     ErrorCode.INVALID_ANALYSIS_ID: {
         "message": "잘못된 분석 ID입니다.",

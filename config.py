@@ -18,8 +18,8 @@ MAX_UPLOAD_SIZE = DEFAULT_MAX_UPLOAD_SIZE  # 하위호환 (직접 참조 자제)
 def _load_file() -> dict:
     if CONFIG_PATH.exists():
         try:
-            return json.loads(CONFIG_PATH.read_text())
-        except (json.JSONDecodeError, OSError):
+            return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             pass
     return {}
 
@@ -36,7 +36,7 @@ def get(key: str, default: str = "") -> str:
 def set_value(key: str, value: str) -> None:
     data = _load_file()
     data[key] = value
-    CONFIG_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    CONFIG_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def get_all() -> dict:
