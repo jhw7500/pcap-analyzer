@@ -3,6 +3,7 @@
 from typing import Any, Dict, List
 from ..models import Frame, AnalysisSection
 from ..ping_matching import build_ping_matches
+from ..thresholds import RETRY_DANGER_PCT, RSSI_DANGER_DBM
 
 
 def _find_losses(frames: List[Frame], roles: Dict[str, Dict[str, Any]]) -> List[Frame]:
@@ -50,11 +51,13 @@ def _diagnose_loss(
     cause = "불명"
     if roaming_nearby and abs(roaming_nearby.epoch - t) < 2:
         cause = f"로밍 중 (#{roaming_nearby.number} {roaming_nearby.subtype_name})"
-    elif retry_pct > 60:
+    # 손실 시점 ±1s 국소 burst 판정 — 지속 retry율보다 높은 경계가 적절해
+    # 위험 경계(RETRY_DANGER_PCT)의 4배/2배를 사용 (단일 소스와 동기).
+    elif retry_pct > RETRY_DANGER_PCT * 4:
         cause = f"Retry 폭증 ({retry_pct:.0f}%)"
-    elif rssi_avg is not None and rssi_avg < -75:
+    elif rssi_avg is not None and rssi_avg < RSSI_DANGER_DBM:
         cause = f"RSSI 약화 ({rssi_avg:.0f}dBm)"
-    elif retry_pct > 30:
+    elif retry_pct > RETRY_DANGER_PCT * 2:
         cause = f"Retry 증가 ({retry_pct:.0f}%)"
 
     return {

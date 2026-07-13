@@ -35,6 +35,37 @@ class TestBuildReviewPrompt:
         assert "Ping" in prompt
         assert "loss" in prompt.lower() or "미응답" in prompt
 
+    def test_without_icmp_marks_ping_not_applicable(self):
+        """ICMP가 전혀 없는 캡처: RTT/Loss가 평가 대상이 아님을 프롬프트에 명시
+        (섹션 통째 생략 시 LLM이 추측할 여지 방지)."""
+        structured = {
+            "overview": {"total_frames": 100, "duration_sec": 10, "retry_pct": 0,
+                         "devices": []},
+            "ping": {"pairs": [], "losses": [], "stats": {}},
+            "roaming": {"sequences": []},
+            "signal": {"stas": {}},
+            "delay_zones": {"delay_zones": []},
+            "anomaly_frames": {"anomalies": []},
+        }
+        prompt = build_review_prompt(structured)
+        assert "ICMP 트래픽이 없어 RTT/Loss는 평가 대상이 아님" in prompt
+
+    def test_unidirectional_icmp_no_false_absence_note(self):
+        """관측된 ICMP(observations/raw count)가 있으면 'ICMP 없음' 문구를 넣지 않는다."""
+        structured = {
+            "overview": {"total_frames": 100, "duration_sec": 10, "retry_pct": 0,
+                         "devices": []},
+            "ping": {"pairs": [], "losses": [],
+                     "stats": {"req_total_raw": 5, "reply_total_raw": 0},
+                     "observations": [{"epoch": 1000}]},
+            "roaming": {"sequences": []},
+            "signal": {"stas": {}},
+            "delay_zones": {"delay_zones": []},
+            "anomaly_frames": {"anomalies": []},
+        }
+        prompt = build_review_prompt(structured)
+        assert "ICMP 트래픽이 없어" not in prompt
+
     def test_with_roaming(self):
         structured = {
             "overview": {"total_frames": 100, "duration_sec": 10, "retry_pct": 0, "devices": []},
@@ -451,6 +482,45 @@ class TestDiagnosisSectionInPrompt:
         assert "score=75" in prompt
         assert "retry_pct=12" in prompt        # summary dict 분기
         assert "컴포넌트 점수" in prompt
+
+    def test_component_score_none_rendered_as_unmeasurable(self):
+        """loss 컴포넌트 None(ICMP 없음)은 '측정불가'로 표기된다 (None stringify 방지)."""
+        s = _base_structured(diagnosis={
+            "health": {"score": 50, "grade": "위험", "color": "red"},
+            "component_scores": {"retry": 0, "loss": None, "roaming": 100},
+            "summary": {}, "issues": [], "sta_diags": [],
+        })
+        prompt = build_review_prompt(s)
+        assert "loss=측정불가" in prompt
+        assert "loss=None" not in prompt
+
+    def test_issue_frame_refs_cited_in_prompt(self):
+        """진단 이슈에 대표 frame_refs[:5]가 Wireshark 필터 형태로 병기된다."""
+        s = _base_structured(diagnosis={
+            "health": {"score": 70, "grade": "주의", "color": "yellow"},
+            "summary": {}, "sta_diags": [],
+            "issues": [{
+                "severity": "high", "category": "STA1",
+                "msg": "Retry율 18.3%", "action": "확인",
+                "frame_refs": [43, 58, 68, 93, 95, 106, 120],
+                "time_window": {"start_epoch": 1.0, "end_epoch": 2.0},
+            }],
+        })
+        prompt = build_review_prompt(s)
+        assert "frame.number in {43,58,68,93,95}" in prompt
+        assert "외 2건" in prompt
+
+    def test_issue_without_frame_refs_no_evidence_suffix(self):
+        """frame_refs 없는(구버전) 이슈는 근거 표기 없이 기존 포맷 유지."""
+        s = _base_structured(diagnosis={
+            "health": {"score": 70, "grade": "주의", "color": "yellow"},
+            "summary": {}, "sta_diags": [],
+            "issues": [{"severity": "high", "category": "X",
+                        "msg": "m", "action": "a"}],
+        })
+        prompt = build_review_prompt(s)
+        assert "- [high] X: m → 권장: a" in prompt
+        assert "근거 frame.number" not in prompt
 
     def test_non_dict_health_summary_dropped(self):
         s = _base_structured(diagnosis={

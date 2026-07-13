@@ -17,7 +17,7 @@ from analyzer.core.modules.diagnosis import (
 AP = "aa:bb:cc:00:00:01"
 STA_A = "aa:bb:cc:00:00:0a"  # 고retry+버스트+저RSSI+로밍+ping loss → 제안 path1
 STA_B = "aa:bb:cc:00:00:0b"  # ping loss + 잦은 로밍 (저retry)        → 제안 path2
-STA_C = "aa:bb:cc:00:00:0c"  # ping loss + 중간 retry(INFO)           → 제안 path3(구 punt)
+STA_C = "aa:bb:cc:00:00:0c"  # ping loss + 주의 retry(INFO)           → 제안 path3(구 punt)
 STA_D = "aa:bb:cc:00:00:0d"  # 정상
 
 AP_IP = "10.0.0.1"
@@ -91,11 +91,11 @@ def representative_capture():
         frames.append(mk(epoch=3005.0, ta=STA_B, ra=AP, subtype="11", protocol="802.11"))
     frames += _ping_flow(STA_B, "201", 3010.0)
 
-    # --- STA_C: ping loss + 중간 retry(~26%, INFO) + 로밍 없음 ---
+    # --- STA_C: ping loss + 주의 retry(~9.5%, INFO 구간 5~15%) + 로밍 없음 ---
     for i in range(100):
         frames.append(mk(
             epoch=4000.0 + i, ta=STA_C, ra=AP, subtype="40",
-            retry=(i < 28),  # 28/105 ≈ 26.7% (>25, <=30)
+            retry=(i < 10),  # 10/105 ≈ 9.5% (>RETRY_WARN_PCT 5, <=RETRY_DANGER_PCT 15)
         ))
     frames += _ping_flow(STA_C, "202", 4200.0)
 

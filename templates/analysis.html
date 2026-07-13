@@ -81,7 +81,7 @@
         </div>
         <div id="chart-protocol-detail" style="height:300px"></div>
     </div>
-    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4">
         <h3 class="text-sm font-semibold text-gray-400 mb-2">감지된 디바이스</h3>
         <table class="w-full text-sm" id="device-table">
             <thead class="text-gray-400 border-b border-gray-700">
@@ -91,6 +91,18 @@
             </thead>
             <tbody></tbody>
         </table>
+    </div>
+    <!-- 채널/밴드 — 구버전 result(overview.channels 없음)에서는 charts.js가 숨김 유지 -->
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700" id="channel-card" style="display:none">
+        <h3 class="text-sm font-semibold text-gray-400 mb-2">채널 / 밴드</h3>
+        <table class="w-full text-sm" id="channel-table">
+            <thead class="text-gray-400 border-b border-gray-700">
+                <tr><th class="text-left py-2">채널</th><th class="text-left py-2">밴드</th>
+                    <th class="text-left py-2">주파수</th><th class="text-right py-2">프레임 수</th></tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+        <p class="text-xs text-gray-500 mt-2" id="channel-ap-line"></p>
     </div>
 </div>
 
@@ -199,6 +211,7 @@
                     <th class="text-left py-2">STA</th>
                     <th class="text-left py-2">AP (이전→이후)</th>
                     <th class="text-right py-2">Gap(ms)</th>
+                    <th class="text-right py-2">4-way(ms)</th>
                     <th class="text-left py-2">Type</th></tr>
             </thead>
             <tbody></tbody>

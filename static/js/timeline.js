@@ -301,6 +301,21 @@
             hovertemplate: '%{x|%H:%M:%S} · 전체 %{y:.0f} pkt/s<extra></extra>',
             _panel: 'frames',
         });
+        // Throughput(Mbps) — per_second.bytes(신규 필드) 기반, 보조축 y6(우측).
+        // 구버전 JSON(재분석 전)엔 bytes가 없으므로 시리즈를 통째로 생략한다.
+        if (timeline.some(p => typeof p.bytes === 'number')) {
+            const tp = downsamplePeak(timeline, TIMELINE_MAX, p => p.bytes || 0);
+            traces.push({
+                x: tp.map(p => epochToDate(p.epoch)),
+                y: tp.map(p => (p.bytes || 0) * 8 / 1e6),
+                type: 'scatter', mode: 'lines',
+                name: 'Throughput (Mbps)',
+                line: { color: '#22d3ee', width: 1.5 },
+                xaxis: 'x4', yaxis: 'y6',
+                hovertemplate: '%{x|%H:%M:%S} · %{y:.2f} Mbps<extra></extra>',
+                _panel: 'frames',
+            });
+        }
         // 장치별 송신 프레임율 개별 선 (STA 파랑 / AP 초록 — RSSI 색 재사용).
         // retry_timeline의 total은 그 장치가 그 초에 송신(TA)한 전체 프레임 수.
         function framesTrace(node, name, color) {
@@ -408,6 +423,8 @@
         yaxis4: { title: 'Frames/s',   domain: [0.00, 0.25], gridcolor: GRID },
         // Ping 패널 보조축: Loss%(우측). RTT(y3)와 같은 칸에 겹쳐 그린다.
         yaxis5: { title: 'Loss %', overlaying: 'y3', side: 'right', range: [0, 100], showgrid: false, color: '#f97316' },
+        // Frames 패널 보조축: Throughput Mbps(우측). Frames/s(y4)와 같은 칸에 겹침.
+        yaxis6: { title: 'Mbps', overlaying: 'y4', side: 'right', showgrid: false, color: '#22d3ee' },
         shapes: allShapes.map(({ _kind, ...rest }) => rest),
         margin: { t: 20, r: 20, b: 40, l: 60 },
     };
@@ -443,6 +460,7 @@
             updates[`${axis}.domain`] = [Number(bot.toFixed(4)), Number(top.toFixed(4))];
             updates[`${axis}.visible`] = true;
             if (p === 'rtt') updates['yaxis5.visible'] = true;  // Ping 보조축(Loss%) 동기화
+            if (p === 'frames') updates['yaxis6.visible'] = true;  // Frames 보조축(Mbps) 동기화
             top = bot - gap;
         });
         PANELS.filter(p => !panelOn[p]).forEach(p => {
@@ -450,6 +468,7 @@
             updates[`${axis}.visible`] = false;
             updates[`${axis}.domain`] = [0, 0.001];
             if (p === 'rtt') updates['yaxis5.visible'] = false;
+            if (p === 'frames') updates['yaxis6.visible'] = false;
         });
         Plotly.relayout(timelineEl, updates);
         // 꺼진 패널 트레이스는 숨김, 켜진 패널은 사이드바 개별 상태(_userVisible)대로.

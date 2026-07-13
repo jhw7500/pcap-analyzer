@@ -6,6 +6,7 @@ from collections import Counter, defaultdict
 from ..models import Frame, AnalysisSection
 from ..detector import mac_name
 from ..ping_matching import build_ping_matches
+from ..thresholds import RETRY_DANGER_PCT, RSSI_DANGER_DBM, retry_severity
 
 VALID_LEVELS = ("INFO", "WARNING")
 
@@ -232,14 +233,15 @@ def _diagnose_sta(sta_frames: List[Frame], sta: str, matched_set, loss_set):
             time_window=_window_for(ping_lost_frames),
         ))
 
-    if retry_pct > 40:
+    retry_sev = retry_severity(retry_pct)
+    if retry_sev == "danger":
         diags.append(Conclusion(
             level="WARNING",
             message=f"높은 Retry Rate: {retry_pct:.1f}%",
             frame_refs=_bounded_refs(retry_frames),
             time_window=_window_for(retry_frames),
         ))
-    elif retry_pct > 25:
+    elif retry_sev == "warn":
         diags.append(Conclusion(
             level="INFO",
             message=f"Retry Rate: {retry_pct:.1f}%",
@@ -247,8 +249,8 @@ def _diagnose_sta(sta_frames: List[Frame], sta: str, matched_set, loss_set):
             time_window=_window_for(retry_frames),
         ))
 
-    if rssi_min is not None and rssi_min < -75:
-        weak_frames = [f for f in rssi_frames if f.rssi_first < -75]
+    if rssi_min is not None and rssi_min < RSSI_DANGER_DBM:
+        weak_frames = [f for f in rssi_frames if f.rssi_first < RSSI_DANGER_DBM]
         diags.append(Conclusion(
             level="WARNING",
             message=f"RSSI 최저값 {rssi_min}dBm — 신호 약화 구간",
@@ -289,7 +291,8 @@ def _diagnose_sta(sta_frames: List[Frame], sta: str, matched_set, loss_set):
     # 해당하는 구체적 제안을 모두 출력하고, 구체적 제안이 하나도 없을 때만
     # 일반 점검 제안으로 대체한다.
     specific_suggestion = False
-    if ping_lost > 0 and retry_pct > 30:
+    # 단독 retry WARNING(>위험 경계)과의 중복 출력을 피해 복합 제안은 2배 경계에서만
+    if ping_lost > 0 and retry_pct > RETRY_DANGER_PCT * 2:
         evid = ping_lost_frames + retry_frames
         suggestions.append(Conclusion(
             level="WARNING",
