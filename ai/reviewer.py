@@ -1,5 +1,19 @@
 """AI 리뷰 실행기."""
 import config
+from analyzer.core.thresholds import (
+    LOSS_DANGER_PCT,
+    LOSS_WARN_PCT,
+    MCS_DANGER,
+    MCS_WARN,
+    RETRY_DANGER_PCT,
+    RETRY_WARN_PCT,
+    ROAM_GAP_DANGER_MS,
+    ROAM_GAP_WARN_MS,
+    RSSI_DANGER_DBM,
+    RSSI_WARN_DBM,
+    RTT_DANGER_MS,
+    RTT_WARN_MS,
+)
 from .provider import call_ai
 from .prompts import build_review_prompt
 
@@ -10,12 +24,18 @@ SYSTEM_PROMPT = (
     "차량 환경 특성: 빈번한 로밍, 다중 AP, RSSI 급변, 레거시/HE 모드 혼재, "
     "OBE/RSU(C-V2X/WAVE) 간섭, 펌웨어/드라이버 호환성 이슈가 흔함.\n\n"
     "## 진단 임계값 (자동차 운용 기준)\n"
-    "- Retry율: ≤5% 양호 / 5~15% 주의 / >15% 위험\n"
-    "- 로밍 gap_ms: ≤50ms 양호 / 50~100ms 주의 / >100ms 느린 로밍\n"
-    "- Ping RTT: avg ≤30ms 양호 / 30~80ms 주의 / >80ms 위험\n"
-    "- Ping loss: ≤1% 양호 / 1~5% 주의 / >5% 위험\n"
-    "- RSSI: ≥-65dBm 양호 / -65~-75 주의 / <-75 위험 (HE 송신 어려움)\n"
-    "- MCS 평균: HE 6 이상 양호 / 3~6 주의 / <3 위험\n\n"
+    f"- Retry율: ≤{RETRY_WARN_PCT}% 양호 / {RETRY_WARN_PCT}~{RETRY_DANGER_PCT}% 주의"
+    f" / >{RETRY_DANGER_PCT}% 위험\n"
+    f"- 로밍 gap_ms: ≤{ROAM_GAP_WARN_MS}ms 양호 / {ROAM_GAP_WARN_MS}~{ROAM_GAP_DANGER_MS}ms 주의"
+    f" / >{ROAM_GAP_DANGER_MS}ms 느린 로밍\n"
+    f"- Ping RTT: avg ≤{RTT_WARN_MS}ms 양호 / {RTT_WARN_MS}~{RTT_DANGER_MS}ms 주의"
+    f" / >{RTT_DANGER_MS}ms 위험\n"
+    f"- Ping loss: ≤{LOSS_WARN_PCT}% 양호 / {LOSS_WARN_PCT}~{LOSS_DANGER_PCT}% 주의"
+    f" / >{LOSS_DANGER_PCT}% 위험\n"
+    f"- RSSI: ≥{RSSI_WARN_DBM}dBm 양호 / {RSSI_WARN_DBM}~{RSSI_DANGER_DBM} 주의"
+    f" / <{RSSI_DANGER_DBM} 위험 (HE 송신 어려움)\n"
+    f"- MCS 평균: HE {MCS_WARN} 이상 양호 / {MCS_DANGER}~{MCS_WARN} 주의"
+    f" / <{MCS_DANGER} 위험\n\n"
     "## 응답 규칙\n"
     "- 한국어로 답변.\n"
     "- 진단은 반드시 제공된 데이터의 구체적 수치를 인용 (예: 'AP2 retry 25%').\n"

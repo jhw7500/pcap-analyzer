@@ -5,10 +5,20 @@ pipeline.run_analysis가 오케스트레이션 중 호출한다. 각 함수는 f
 """
 
 from collections import Counter, defaultdict
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
+from ..core.channels import ap_channel_map, freq_to_band, freq_to_channel, parse_freq
 from ..core.models import Frame
 from ..core.ping_matching import PING_MATCH_WINDOW_SEC, build_ping_matches
+from ..core.thresholds import (
+    LOSS_DANGER_PCT,
+    RETRY_DANGER_PCT,
+    ROAM_GAP_DANGER_MS,
+    RSSI_DANGER_DBM,
+    RSSI_WARN_DBM,
+    retry_severity,
+    rssi_severity,
+)
 
 
 def _structured_overview(
@@ -84,6 +94,35 @@ def _structured_overview(
             }
         )
 
+    # 채널/밴드 분포 — radiotap.channel.freq 기반. 구형 tshark 등으로 필드가
+    # 비면 by_channel이 빈 리스트가 되고 소비자(UI/report)는 조건부 렌더.
+    freq_counter: "Counter[int]" = Counter()
+    for f in frames:
+        freq = parse_freq(getattr(f, "channel_freq", "") or "")
+        if freq is not None:
+            freq_counter[freq] += 1
+    by_channel = [
+        {
+            "freq": freq,
+            "channel": freq_to_channel(freq),
+            "band": freq_to_band(freq),
+            "frames": cnt,
+        }
+        for freq, cnt in freq_counter.most_common()
+    ]
+    ap_ch = ap_channel_map(frames, roles)
+    ap_channels = {
+        mac: {
+            "name": roles[mac]["name"],
+            "freq": info["freq"],
+            "channel": info["channel"],
+            "band": info["band"],
+        }
+        for mac, info in ap_ch.items()
+        if mac in roles
+    }
+    channels = {"by_channel": by_channel, "ap_channels": ap_channels}
+
     return {
         "total_frames": n,
         "duration_sec": round(frames[-1].epoch - frames[0].epoch, 1),
@@ -95,6 +134,7 @@ def _structured_overview(
         "protocol_dist": dict(proto_counts.most_common(20)),
         "subtype_dist": dict(subtype_counts.most_common(20)),
         "devices": devices,
+        "channels": channels,
     }
 
 
@@ -262,13 +302,26 @@ def _structured_ping(
 
 
 def _structured_roaming(
-    frames: List[Frame], roles: Dict[str, Dict[str, Any]]
+    frames: List[Frame],
+    roles: Dict[str, Dict[str, Any]],
+    handshakes: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """roaming 이벤트를 구조화."""
+    """roaming 이벤트를 구조화.
+
+    handshakes(structured.eapol의 핸드셰이크 목록)가 주어지면 각 시퀀스에
+    assoc 직후 첫 4-way duration(four_way_ms)을 부착한다(매칭 실패 시 None).
+    """
     from ..core.detector import mac_name
+    from ..core.modules.eapol import match_four_way_ms
 
     roaming_frames = [f for f in frames if f.is_roaming_related]
     sta_macs = {mac for mac, role in roles.items() if role.get("role") == "STA"}
+    # AP별 대표 채널(beacon 기준) — 이전/이후 AP의 채널·밴드 전환 판정용.
+    ap_ch = ap_channel_map(frames, roles)
+
+    def _ch_of(mac: str, key: str) -> Optional[Any]:
+        info = ap_ch.get(mac)
+        return info.get(key) if info else None
 
     sequences = []
     auth_events: Dict[str, Frame] = {}
@@ -280,12 +333,21 @@ def _structured_roaming(
             if auth_frame is None:
                 continue
             gap_ms = (frame.epoch - auth_frame.epoch) * 1000
+            prev_ap = frame.current_ap or ""
+            prev_band = _ch_of(prev_ap, "band") if prev_ap else None
+            new_band = _ch_of(frame.ra, "band")
+            # 양쪽 밴드를 모두 알 때만 전환 여부 판정, 아니면 None(정보 없음).
+            band_change = (
+                prev_band != new_band
+                if prev_band is not None and new_band is not None
+                else None
+            )
             sequences.append(
                 {
                     "sta": frame.ta,
                     "sta_name": mac_name(frame.ta, roles),
-                    "prev_ap": frame.current_ap or "",
-                    "prev_ap_name": mac_name(frame.current_ap, roles) if frame.current_ap else "",
+                    "prev_ap": prev_ap,
+                    "prev_ap_name": mac_name(prev_ap, roles) if prev_ap else "",
                     "ap": frame.ra,
                     "ap_name": mac_name(frame.ra, roles),
                     "auth_epoch": auth_frame.epoch,
@@ -294,7 +356,15 @@ def _structured_roaming(
                     "assoc_fnum": frame.number,
                     "gap_ms": round(gap_ms, 1),
                     "assoc_type": frame.subtype_name,
-                    "is_slow": gap_ms > 100,
+                    "is_slow": gap_ms > ROAM_GAP_DANGER_MS,
+                    "prev_ap_channel": _ch_of(prev_ap, "channel") if prev_ap else None,
+                    "prev_ap_band": prev_band,
+                    "ap_channel": _ch_of(frame.ra, "channel"),
+                    "ap_band": new_band,
+                    "band_change": band_change,
+                    "four_way_ms": match_four_way_ms(
+                        frame.epoch, frame.ta, handshakes or []
+                    ),
                 }
             )
 
@@ -311,6 +381,15 @@ def _structured_per_second(frames: List[Frame]) -> Dict[str, Any]:
 
     sec_counts = Counter(int(f.epoch) for f in frames)
     retry_counts = Counter(int(f.epoch) for f in frames if f.retry)
+    # throughput용 바이트 집계 — bytes는 전체(frame.len 합), data_bytes는 Data
+    # 타입 프레임만. Mbps 환산은 소비자(프론트/리포트)가 ×8/1e6으로 수행.
+    byte_counts: "Counter[int]" = Counter()
+    data_byte_counts: "Counter[int]" = Counter()
+    for f in frames:
+        sec = int(f.epoch)
+        byte_counts[sec] += f.length
+        if f.is_data:
+            data_byte_counts[sec] += f.length
     start = min(sec_counts)
     end = max(sec_counts)
     timeline = []
@@ -320,6 +399,8 @@ def _structured_per_second(frames: List[Frame]) -> Dict[str, Any]:
                 "epoch": sec,
                 "total": sec_counts.get(sec, 0),
                 "retry": retry_counts.get(sec, 0),
+                "bytes": byte_counts.get(sec, 0),
+                "data_bytes": data_byte_counts.get(sec, 0),
             }
         )
     return {"timeline": timeline}
@@ -593,14 +674,29 @@ def _structured_diagnosis(
     roam_seqs = roaming.get("sequences", [])
     slow_roams = [s for s in roam_seqs if s.get("is_slow")]
 
+    # ping 측정 가능 여부 — request+reply가 전혀 없는 캡처(ICMP 없음)에서
+    # loss 컴포넌트를 100점 만점 처리하면 건강도가 부풀려진다. 이 경우 loss
+    # 점수를 None(측정 불가)으로 두고 가용 컴포넌트만으로 가중 재분배한다.
+    # 구버전 직렬화 result에는 req_total_raw 류 키가 없을 수 있어 pairs/losses
+    # 존재 여부를 함께 본다.
+    ping_available = bool(
+        ping.get("pairs") or ping_losses
+        or ping_stats.get("req_total_raw") or ping_stats.get("reply_total_raw")
+    )
+
     retry_score = max(0, 100 - retry_pct * 5)
-    loss_score = max(0, 100 - loss_pct * 10)
     roam_score = 100
     if len(roam_seqs) > 0:
         slow_ratio = len(slow_roams) / len(roam_seqs) * 100
         roam_score = max(0, 100 - slow_ratio * 2)
 
-    health_score = round(retry_score * 0.3 + loss_score * 0.4 + roam_score * 0.3)
+    if ping_available:
+        loss_score = max(0, 100 - loss_pct * 10)
+        health_score = round(retry_score * 0.3 + loss_score * 0.4 + roam_score * 0.3)
+    else:
+        loss_score = None
+        # loss 가중치(0.4)를 제외한 나머지(retry 0.3 + roaming 0.3)로 정규화
+        health_score = round((retry_score * 0.3 + roam_score * 0.3) / 0.6)
     if health_score >= 80:
         health_grade = "양호"
         health_color = "green"
@@ -645,17 +741,18 @@ def _structured_diagnosis(
                     issue["signal_type"] = signal_type
                 issues.append(issue)
 
-        if sta_retry > 25:
+        sta_retry_sev = retry_severity(sta_retry)
+        if sta_retry_sev == "danger":
             refs, window = ev.retry_bucket_evidence(mac, index)
             _add_issue(
                 {
                     "severity": "high",
-                    "msg": f"Retry율 {sta_retry}% (임계치 25% 초과)",
+                    "msg": f"Retry율 {sta_retry}% (임계치 {RETRY_DANGER_PCT}% 초과)",
                     "action": "TX power 또는 안테나 확인, 로밍 임계값 조정",
                 },
                 refs, window, signal_type="high_retry",
             )
-        elif sta_retry > 15:
+        elif sta_retry_sev == "warn":
             refs, window = ev.retry_bucket_evidence(mac, index)
             _add_issue(
                 {
@@ -714,8 +811,9 @@ def _structured_diagnosis(
                 },
                 refs, window, signal_type="signal_cliff",
             )
-        if rssi_avg is not None and rssi_avg < -70:
-            refs, window = ev.weak_rssi_evidence(mac, -70, frames, index)
+        rssi_sev = rssi_severity(rssi_avg) if rssi_avg is not None else "good"
+        if rssi_sev == "danger":
+            refs, window = ev.weak_rssi_evidence(mac, RSSI_DANGER_DBM, frames, index)
             _add_issue(
                 {
                     "severity": "high",
@@ -724,8 +822,8 @@ def _structured_diagnosis(
                 },
                 refs, window, signal_type="weak_rssi",
             )
-        elif rssi_avg is not None and rssi_avg < -60:
-            refs, window = ev.weak_rssi_evidence(mac, -60, frames, index)
+        elif rssi_sev == "warn":
+            refs, window = ev.weak_rssi_evidence(mac, RSSI_WARN_DBM, frames, index)
             _add_issue(
                 {
                     "severity": "medium",
@@ -739,7 +837,7 @@ def _structured_diagnosis(
             _add_issue(
                 {
                     "severity": "high",
-                    "msg": f"느린 로밍 {len(sta_slow_roams)}회 (>100ms)",
+                    "msg": f"느린 로밍 {len(sta_slow_roams)}회 (>{ROAM_GAP_DANGER_MS}ms)",
                     "action": "802.11r/k/v 설정 확인, 로밍 히스테리시스 조정",
                 },
                 refs, window, signal_type="slow_roaming",
@@ -788,7 +886,7 @@ def _structured_diagnosis(
                 issue["signal_type"] = signal_type
             all_issues.append(issue)
 
-    if retry_pct > 15:
+    if retry_pct > RETRY_DANGER_PCT:
         refs, window = ev.network_retry_evidence(frames, index)
         _add_net_issue(
             {
@@ -820,7 +918,7 @@ def _structured_diagnosis(
             },
             refs, window, signal_type="legacy_heavy",
         )
-    if loss_pct > 5:
+    if loss_pct > LOSS_DANGER_PCT:
         refs, window = ev.ping_loss_evidence(ping_losses)
         _add_net_issue(
             {
@@ -901,13 +999,15 @@ def _structured_diagnosis(
         "health": {"score": health_score, "grade": health_grade, "color": health_color},
         "component_scores": {
             "retry": round(retry_score),
-            "loss": round(loss_score),
+            # None = 측정 불가(ICMP 없음). JSON에는 null로 직렬화되며 구버전
+            # result(숫자)와 소비자(charts.js/report.py)가 모두 분기 처리한다.
+            "loss": round(loss_score) if loss_score is not None else None,
             "roaming": round(roam_score),
         },
         "summary": {
             "total_frames": total_frames,
             "retry_pct": retry_pct,
-            "loss_pct": loss_pct,
+            "loss_pct": loss_pct if ping_available else None,
             "roaming_total": len(roam_seqs),
             "roaming_slow": len(slow_roams),
             "delay_zones": len(delay_zones),

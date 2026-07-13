@@ -14,13 +14,16 @@ else:
 try:
     from ..detector import mac_name
     from ..models import AnalysisSection, Frame
+    from ..thresholds import ROAM_GAP_DANGER_MS
 except (ImportError, ValueError):
     mac_name = importlib.import_module("detector").mac_name
     model_module = importlib.import_module("models")
     AnalysisSection = model_module.AnalysisSection
     Frame = model_module.Frame
+    ROAM_GAP_DANGER_MS = importlib.import_module("thresholds").ROAM_GAP_DANGER_MS
 
-SLOW_THRESHOLD_MS = 100
+# 진단 임계값 단일 소스(analyzer/core/thresholds.py)의 위험 경계와 동기.
+SLOW_THRESHOLD_MS = ROAM_GAP_DANGER_MS
 
 # 로밍 이벤트로 추출할 mgmt 서브타입 → 이벤트 종류(kind).
 #   "11" Auth, "0" AssocReq, "2" ReassocReq — analyze()의 시퀀스 탐지 규칙과 동일.

@@ -418,6 +418,100 @@ class TestStructuredDiagnosis:
         assert result["health"]["score"] > 0
         assert result["health"]["grade"] in ("양호", "주의", "위험")
 
+    def test_health_ping_unavailable_loss_component_null(self):
+        """ICMP가 전혀 없는 캡처: loss 컴포넌트는 None(측정 불가)으로 직렬화되고
+        건강도는 retry/roaming 가중치만으로 재분배된다 (100점 만점 부풀림 방지)."""
+        structured = {
+            "overview": {"total_frames": 1000, "retry_pct": 20},
+            "ping": {"stats": {"loss_pct": 0}, "pairs": [], "losses": []},
+            "roaming": {"sequences": []},
+            "signal": {"stas": {}},
+            "device_stats": {},
+            "delay_zones": {"delay_zones": []},
+            "anomaly_frames": {"anomalies": []},
+        }
+        result = _structured_diagnosis(structured)
+        assert result["component_scores"]["loss"] is None
+        assert result["summary"]["loss_pct"] is None
+        # retry_score=0, roam_score=100 → (0*0.3 + 100*0.3)/0.6 = 50
+        # (loss가 100점이던 기존 방식이면 40이 아닌 다른 값으로 부풀려짐)
+        assert result["health"]["score"] == 50
+
+    def test_health_ping_available_keeps_three_way_weights(self):
+        """ping 데이터가 있으면 기존 3-컴포넌트 가중(0.3/0.4/0.3)이 유지된다."""
+        structured = {
+            "overview": {"total_frames": 1000, "retry_pct": 0},
+            "ping": {
+                "stats": {"loss_pct": 10},
+                "pairs": [{"rtt_ms": 5.0}] * 9,
+                "losses": [{"epoch": 1000}],
+            },
+            "roaming": {"sequences": []},
+            "signal": {"stas": {}},
+            "device_stats": {},
+            "delay_zones": {"delay_zones": []},
+            "anomaly_frames": {"anomalies": []},
+        }
+        result = _structured_diagnosis(structured)
+        assert result["component_scores"]["loss"] == 0  # 100 - 10*10
+        assert result["summary"]["loss_pct"] == 10
+        # 100*0.3 + 0*0.4 + 100*0.3 = 60
+        assert result["health"]["score"] == 60
+
+    def test_sta_retry_18pct_is_high_severity(self):
+        """canonical 기준(RETRY_DANGER_PCT=15): retry 18.3%는 이제 high 판정.
+
+        (구버전: structured 'medium', 종합진단 '정상' — 임계값 3벌 상충 회귀 가드)
+        """
+        frames = [
+            make_frame(number=i + 1, epoch=2000.0 + i * 0.01, ta=STA1, ra=AP1,
+                       subtype="40", retry=True)
+            for i in range(20)
+        ]
+        index = FrameIndex(frames, SAMPLE_ROLES)
+        structured = {
+            "overview": {"total_frames": len(frames), "retry_pct": 0},
+            "ping": {"stats": {"loss_pct": 0}, "losses": []},
+            "roaming": {"sequences": []},
+            "signal": {"stas": {"STA1(0002)": {"mac": STA1, "rssi_avg": -50}}},
+            "device_stats": {"STA1(0002)": {"retry_pct": 18.3}},
+            "delay_zones": {"delay_zones": []},
+            "anomaly_frames": {"anomalies": []},
+        }
+        result = _structured_diagnosis(structured, frames, index)
+        retry_issues = [
+            i for i in result["sta_diags"][0]["issues"]
+            if i.get("signal_type") == "high_retry"
+        ]
+        assert len(retry_issues) == 1
+        assert retry_issues[0]["severity"] == "high"
+        assert "15% 초과" in retry_issues[0]["msg"]
+
+    def test_sta_retry_warn_band_is_medium_severity(self):
+        """retry 10%(5~15% 주의 구간)는 medium 판정."""
+        frames = [
+            make_frame(number=i + 1, epoch=2000.0 + i * 0.01, ta=STA1, ra=AP1,
+                       subtype="40", retry=True)
+            for i in range(20)
+        ]
+        index = FrameIndex(frames, SAMPLE_ROLES)
+        structured = {
+            "overview": {"total_frames": len(frames), "retry_pct": 0},
+            "ping": {"stats": {"loss_pct": 0}, "losses": []},
+            "signal": {"stas": {"STA1(0002)": {"mac": STA1, "rssi_avg": -50}}},
+            "roaming": {"sequences": []},
+            "device_stats": {"STA1(0002)": {"retry_pct": 10}},
+            "delay_zones": {"delay_zones": []},
+            "anomaly_frames": {"anomalies": []},
+        }
+        result = _structured_diagnosis(structured, frames, index)
+        retry_issues = [
+            i for i in result["sta_diags"][0]["issues"]
+            if i.get("signal_type") == "high_retry"
+        ]
+        assert len(retry_issues) == 1
+        assert retry_issues[0]["severity"] == "medium"
+
     def _problem_capture(self):
         """retry 폭증 + ping loss + 느린 로밍을 모두 자극하는 frames + structured."""
         frames = []

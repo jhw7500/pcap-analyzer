@@ -46,6 +46,8 @@ class Frame:
     icmp_ident: str = ""  # ICMP echo identifier — 같은 src/dst 안의 흐름 구분용
     reason_code: str = ""  # wlan.fixed.reason_code — Deauth/Disassoc 사유 코드 (디버그 증거용)
     current_ap: str = ""  # wlan.fixed.current_ap — Reassoc Request의 직전 AP (로밍 전 AP)
+    channel_freq: str = ""  # radiotap.channel.freq — 채널 주파수 MHz (채널/밴드 판별용)
+    eapol_msgnr: str = ""  # wlan_rsna_eapol.keydes.msgnr — EAPOL 4-way 메시지 번호 1~4
 
     @property
     def subtype_name(self) -> str:

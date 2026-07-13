@@ -3,6 +3,7 @@
 from typing import Any, Dict, List
 from ..models import Frame, AnalysisSection
 from ..ping_matching import build_ping_matches
+from ..thresholds import RSSI_DANGER_DBM
 
 
 def _find_losses(frames: List[Frame], roles: Dict[str, Dict[str, Any]]) -> List[Frame]:
@@ -52,7 +53,7 @@ def _diagnose_loss(
         cause = f"로밍 중 (#{roaming_nearby.number} {roaming_nearby.subtype_name})"
     elif retry_pct > 60:
         cause = f"Retry 폭증 ({retry_pct:.0f}%)"
-    elif rssi_avg is not None and rssi_avg < -75:
+    elif rssi_avg is not None and rssi_avg < RSSI_DANGER_DBM:
         cause = f"RSSI 약화 ({rssi_avg:.0f}dBm)"
     elif retry_pct > 30:
         cause = f"Retry 증가 ({retry_pct:.0f}%)"

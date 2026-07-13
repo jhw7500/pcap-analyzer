@@ -11,7 +11,7 @@ from .core.indexer import FrameIndex
 from .core.modules import (
     overview, retry_mcs, retry_burst, roaming, ping_rtt,
     control_traffic, signal_quality, per_second,
-    roaming_impact, ping_loss, diagnosis,
+    roaming_impact, ping_loss, diagnosis, eapol,
 )
 from .web.delay_analysis import analyze_delays
 from .web.anomaly_frames import detect_anomalies
@@ -156,8 +156,15 @@ def run_analysis(
     if _cancelled():
         return {"cancelled": True}
 
+    _progress("시각화: EAPOL 4-way 분석 중...", 94)
+    structured["eapol"] = eapol.build_handshakes(frames, roles)
+    if _cancelled():
+        return {"cancelled": True}
+
     _progress("시각화: 로밍 데이터 생성 중...", 94)
-    structured["roaming"] = _structured_roaming(frames, roles)
+    structured["roaming"] = _structured_roaming(
+        frames, roles, handshakes=structured["eapol"].get("handshakes", [])
+    )
     if _cancelled():
         return {"cancelled": True}
 
@@ -194,7 +201,10 @@ def run_analysis(
         "pcap_name": Path(pcap_path).name,
         "pcap_size": os.path.getsize(pcap_path),
         "frame_count": len(frames),
-        "analyzed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        # 호스트 로컬 시각 + 시간대(%Z, 예: KST) — 리포트의 UTC 기반 이벤트
+        # 시각(_format_epoch)과 혼동하지 않게 시간대를 함께 기록. 시간대 없는
+        # 구버전 값은 report.py가 '(호스트 로컬 시각)'으로 표기한다.
+        "analyzed_at": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
         "tshark_version": _tshark_info["version"],
         "tshark_path": _tshark_info["path"],
         "structured": structured,

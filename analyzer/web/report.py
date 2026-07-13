@@ -8,6 +8,7 @@ typora 등)로 PDF/HTML로 추가 변환 가능하도록 표준 GFM 사양 준�
 report.pdf도 같은 텍스트 기반 리포트를 공유한다. 차트가 필요하면 분석
 페이지를 브라우저에서 직접 인쇄. SVG/PNG inline은 후속 PR 후보로 남긴다.
 """
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
@@ -52,7 +53,13 @@ def _meta_section(result: Dict[str, Any]) -> List[str]:
     overview = (result.get("structured") or {}).get("overview") or {}
     pairs: List[str] = []
     if result.get("analyzed_at"):
-        pairs.append(f"분석 시각 `{_clean_code_span(result['analyzed_at'])}`")
+        at = _clean_code_span(result["analyzed_at"])
+        # 시간대 표기: 신규 pipeline은 '%Z'(예: KST)를 포함한다. 시간대가 없는
+        # 구버전 값은 분석 호스트 로컬 시각이므로 라벨을 붙여 _format_epoch의
+        # UTC 고정 정책(위 docstring)과 혼동되지 않게 한다.
+        has_tz = bool(re.search(r"(?:[A-Za-z]{2,5}|[+-]\d{2}:?\d{2})\s*$", at))
+        suffix = "" if has_tz else " (호스트 로컬 시각)"
+        pairs.append(f"분석 시각 `{at}`{suffix}")
     if result.get("tshark_version"):
         pairs.append(f"tshark `{_clean_code_span(result['tshark_version'])}`")
     if overview.get("duration_sec") is not None:
@@ -71,8 +78,122 @@ def _meta_section(result: Dict[str, Any]) -> List[str]:
         pass
     if pairs:
         lines.append(" · ".join(pairs))
+    # 평균/피크 throughput — per_second.bytes(신규 필드) 기반. 구버전 result엔
+    # bytes가 없어 라인 자체를 생략한다.
+    tp = _throughput_stats((result.get("structured") or {}).get("per_second"))
+    if tp:
+        lines.append(
+            f"처리량: 평균 {tp['avg_mbps']} Mbps · 피크 {tp['peak_mbps']} Mbps"
+        )
     lines.append("")
     return lines
+
+
+def _throughput_stats(per_second: Any) -> Dict[str, Any]:
+    """per_second.timeline의 bytes로 평균/피크 Mbps 계산. bytes 없으면 {}."""
+    if not isinstance(per_second, dict):
+        return {}
+    timeline = per_second.get("timeline")
+    if not isinstance(timeline, list) or not timeline:
+        return {}
+    byte_vals = [
+        e.get("bytes")
+        for e in timeline
+        if isinstance(e, dict) and isinstance(e.get("bytes"), (int, float))
+    ]
+    if not byte_vals:
+        return {}
+    total = sum(byte_vals)
+    duration = len(byte_vals)  # timeline은 초당 1 entry (gap은 0으로 채워짐)
+    return {
+        "avg_mbps": round(total * 8 / 1e6 / duration, 2) if duration else 0.0,
+        "peak_mbps": round(max(byte_vals) * 8 / 1e6, 2),
+    }
+
+
+def _summary_section(diagnosis: Dict[str, Any]) -> List[str]:
+    """최상단 Executive Summary — 판정·최상위 문제·측정 불가 항목을 두괄식으로.
+
+    diagnosis.health.score가 없는 구버전 result에는 섹션 자체를 생략해
+    하위호환을 유지한다(웹 UI/report 모두 새 키는 조건부 렌더 원칙).
+    """
+    raw_health = diagnosis.get("health")
+    health = raw_health if isinstance(raw_health, dict) else {}
+    if health.get("score") is None:
+        return []
+    raw_issues = diagnosis.get("issues")
+    issues = (
+        [i for i in raw_issues if isinstance(i, dict)]
+        if isinstance(raw_issues, list) else []
+    )
+    lines = ["## 요약", ""]
+    grade = _clean_inline(health.get("grade", ""))
+    verdict = f"**건강도 {health['score']}/100 ({grade})**"
+    severity_order = {"high": 0, "medium": 1, "low": 2}
+    if issues:
+        sev_counts: Dict[str, int] = {}
+        for iss in issues:
+            sev = iss.get("severity", "?")
+            sev_counts[sev] = sev_counts.get(sev, 0) + 1
+        cnt_str = " · ".join(
+            f"{_clean_inline(sev)} {n}건"
+            for sev, n in sorted(
+                sev_counts.items(), key=lambda kv: severity_order.get(kv[0], 3)
+            )
+        )
+        lines.append(f"{verdict} — 이슈 {len(issues)}건 ({cnt_str})")
+        lines.append("")
+        lines.append("최상위 문제:")
+        top = sorted(
+            issues, key=lambda i: severity_order.get(i.get("severity"), 3)
+        )[:3]
+        for iss in top:
+            sev = _clean_inline(iss.get("severity", "?"))
+            cat = _clean_inline(iss.get("category", iss.get("type", "?")))
+            msg = _clean_inline(iss.get("msg") or "")
+            action = _clean_inline(
+                iss.get("action") or iss.get("recommendation") or ""
+            )
+            line = f"- [{sev}] {cat}: {msg}"
+            if action:
+                line += f" — 조치: {action}"
+            lines.append(line)
+    else:
+        lines.append(f"{verdict} — 중대 문제 없음")
+    # 측정 불가 컴포넌트(None) 명시 — 점수에서 빠진 축을 요약에서 바로 알림.
+    raw_scores = diagnosis.get("component_scores")
+    scores = raw_scores if isinstance(raw_scores, dict) else {}
+    unmeasured = [k for k, v in scores.items() if v is None]
+    if unmeasured:
+        labels = [
+            "Ping Loss (ICMP 트래픽 없음)" if k == "loss" else _clean_inline(k)
+            for k in unmeasured
+        ]
+        lines.append(f"- 측정 불가: {', '.join(labels)}")
+    lines.append("")
+    return lines
+
+
+def _evidence_str(issue: Dict[str, Any]) -> str:
+    """issue의 frame_refs[:5] + time_window → 근거 문자열.
+
+    `frame.number in {446,447,...}`는 Wireshark 디스플레이 필터로 그대로 복붙
+    가능한 형태. frame_refs가 없으면(비정상/구버전) '-' 반환.
+    """
+    refs = issue.get("frame_refs")
+    if not isinstance(refs, list) or not refs:
+        return "-"
+    head = ",".join(str(r) for r in refs[:5])
+    s = f"`frame.number in {{{head}}}`"
+    if len(refs) > 5:
+        s += f" 외 {len(refs) - 5:,}건"
+    tw = issue.get("time_window")
+    if isinstance(tw, dict):
+        s_str = _format_epoch(tw.get("start_epoch"))
+        e_str = _format_epoch(tw.get("end_epoch"))
+        if s_str and e_str:
+            s += f" · {s_str} ~ {e_str}"
+    return s
 
 
 def _correlations_section(diagnosis: Dict[str, Any]) -> List[str]:
@@ -161,8 +282,8 @@ def _issues_table(diagnosis: Dict[str, Any]) -> List[str]:
     if not isinstance(issues, list) or not issues:
         return []
     lines = ["## 단일 진단 결론", ""]
-    lines.append("| Severity | Category | 문제 | 조치 |")
-    lines.append("|---|---|---|---|")
+    lines.append("| Severity | Category | 문제 | 조치 | 근거 |")
+    lines.append("|---|---|---|---|---|")
     for iss in issues:
         if not isinstance(iss, dict):
             continue
@@ -170,7 +291,9 @@ def _issues_table(diagnosis: Dict[str, Any]) -> List[str]:
         cat = _clean_cell(iss.get("category", iss.get("type", "?")))
         msg = _clean_cell(iss.get("msg") or "")
         action = _clean_cell(iss.get("action") or iss.get("recommendation") or "")
-        lines.append(f"| {sev} | {cat} | {msg} | {action} |")
+        # 근거: 대표 frame # + 시간 구간 — Wireshark 필터 복붙 가능 형태.
+        evidence = _evidence_str(iss)
+        lines.append(f"| {sev} | {cat} | {msg} | {action} | {evidence} |")
     lines.append("")
     return lines
 
@@ -207,17 +330,18 @@ def _sta_diags_section(
         raw_metrics = sd.get("metrics")
         metrics = raw_metrics if isinstance(raw_metrics, dict) else {}
         m_parts = []
-        for k, label in (
-            ("retry_pct", "Retry"),
-            ("rssi_avg", "RSSI 평균(dBm)"),
-            ("rssi_min", "RSSI 최저(dBm)"),
-            ("roaming_count", "로밍"),
-            ("slow_roaming", "느린 로밍"),
-            ("total_frames", "프레임"),
+        # 단위 병기 — 'Retry 18.3'처럼 단위 없는 수치는 %인지 건수인지 모호.
+        for k, label, unit in (
+            ("retry_pct", "Retry", "%"),
+            ("rssi_avg", "RSSI 평균", "dBm"),
+            ("rssi_min", "RSSI 최저", "dBm"),
+            ("roaming_count", "로밍", "회"),
+            ("slow_roaming", "느린 로밍", "회"),
+            ("total_frames", "프레임", "건"),
         ):
             v = metrics.get(k)
             if v is not None:
-                m_parts.append(f"{label} {v}")
+                m_parts.append(f"{label} {v}{unit}")
         if m_parts:
             lines.append(f"- 메트릭: {' · '.join(m_parts)}")
         # 신호 급락(cliff) — 타임라인에만 있던 RSSI 급강하 이벤트를 리포트에 노출.
@@ -243,6 +367,10 @@ def _sta_diags_section(
                 if action:
                     line += f" — 조치: {action}"
                 lines.append(line)
+                # 근거: 대표 frame # + 시간 구간 (없으면 줄 자체 생략).
+                evidence = _evidence_str(iss)
+                if evidence != "-":
+                    lines.append(f"    - 근거: {evidence}")
         lines.append("")
     return lines
 
@@ -261,10 +389,14 @@ def _health_section(diagnosis: Dict[str, Any]) -> List[str]:
         lines.append(f"- 전체: **{health['score']}** ({grade})")
     if scores:
         # key/value 모두 inline-safe 처리 — 외부 데이터가 |/newline 포함 가능.
+        # None = 측정 불가 컴포넌트(예: ICMP 없는 캡처의 loss).
         score_strs = " · ".join(
-            f"{_clean_inline(k)}={_clean_inline(v)}" for k, v in scores.items()
+            f"{_clean_inline(k)}={'측정 불가' if v is None else _clean_inline(v)}"
+            for k, v in scores.items()
         )
         lines.append(f"- 컴포넌트 점수: {score_strs}")
+    if "loss" in scores and scores.get("loss") is None:
+        lines.append("- Ping: 측정 불가 — ICMP 트래픽 없음")
     # 요약 지표 — 점수 산출의 원천값을 임계 초과 여부와 무관하게 항상 노출.
     raw_summary = diagnosis.get("summary")
     summary = raw_summary if isinstance(raw_summary, dict) else {}
@@ -353,8 +485,82 @@ def _devices_section(structured: Dict[str, Any]) -> List[str]:
                 f"{_clean_inline(SUBTYPE_NAMES.get(k, k))} {v:,}" for k, v in top
             )
         )
-    if (isinstance(proto, dict) and proto) or (isinstance(subtype, dict) and subtype):
+    # 채널/밴드 — overview.channels(신규 키). 구버전 result엔 없어 생략.
+    channels = overview.get("channels") if isinstance(overview, dict) else None
+    if isinstance(channels, dict):
+        by_channel = channels.get("by_channel")
+        if isinstance(by_channel, list) and by_channel:
+            ch_parts = []
+            for c in by_channel[:5]:
+                if not isinstance(c, dict):
+                    continue
+                ch = c.get("channel")
+                band = c.get("band") or "-"
+                ch_parts.append(
+                    f"CH{ch if ch is not None else '?'}({band}) "
+                    f"{_fmt_count(c.get('frames'))}"
+                )
+            if ch_parts:
+                lines.append(f"- 채널 분포: {', '.join(ch_parts)}")
+        ap_channels = channels.get("ap_channels")
+        if isinstance(ap_channels, dict) and ap_channels:
+            ap_parts = [
+                f"{_clean_inline(a.get('name', '?'))} CH{a.get('channel', '?')}"
+                f"({a.get('band') or '-'})"
+                for a in ap_channels.values()
+                if isinstance(a, dict)
+            ]
+            if ap_parts:
+                lines.append(f"- AP 채널(beacon 기준): {', '.join(ap_parts)}")
+    if (isinstance(proto, dict) and proto) or (isinstance(subtype, dict) and subtype) \
+            or isinstance(channels, dict):
         lines.append("")
+    return lines
+
+
+def _fmt_count(v: Any) -> str:
+    """정수 카운트 포맷 — 비정수(직렬화 잔재)면 그대로 문자열."""
+    try:
+        return f"{int(v):,}"
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _roaming_section(structured: Dict[str, Any]) -> List[str]:
+    """로밍 시퀀스 표 — Gap/4-way(ms)/밴드 전환 포함(신규 키는 .get() 가드)."""
+    roaming = structured.get("roaming") or {}
+    seqs = roaming.get("sequences") if isinstance(roaming, dict) else None
+    if not isinstance(seqs, list) or not seqs:
+        return []
+    lines = ["## 로밍 (BSS Transition)", ""]
+    lines.append("| # | 시각(Auth) | STA | AP (이전→이후) | Gap(ms) | 4-way(ms) | 밴드 전환 |")
+    lines.append("|---|---|---|---|---|---|---|")
+    for i, s in enumerate(seqs[:20], start=1):
+        if not isinstance(s, dict):
+            continue
+        ts = _format_epoch(s.get("auth_epoch")) or "?"
+        sta = _clean_cell(s.get("sta_name") or s.get("sta") or "?")
+        ap_to = _clean_cell(s.get("ap_name") or s.get("ap") or "?")
+        prev = s.get("prev_ap_name") or ""
+        ap_str = f"{_clean_cell(prev)} → {ap_to}" if prev else ap_to
+        gap = s.get("gap_ms")
+        gap_str = f"{gap}" if gap is not None else "-"
+        fw = s.get("four_way_ms")
+        fw_str = f"{fw}" if isinstance(fw, (int, float)) else "-"
+        bc = s.get("band_change")
+        if bc is True:
+            bc_str = f"{s.get('prev_ap_band') or '?'}→{s.get('ap_band') or '?'}"
+        elif bc is False:
+            bc_str = "동일"
+        else:
+            bc_str = "-"
+        lines.append(
+            f"| {i} | {ts} | {sta} | {ap_str} | {gap_str} | {fw_str} | {bc_str} |"
+        )
+    if len(seqs) > 20:
+        lines.append("")
+        lines.append(f"_(총 {len(seqs)}건 중 앞 20건만 표시)_")
+    lines.append("")
     return lines
 
 
@@ -442,9 +648,12 @@ def build_report_markdown(result: Dict[str, Any]) -> str:
 
     out: List[str] = []
     out.extend(_meta_section(result))
+    # 두괄식 — 판정/최상위 문제를 제목 바로 아래에서 먼저 보여준다.
+    out.extend(_summary_section(diagnosis))
     out.extend(_devices_section(structured))
     out.extend(_health_section(diagnosis))
     out.extend(_ping_section(structured))
+    out.extend(_roaming_section(structured))
     out.extend(_correlations_section(diagnosis))
     out.extend(_issues_table(diagnosis))
     out.extend(_sta_diags_section(diagnosis, structured))

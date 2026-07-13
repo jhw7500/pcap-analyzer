@@ -9,6 +9,8 @@
 """
 from typing import Any
 
+from analyzer.core.thresholds import ROAM_GAP_DANGER_MS
+
 
 def _fmt_int(v: Any, default: str = "-") -> str:
     try:
@@ -123,21 +125,28 @@ def _build_roaming_section(roaming: dict) -> list:
     gaps = [s.get("gap_ms", 0) for s in seqs if s.get("gap_ms") is not None]
     lines = ["", "## 로밍 (BSS Transition)"]
     lines.append(
-        f"- 총 {len(seqs)}회 / 느린 로밍(>100ms) {len(slow)}회 / 실패 {len(failed)}회"
+        f"- 총 {len(seqs)}회 / 느린 로밍(>{ROAM_GAP_DANGER_MS}ms) {len(slow)}회 / "
+        f"실패 {len(failed)}회"
     )
     if gaps:
         lines.append(
             f"- gap_ms: min={min(gaps):.1f} / avg={sum(gaps)/len(gaps):.1f} / "
             f"max={max(gaps):.1f}"
         )
-    # 느린 로밍 top 5 상세 (gap 큰 순)
+    # 느린 로밍 top 5 상세 (gap 큰 순). 4-way/밴드 전환은 신규 키 — 있을 때만 표기.
     for s in sorted(slow or seqs, key=lambda x: -x.get("gap_ms", 0))[:5]:
         ts = s.get("auth_epoch") or s.get("timestamp") or "?"
         sta = s.get("sta_name") or s.get("sta") or "?"
         ap = s.get("ap_name") or s.get("ap") or "?"
         atype = s.get("assoc_type", "?")
         gap = s.get("gap_ms", 0)
-        lines.append(f"  · t={ts} {sta} → {ap} [{atype}], gap={gap:.1f}ms")
+        extra = ""
+        fw = s.get("four_way_ms")
+        if isinstance(fw, (int, float)):
+            extra += f", 4-way={fw:.1f}ms"
+        if s.get("band_change") is True:
+            extra += f", 밴드 전환 {s.get('prev_ap_band') or '?'}→{s.get('ap_band') or '?'}"
+        lines.append(f"  · t={ts} {sta} → {ap} [{atype}], gap={gap:.1f}ms{extra}")
     # STA별 로밍 횟수
     sta_counts: dict = {}
     for s in seqs:
@@ -156,6 +165,20 @@ def _build_ping_section(ping: dict) -> list:
     losses = ping.get("losses", []) or []
     total = len(pairs) + len(losses)
     if total == 0:
+        # ICMP 자체가 없는 캡처 — 섹션을 통째로 생략하면 LLM이 RTT/Loss를
+        # 추측할 여지가 생기므로 '평가 대상 아님'을 명시한다.
+        stats = ping.get("stats", {}) or {}
+        has_icmp = bool(
+            ping.get("observations")
+            or stats.get("req_total_raw") or stats.get("reply_total_raw")
+        )
+        if not has_icmp:
+            return [
+                "",
+                "## Ping (ICMP)",
+                "- 이 캡처에는 ICMP 트래픽이 없어 RTT/Loss는 평가 대상이 아님 "
+                "(측정 불가 — '문제 없음'으로 해석하지 말 것)",
+            ]
         return []
     loss_pct = len(losses) * 100 / total
     lines = ["", "## Ping (ICMP)"]
@@ -241,7 +264,10 @@ def _build_diagnosis_section(diagnosis: Any) -> list:
         )
     scores = diagnosis.get("component_scores") or {}
     if scores:
-        score_str = " / ".join(f"{k}={v}" for k, v in scores.items())
+        # None = 측정 불가(예: ICMP 없는 캡처의 loss) — 숫자와 혼동 않게 표기.
+        score_str = " / ".join(
+            f"{k}={'측정불가' if v is None else v}" for k, v in scores.items()
+        )
         lines.append(f"- 컴포넌트 점수: {score_str}")
     if isinstance(summary, dict) and summary:
         summary_parts = []
@@ -271,6 +297,15 @@ def _build_diagnosis_section(diagnosis: Any) -> list:
                 line = f"- [{sev}] {cat}: {msg}"
                 if action:
                     line += f" → 권장: {action}"
+                # 대표 frame_refs 병기 — SYSTEM의 '수치 인용' 의무를 프레임
+                # 번호 수준까지 가능하게 한다(Wireshark 필터 복붙 가능 형태).
+                refs = it.get("frame_refs")
+                if isinstance(refs, list) and refs:
+                    head = ",".join(str(r) for r in refs[:5])
+                    line += f" [근거 frame.number in {{{head}}}"
+                    if len(refs) > 5:
+                        line += f" 외 {len(refs) - 5}건"
+                    line += "]"
                 lines.append(line)
             else:
                 lines.append(f"- {it}")
@@ -392,6 +427,29 @@ def build_review_prompt(structured: dict) -> str:
     out.append(f"- 캡처 시간: {ov.get('duration_sec', 0)}초")
     out.append(f"- 전체 Retry율: {ov.get('retry_pct', 0)}%")
     out.append(f"- 디바이스: {len(device_stats)}대")
+    # 채널/밴드 — overview.channels(신규 키). 구버전 result엔 없어 생략.
+    channels = ov.get("channels") or {}
+    by_channel = channels.get("by_channel") if isinstance(channels, dict) else None
+    if isinstance(by_channel, list) and by_channel:
+        ch_str = ", ".join(
+            f"CH{c.get('channel', '?')}({c.get('band') or '-'}) {_fmt_int(c.get('frames'))}"
+            for c in by_channel[:5] if isinstance(c, dict)
+        )
+        out.append(f"- 채널/밴드: {ch_str}")
+    # 평균/피크 throughput — per_second.bytes(신규 필드) 기반. 없으면 생략.
+    per_sec = structured.get("per_second") or {}
+    timeline = per_sec.get("timeline") if isinstance(per_sec, dict) else None
+    if isinstance(timeline, list):
+        byte_vals = [
+            e.get("bytes") for e in timeline
+            if isinstance(e, dict) and isinstance(e.get("bytes"), (int, float))
+        ]
+        if byte_vals:
+            avg_mbps = sum(byte_vals) * 8 / 1e6 / len(byte_vals)
+            peak_mbps = max(byte_vals) * 8 / 1e6
+            out.append(
+                f"- 처리량: 평균 {avg_mbps:.2f} Mbps / 피크 {peak_mbps:.2f} Mbps"
+            )
     # 프레임 타입 분포
     type_dist = ov.get("type_dist") or {}
     if type_dist:
@@ -434,7 +492,10 @@ def build_review_prompt(structured: dict) -> str:
             "(`#### C{n}`)에 대해 SYSTEM 규칙의 `### C{n}: ...` 헤더 형식으로 "
             "(가능한 가설 / 대안 해석 / 추가 검증)을 작성하세요."
         )
-    out.append("1. **가장 심각한 문제 3개** (우선순위 순) — 각각 근거 데이터를 인용")
+    out.append(
+        "1. **가장 심각한 문제 (최대 3개, 우선순위 순)** — 각각 근거 데이터를 인용. "
+        "중대 문제가 없으면 \"중대 문제 없음\"이라고 명시"
+    )
     out.append("2. **원인 추정** — PHY/MAC/네트워크 어느 계층 문제인지, 측정치 기반으로")
     out.append(
         "3. **구체적 조치 방안** — AP 설정(채널/대역폭/Beacon/MinBasicRate 등), "

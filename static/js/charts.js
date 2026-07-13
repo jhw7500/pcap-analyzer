@@ -278,6 +278,30 @@
         }).join('');
     }
 
+    /* ── 채널/밴드 테이블 ── 구버전 JSON엔 overview.channels가 없어 카드 숨김 유지 */
+    const channelCard = document.getElementById('channel-card');
+    const channels = ov.channels || {};
+    const byChannel = channels.by_channel || [];
+    if (channelCard && byChannel.length > 0) {
+        channelCard.style.display = '';
+        const chTable = document.querySelector('#channel-table tbody');
+        if (chTable) {
+            chTable.innerHTML = byChannel.map(c =>
+                `<tr class="border-b border-gray-700/50">
+                    <td class="py-2 font-mono">CH ${c.channel != null ? c.channel : '?'}</td>
+                    <td class="py-2">${c.band || '-'}</td>
+                    <td class="py-2 text-gray-400">${c.freq} MHz</td>
+                    <td class="py-2 text-right">${(c.frames || 0).toLocaleString()}</td>
+                </tr>`
+            ).join('');
+        }
+        const apLine = document.getElementById('channel-ap-line');
+        const apChannels = channels.ap_channels || {};
+        const apStrs = Object.values(apChannels).map(a =>
+            `${a.name}: CH ${a.channel != null ? a.channel : '?'} (${a.band || '-'})`);
+        if (apLine && apStrs.length > 0) apLine.textContent = 'AP 채널 (beacon 기준) — ' + apStrs.join(' · ');
+    }
+
     /* ── 로밍 Gap 바 차트 ── */
     const roaming = DATA.roaming || {};
     const roamingChartEl = document.getElementById('chart-roaming-gap');
@@ -329,6 +353,7 @@
                 const ms = String(Math.floor((d.getMilliseconds()))).padStart(3, '0');
                 return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${ms}`;
             };
+            // 4-way(ms): 구버전 JSON엔 four_way_ms 키가 없음 — null/undefined 모두 '-'
             rTable.innerHTML = seqs.map((s, i) =>
                 `<tr class="border-b border-gray-700/50 ${s.is_slow ? 'text-red-400' : ''}">
                     <td class="py-1">${i + 1}</td>
@@ -336,6 +361,7 @@
                     <td class="py-1 font-mono text-xs">${s.sta_name}</td>
                     <td class="py-1 font-mono text-xs">${roamAp(s)}</td>
                     <td class="py-1 text-right">${s.gap_ms.toFixed(1)}</td>
+                    <td class="py-1 text-right">${typeof s.four_way_ms === 'number' ? s.four_way_ms.toFixed(1) : '-'}</td>
                     <td class="py-1">${s.assoc_type}</td>
                 </tr>`
             ).join('');
@@ -1173,8 +1199,15 @@
             <p class="text-xs text-gray-500 mt-1">네트워크 건강도</p>`;
     }
 
-    // 지표별 점수 바
+    // 지표별 점수 바 — score가 null(측정 불가, 예: ICMP 없는 캡처의 loss)이면
+    // 게이지 대신 안내 문구. 구버전 result(숫자 score)는 기존 그대로 렌더.
     function scoreBar(label, score, icon) {
+        if (score == null) {
+            return `<div class="flex items-center gap-3">
+                <span class="text-xs text-gray-400 w-20">${icon} ${label}</span>
+                <div class="flex-1 text-xs text-gray-500 italic">측정 불가 (데이터 없음)</div>
+            </div>`;
+        }
         const c = score >= 80 ? '#10b981' : score >= 60 ? '#f59e0b' : '#ef4444';
         return `<div class="flex items-center gap-3">
             <span class="text-xs text-gray-400 w-20">${icon} ${label}</span>
@@ -1187,10 +1220,13 @@
     const barsEl = document.getElementById('health-bars');
     if (barsEl) {
         const sm = diag.summary || {};
+        const lossSub = (compScores.loss == null)
+            ? ''
+            : `<p class="text-xs text-gray-500 ml-24">Loss ${sm.loss_pct || 0}%</p>`;
         barsEl.innerHTML = [
-            scoreBar('Retry', compScores.retry || 0, '\u{1F504}') + `<p class="text-xs text-gray-500 ml-24">전체 ${sm.retry_pct || 0}%</p>`,
-            scoreBar('Ping Loss', compScores.loss || 0, '\u{1F4E1}') + `<p class="text-xs text-gray-500 ml-24">Loss ${sm.loss_pct || 0}%</p>`,
-            scoreBar('로밍', compScores.roaming || 0, '\u{1F6DC}') + `<p class="text-xs text-gray-500 ml-24">총 ${sm.roaming_total || 0}회, 느린 ${sm.roaming_slow || 0}회</p>`,
+            scoreBar('Retry', compScores.retry ?? 0, '\u{1F504}') + `<p class="text-xs text-gray-500 ml-24">전체 ${sm.retry_pct || 0}%</p>`,
+            scoreBar('Ping Loss', compScores.loss ?? null, '\u{1F4E1}') + lossSub,
+            scoreBar('로밍', compScores.roaming ?? 0, '\u{1F6DC}') + `<p class="text-xs text-gray-500 ml-24">총 ${sm.roaming_total || 0}회, 느린 ${sm.roaming_slow || 0}회</p>`,
         ].join('');
     }
 

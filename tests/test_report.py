@@ -67,6 +67,22 @@ def test_health_section_omitted_when_missing():
     assert "## 네트워크 건강도" not in md
 
 
+def test_health_section_ping_unavailable_marked():
+    """loss 컴포넌트가 None(ICMP 없는 캡처)이면 측정 불가로 명시된다."""
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {
+            "health": {"score": 50, "grade": "위험"},
+            "component_scores": {"retry": 0, "loss": None, "roaming": 100},
+            "summary": {"retry_pct": 20, "loss_pct": None},
+        },
+    }))
+    assert "loss=측정 불가" in md
+    assert "- Ping: 측정 불가 — ICMP 트래픽 없음" in md
+    # summary의 loss_pct None은 요약 라인에서 생략된다
+    assert "Ping Loss None%" not in md
+    assert "Ping Loss 0%" not in md
+
+
 # ── 종합 결론(correlations) 섹션 ───────────────────────────────────────────
 
 def test_correlations_section_with_signals_labels():
@@ -176,10 +192,141 @@ def test_sta_diags_section_includes_metrics_and_issues():
     }))
     assert "### STA1 `AA:BB`" in md
     assert "**72**/100" in md
-    assert "Retry 16.6" in md
-    assert "RSSI 평균(dBm) -62" in md
+    # 단위 병기 — %/회 누락 없이 표기
+    assert "Retry 16.6%" in md
+    assert "RSSI 평균 -62dBm" in md
+    assert "로밍 18회" in md
+    assert "느린 로밍 3회" in md
     assert "[high] Retry율 16.6%" in md
     assert "조치: TX power" in md
+
+
+# ── 요약(Executive Summary) 섹션 ───────────────────────────────────────────
+
+def test_summary_section_first_with_verdict_and_top_issues():
+    """제목 바로 아래 '## 요약' — 건강도 판정 + severity 내림차순 top3."""
+    md = build_report_markdown(_result(structured={
+        "overview": {"total_frames": 1000, "duration_sec": 60,
+                     "devices": [{"name": "AP1", "mac": "aa", "role": "AP",
+                                  "count": 10}]},
+        "diagnosis": {
+            "health": {"score": 62, "grade": "주의"},
+            "issues": [
+                {"severity": "medium", "category": "지연",
+                 "msg": "지연 구간 2건", "action": "상관관계 확인"},
+                {"severity": "high", "category": "STA1",
+                 "msg": "Retry율 18.3%", "action": "TX power 확인"},
+                {"severity": "low", "category": "기타", "msg": "x", "action": "y"},
+                {"severity": "high", "category": "STA2",
+                 "msg": "신호 급강하 3건", "action": "커버리지 점검"},
+            ],
+        },
+    }))
+    assert "## 요약" in md
+    # 두괄식 — 요약이 디바이스/건강도 섹션보다 앞
+    assert md.index("## 요약") < md.index("## 디바이스 / 프레임 분포")
+    assert md.index("## 요약") < md.index("## 네트워크 건강도")
+    assert "**건강도 62/100 (주의)**" in md
+    assert "이슈 4건" in md and "high 2건" in md and "medium 1건" in md
+    # top3 — severity 내림차순: high 2건 + medium 1건, low는 잘림
+    summary_part = md[md.index("## 요약"):md.index("## 디바이스")]
+    assert "[high] STA1: Retry율 18.3% — 조치: TX power 확인" in summary_part
+    assert "[high] STA2: 신호 급강하 3건" in summary_part
+    assert "[medium] 지연: 지연 구간 2건" in summary_part
+    assert "[low]" not in summary_part
+
+
+def test_summary_section_no_issues_says_clean():
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {"health": {"score": 95, "grade": "양호"}, "issues": []},
+    }))
+    assert "**건강도 95/100 (양호)** — 중대 문제 없음" in md
+
+
+def test_summary_section_marks_unmeasurable_components():
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {
+            "health": {"score": 80, "grade": "양호"},
+            "component_scores": {"retry": 90, "loss": None, "roaming": 100},
+            "issues": [],
+        },
+    }))
+    summary_part = md[md.index("## 요약"):md.index("## 네트워크 건강도")]
+    assert "측정 불가: Ping Loss (ICMP 트래픽 없음)" in summary_part
+
+
+def test_summary_section_omitted_for_legacy_result():
+    """diagnosis.health가 없는 구버전 JSON — 섹션 자체 생략(하위호환)."""
+    md = build_report_markdown(_result())
+    assert "## 요약" not in md
+
+
+# ── 진단 근거(frame_refs) 병기 ─────────────────────────────────────────────
+
+def test_issues_table_includes_evidence_column():
+    """이슈 표에 Wireshark 필터 복붙 가능한 대표 frame # + 시간 구간."""
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {"issues": [{
+            "severity": "high", "category": "Retry",
+            "msg": "retry 폭증", "action": "채널 확인",
+            "frame_refs": [446, 447, 450, 460, 470, 500, 600],
+            "time_window": {"start_epoch": 1700000000, "end_epoch": 1700000060},
+        }]},
+    }))
+    assert "| Severity | Category | 문제 | 조치 | 근거 |" in md
+    assert "`frame.number in {446,447,450,460,470}`" in md
+    assert "외 2건" in md
+    assert "2023-11-14 22:13:20 UTC ~ 2023-11-14 22:14:20 UTC" in md
+
+
+def test_issues_table_evidence_dash_when_no_refs():
+    """frame_refs 없는(구버전) 이슈는 근거 열이 '-'."""
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {"issues": [{
+            "severity": "high", "category": "X", "msg": "m", "action": "a",
+        }]},
+    }))
+    assert "| high | X | m | a | - |" in md
+
+
+def test_sta_issue_evidence_line_rendered():
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {"sta_diags": [{
+            "name": "STA1", "mac": "AA", "score": 60,
+            "issues": [{
+                "severity": "high", "msg": "Retry율 18.3%", "action": "확인",
+                "frame_refs": [43, 58, 68],
+                "time_window": {"start_epoch": 1700000000,
+                                "end_epoch": 1700000005},
+            }],
+        }]},
+    }))
+    assert "근거: `frame.number in {43,58,68}`" in md
+
+
+def test_sta_issue_no_evidence_line_when_refs_missing():
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {"sta_diags": [{
+            "name": "STA1", "mac": "AA", "score": 60,
+            "issues": [{"severity": "high", "msg": "m", "action": "a"}],
+        }]},
+    }))
+    assert "근거:" not in md
+
+
+# ── analyzed_at 시간대 표기 ────────────────────────────────────────────────
+
+def test_analyzed_at_without_tz_labelled_host_local():
+    """시간대 없는 구버전 analyzed_at — '(호스트 로컬 시각)' 라벨."""
+    md = build_report_markdown(_result())
+    assert "분석 시각 `2026-05-28 06:00:00` (호스트 로컬 시각)" in md
+
+
+def test_analyzed_at_with_tz_rendered_as_is():
+    """신규 pipeline(%Z 포함) 값은 라벨 없이 그대로."""
+    md = build_report_markdown(_result(analyzed_at="2026-05-28 06:00:00 KST"))
+    assert "분석 시각 `2026-05-28 06:00:00 KST`" in md
+    assert "호스트 로컬 시각" not in md
 
 
 # ── AI 가설 섹션 ───────────────────────────────────────────────────────────
