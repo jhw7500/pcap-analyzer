@@ -1,6 +1,7 @@
 """AI 프로바이더 — Claude API, Claude CLI(구독), OpenAI API 호출."""
 import asyncio
 import shutil
+import tempfile
 
 import httpx
 
@@ -38,7 +39,7 @@ async def _call_claude_cli(model: str, prompt: str, system: str) -> str:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd="/tmp",  # 프로젝트 CLAUDE.md 자동 로드 회피
+            cwd=tempfile.gettempdir(),  # 프로젝트 CLAUDE.md 자동 로드 회피 (Windows 호환 임시 디렉토리)
         )
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(input=prompt.encode("utf-8")),

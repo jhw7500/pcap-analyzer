@@ -72,14 +72,14 @@ async def index(request: Request):
     analyses = []
     for f in sorted(data_dir.glob("*.json"), reverse=True):
         try:
-            meta = json.loads(f.read_text())
+            meta = json.loads(f.read_text(encoding="utf-8"))
             analyses.append({
                 "id": meta.get("id", f.stem),
                 "pcap_name": meta.get("pcap_name", "?"),
                 "frame_count": meta.get("frame_count", 0),
                 "analyzed_at": meta.get("analyzed_at", "?"),
             })
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             continue
     return templates.TemplateResponse(request, "index.html", {
         "tshark": tshark,
@@ -208,7 +208,11 @@ async def upload_pcap(
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, _run)
     finally:
-        Path(tmp.name).unlink(missing_ok=True)
+        try:
+            Path(tmp.name).unlink(missing_ok=True)
+        except OSError:
+            # Windows: 백신/인덱서가 임시파일을 잠그면 삭제가 실패할 수 있음 — 분석 결과는 보존
+            pass
         _set_progress(job_id, "완료", 100, active=False)
 
     if "error" in result:
@@ -224,7 +228,7 @@ async def upload_pcap(
     analysis_id = result["id"]
     data_dir = config.ensure_data_dir()
     result_path = data_dir / f"{analysis_id}.json"
-    result_path.write_text(json.dumps(result, ensure_ascii=False, default=str))
+    result_path.write_text(json.dumps(result, ensure_ascii=False, default=str), encoding="utf-8")
 
     return JSONResponse({
         "id": analysis_id,

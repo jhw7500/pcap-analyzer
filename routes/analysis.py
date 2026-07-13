@@ -35,8 +35,8 @@ def _load_result(analysis_id: str) -> Optional[dict[str, Any]]:
     if path is None or not path.exists():
         return None
     try:
-        return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
         return None
 
 
@@ -53,8 +53,8 @@ def _load_result_checked(
             error_payload(ErrorCode.ANALYSIS_NOT_FOUND), status_code=404
         )
     try:
-        return json.loads(path.read_text()), None
-    except (json.JSONDecodeError, OSError):
+        return json.loads(path.read_text(encoding="utf-8")), None
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
         return None, JSONResponse(
             error_payload(ErrorCode.ANALYSIS_NOT_FOUND), status_code=404
         )

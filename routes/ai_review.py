@@ -17,7 +17,7 @@ def _load_structured(analysis_id: str):
         return None, JSONResponse(error_payload(ErrorCode.INVALID_ANALYSIS_ID), status_code=400)
     if not path.exists():
         return None, JSONResponse(error_payload(ErrorCode.ANALYSIS_NOT_FOUND), status_code=404)
-    return json.loads(path.read_text()), None
+    return json.loads(path.read_text(encoding="utf-8")), None
 
 
 @router.get("/api/ai/prompt/{analysis_id}")
@@ -55,7 +55,7 @@ async def ai_review(analysis_id: str):
     if not path.exists():
         return JSONResponse(error_payload(ErrorCode.ANALYSIS_NOT_FOUND), status_code=404)
 
-    result = json.loads(path.read_text())
+    result = json.loads(path.read_text(encoding="utf-8"))
     structured = result.get("structured", {})
 
     review_result = await run_review(structured)
@@ -66,6 +66,6 @@ async def ai_review(analysis_id: str):
 
     # 리뷰 결과를 분석 파일에 저장
     result["ai_review"] = review_result.get("review", "")
-    path.write_text(json.dumps(result, ensure_ascii=False, default=str))
+    path.write_text(json.dumps(result, ensure_ascii=False, default=str), encoding="utf-8")
 
     return JSONResponse({"review": review_result.get("review", ""), "status": "ok"})
