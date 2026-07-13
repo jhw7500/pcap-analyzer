@@ -1,0 +1,6 @@
+# Windows 배치는 CRLF 고정, 셸 스크립트는 LF 고정 — 체크아웃/압축 해제 환경과 무관하게 보존
+*.bat text eol=crlf
+*.sh text eol=lf
+*.pcap binary
+*.pcapng binary
+*.cap binary

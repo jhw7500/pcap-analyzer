@@ -1,14 +1,16 @@
-﻿@echo off
-REM pcap-analyzer 실행 (Windows, 포그라운드)
+@echo off
+REM pcap-analyzer runner (Windows, foreground)
 REM Usage: run.bat
+REM NOTE: keep this file ASCII-only. cmd.exe misparses batch lines that
+REM       contain multibyte (Korean) characters, eating parts of lines.
 chcp 65001 >nul 2>&1
 setlocal enabledelayedexpansion
 
-REM 스크립트 위치를 cwd로
+REM cd to script location
 cd /d "%~dp0"
 
 if not exist .venv (
-    echo ERROR: .venv가 없습니다. install.bat를 먼저 실행하세요.
+    echo ERROR: .venv not found. Run install.bat first.
     exit /b 1
 )
 
@@ -20,7 +22,7 @@ if exist .env (
     )
 )
 
-REM 배포 실행은 reload off
+REM production run: reload off
 set PCAP_DEV_RELOAD=false
 
 set "VERSION=unknown"
@@ -38,11 +40,11 @@ for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /c:"IPv4"') do (
 )
 
 echo -----------------------------------------
-echo  pcap-analyzer v!VERSION!
-echo  접속 URL:
+echo  pcap-analyzer !VERSION!
+echo  URL:
 echo    http://localhost:!PCAP_PORT!
 if defined LAN_IP echo    http://!LAN_IP!:!PCAP_PORT!  ^(LAN^)
-echo  종료: Ctrl+C
+echo  Stop: Ctrl+C
 echo -----------------------------------------
 
 python app.py
