@@ -85,8 +85,12 @@ def max_upload_size() -> int:
 
 
 def is_offline_assets() -> bool:
-    """CDN 대신 static/vendor/의 로컬 에셋을 사용할지 여부."""
-    return get("ui_offline_assets", "").lower() == "true"
+    """CDN 대신 static/vendor/의 로컬 에셋을 사용할지 여부.
+
+    기본값 True (폐쇄망/오프라인 안전). 명시적으로 'false'로 지정한 경우에만
+    CDN(online) 모드로 동작한다. (부재/빈값/그 외 값은 모두 offline)
+    """
+    return get("ui_offline_assets", "true").strip().lower() != "false"
 
 
 def mask_secret(value: str) -> str:
