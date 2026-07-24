@@ -19,3 +19,13 @@ exclude_lines = [
     "if __name__",
     "pragma: no cover",
 ]
+
+[tool.ruff]
+# CI(공유 automation)가 `pip install ruff`로 버전을 고정하지 않아, ruff 기본 규칙이
+# 버전업으로 확장되면 리포 전역 스타일 지적(typing.Dict, import 정렬 등)이 갑자기 터진다.
+# ruff의 기존 기본 select(E4/E7/E9/F)를 여기 명시 고정해 ruff 버전과 무관하게 결정론적으로
+# 동작시킨다. 규칙 확대(I/UP 등)는 리포 전역 정리와 함께 별도로 논의해 추가한다.
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

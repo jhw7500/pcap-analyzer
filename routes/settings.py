@@ -72,6 +72,8 @@ async def save_settings(
     if ai_model:
         config.set_value("ai_model", ai_model)
     config.set_value("ai_auto_review", ai_auto_review)
-    config.set_value("ui_offline_assets", ui_offline_assets)
+    # 체크박스는 체크 시 'true'만 전송하고 해제 시 아무것도 안 보낸다(→ '').
+    # offline 기본값 정책상, 해제를 명시적 'false'로 저장해야 CDN(online)으로 전환된다.
+    config.set_value("ui_offline_assets", "true" if ui_offline_assets == "true" else "false")
     config.set_value("max_upload_mb", max_upload_mb.strip())
     return RedirectResponse(_safe_next(next), status_code=303)

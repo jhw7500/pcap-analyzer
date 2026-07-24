@@ -1097,6 +1097,39 @@
     });
     if (fullList.length > 0) renderPingFullTable();
 
+    // 장치별 연속 실패 구간 표 (백엔드 ping.loss_streaks — 구버전 result엔 없어 빈 표+재분석 안내)
+    const streakTbody = document.querySelector('#ping-streak-table tbody');
+    if (streakTbody) {
+        const streaks = ping.loss_streaks || [];
+        const fmtT = (str, epoch) => str || (typeof epoch === 'number'
+            ? new Date(epoch * 1000).toLocaleTimeString('en-GB') : '-');
+        if (streaks.length === 0) {
+            const hint = ping.loss_streaks === undefined
+                ? '이 분석엔 장치별 구간 데이터가 없습니다 (재분석 시 표시)'
+                : '장치별 연속 실패 구간 없음 (산발적 발생)';
+            streakTbody.innerHTML = `<tr><td colspan="6" class="text-gray-500 text-center py-6">${hint}</td></tr>`;
+        } else {
+            streakTbody.innerHTML = streaks.map(s => {
+                const shown = s.frame_refs || [];
+                const refs = shown.map(n => '#' + n).join(' ');
+                // count(연속 총건)보다 표시된 근거가 적으면(20건 cap 또는 seq_gap=번호없음) 생략 수를 +N으로.
+                const moreN = Math.max(0, (s.count || 0) - shown.length);
+                const refsCell = (refs ? escapeHtml(refs) : '')
+                    + (moreN > 0 ? ` <span class="text-gray-600">…+${moreN}</span>` : '');
+                const seqRange = (s.first_seq != null && s.last_seq != null)
+                    ? `${escapeHtml(String(s.first_seq))} ~ ${escapeHtml(String(s.last_seq))}` : '-';
+                return `<tr class="border-b border-gray-700/30 text-red-400 bg-red-900/10 hover:bg-gray-700/30">
+                    <td class="py-1 px-1 text-gray-200">${escapeHtml(String(s.device ?? '?'))}</td>
+                    <td class="py-1 px-1">${escapeHtml(fmtT(s.start_time, s.start_epoch))} ~ ${escapeHtml(fmtT(s.end_time, s.end_epoch))}</td>
+                    <td class="py-1 px-1 text-right font-bold">${s.count}건</td>
+                    <td class="py-1 px-1 text-right">${Number(s.duration_sec || 0).toFixed(1)}초</td>
+                    <td class="py-1 px-1">${seqRange}</td>
+                    <td class="py-1 px-1 text-gray-400 truncate max-w-[220px]" title="${escapeHtml(refs)}">${refsCell || '-'}</td>
+                </tr>`;
+            }).join('');
+        }
+    }
+
     /* ── 종합 진단 — 고급 UI ── */
     const diag = DATA.diagnosis || {};
     const health = diag.health || {};

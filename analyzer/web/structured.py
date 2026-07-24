@@ -9,7 +9,11 @@ from typing import Any, Dict, List, Optional
 
 from ..core.channels import ap_channel_map, freq_to_band, freq_to_channel, parse_freq
 from ..core.models import Frame
-from ..core.ping_matching import PING_MATCH_WINDOW_SEC, build_ping_matches
+from ..core.ping_matching import (
+    PING_MATCH_WINDOW_SEC,
+    build_ping_matches,
+    find_time_streaks,
+)
 from ..core.thresholds import (
     LOSS_DANGER_PCT,
     RETRY_DANGER_PCT,
@@ -213,6 +217,77 @@ def _structured_signal(
     return result
 
 
+def _ping_ip_to_name(full_list: List[Dict[str, Any]]) -> Dict[str, str]:
+    """full_list에서 IP→장치명 매핑을 학습.
+
+    ping의 다수(역방향·seq-gap 추정손실)는 src/dst MAC이 비어 장치를 못 가른다.
+    src/dst IP는 항상 있으므로, MAC(=장치명 문자열, 예 "STA1(aa)")이 있는 항목에서
+    IP→장치명을 학습해 IP로 식별한다.
+    """
+    ip_to_name: Dict[str, str] = {}
+    for p in full_list:
+        if p.get("src") and p.get("src_mac"):
+            ip_to_name[p["src"]] = p["src_mac"]
+        if p.get("dst") and p.get("dst_mac"):
+            ip_to_name[p["dst"]] = p["dst_mac"]
+    return ip_to_name
+
+
+def _ping_sta_of(p: Dict[str, Any], ip_to_name: Dict[str, str]) -> str:
+    """ping 항목의 상대 장치(STA) 식별 — src/dst 중 STA로 매핑되는 IP의 장치명.
+
+    STA 매핑 실패 시 AP가 아닌 IP를 STA 후보로(IP 그대로 표시), 끝내 없으면 '?'.
+    → 반환 키에 IP/'?' 가 섞일 수 있다(전체 집계엔 포함, 장치명 hover에선 빠짐).
+    """
+    for ip in (p.get("dst"), p.get("src")):
+        dev = ip_to_name.get(ip)
+        if dev and dev.startswith("STA"):
+            return dev
+    for ip in (p.get("dst"), p.get("src")):
+        if ip and not ip_to_name.get(ip, "").startswith("AP"):
+            return ip
+    return "?"
+
+
+def _ping_loss_streaks(full_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """장치별 연속 Loss 구간 탐지 — 특정 장치가 연속으로 실패한 구간을 따로 낸다.
+
+    full_list에서 status=loss/loss_gap 항목만 장치(_ping_sta_of)별로 모아, 각 장치
+    내부에서 시간순으로 인접 loss 간격 <= LOSS_STREAK_GAP_SEC 로 이어지고 길이
+    >= LOSS_STREAK_MIN_LEN 인 run을 하나의 구간으로 낸다. 전역 시간구간(ping_loss.py
+    텍스트)과 달리 장치를 섞지 않아 "어느 장치가 언제부터 연속 실패했는지"를 준다.
+    """
+    ip_to_name = _ping_ip_to_name(full_list)
+    by_dev: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for p in full_list:
+        if p.get("status") not in ("loss", "loss_gap"):
+            continue
+        if not isinstance(p.get("epoch"), (int, float)):
+            continue
+        by_dev[_ping_sta_of(p, ip_to_name)].append(p)
+
+    streaks: List[Dict[str, Any]] = []
+    for dev, items in by_dev.items():
+        items.sort(key=lambda x: x["epoch"])
+        for s, e in find_time_streaks([x["epoch"] for x in items]):
+            seg = items[s:e + 1]
+            refs = [x["req_num"] for x in seg if x.get("req_num") is not None]
+            streaks.append({
+                "device": dev,
+                "start_epoch": items[s]["epoch"],
+                "end_epoch": items[e]["epoch"],
+                "start_time": seg[0].get("req_time"),
+                "end_time": seg[-1].get("req_time"),
+                "count": e - s + 1,
+                "duration_sec": round(items[e]["epoch"] - items[s]["epoch"], 1),
+                "first_seq": seg[0].get("seq"),
+                "last_seq": seg[-1].get("seq"),
+                "frame_refs": refs[:20],
+            })
+    streaks.sort(key=lambda x: (x["start_epoch"], str(x["device"])))
+    return streaks
+
+
 def _ping_per_sec(full_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """ping outcome을 초 단위로 묶어 전체/장치별 loss%·평균 RTT를 집계한다.
 
@@ -228,29 +303,11 @@ def _ping_per_sec(full_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     def _blank() -> Dict[str, Any]:
         return {"loss": 0, "matched": 0, "rtt_sum": 0.0, "rtt_count": 0}
 
-    # ping의 다수(역방향·seq-gap 추정손실)는 src/dst MAC이 비어 장치를 못 가른다.
-    # src/dst IP는 항상 있으므로, MAC이 있는 항목에서 IP→장치명을 학습해 IP로 식별한다.
-    # (값은 MAC이 아니라 장치명 문자열 — 예: "STA1(aa)")
-    ip_to_name: Dict[str, str] = {}
-    for p in full_list:
-        if p.get("src") and p.get("src_mac"):
-            ip_to_name[p["src"]] = p["src_mac"]
-        if p.get("dst") and p.get("dst_mac"):
-            ip_to_name[p["dst"]] = p["dst_mac"]
+    # 장치 식별은 _ping_ip_to_name/_ping_sta_of로 단일화 (장치별 streak 탐지와 동일 기준).
+    ip_to_name = _ping_ip_to_name(full_list)
 
     def _sta_of(p: Dict[str, Any]) -> str:
-        # ping 상대 STA = src/dst 중 STA로 매핑되는 IP의 장치명.
-        for ip in (p.get("dst"), p.get("src")):
-            dev = ip_to_name.get(ip)
-            if dev and dev.startswith("STA"):
-                return dev
-        # STA 매핑 실패 시 AP가 아닌 IP를 STA 후보로(IP 그대로 표시), 끝내 없으면 '?'.
-        # → by_dev 키에 IP/'?' 가 섞일 수 있다. 프론트는 staNames/apNames(장치명)만
-        #   hover에 펼치므로 IP/'?' 키는 hover에서 빠진다(전체 집계 agg에는 포함).
-        for ip in (p.get("dst"), p.get("src")):
-            if ip and not ip_to_name.get(ip, "").startswith("AP"):
-                return ip
-        return "?"
+        return _ping_sta_of(p, ip_to_name)
 
     secs: Dict[int, Dict[str, Any]] = {}
     for p in full_list:
@@ -302,6 +359,7 @@ def _structured_ping(
 ) -> Dict[str, Any]:
     ping = build_ping_matches(frames, roles, PING_MATCH_WINDOW_SEC)
     ping["timeline"] = _ping_per_sec(ping.get("full_list", []))
+    ping["loss_streaks"] = _ping_loss_streaks(ping.get("full_list", []))
     return ping
 
 
