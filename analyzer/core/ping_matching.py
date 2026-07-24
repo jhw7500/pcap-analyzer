@@ -29,6 +29,37 @@ PING_MATCH_WINDOW_SEC = 30.0
 # seq gap 검출 시 wrap-around나 ident 충돌로 인한 거대한 점프는 무시
 _MAX_REASONABLE_GAP = 1000
 
+# 연속 Loss 구간(streak) 판정 — 인접 loss 간격이 이 값 이하로 이어지고 길이가
+# LOSS_STREAK_MIN_LEN 이상이면 하나의 "연속 실패 구간"으로 본다. 전역(ping_loss.py)·
+# 장치별(structured.py) 탐지가 이 상수와 find_time_streaks를 공유해 기준을 단일화한다.
+LOSS_STREAK_GAP_SEC = 2.0
+LOSS_STREAK_MIN_LEN = 2
+
+
+def find_time_streaks(
+    epochs: List[float],
+    gap_sec: float = LOSS_STREAK_GAP_SEC,
+    min_len: int = LOSS_STREAK_MIN_LEN,
+) -> List[Tuple[int, int]]:
+    """오름차순 정렬된 epoch 리스트에서 연속 구간의 (시작index, 끝index) 목록 반환.
+
+    인접 원소 간격이 gap_sec 이하로 이어지는 run 중 길이가 min_len 이상인 것만
+    포함한다(inclusive 인덱스). 입력은 **오름차순 정렬 전제** — 호출부가 보장한다.
+    """
+    streaks: List[Tuple[int, int]] = []
+    n = len(epochs)
+    if n == 0:
+        return streaks
+    start = 0
+    for j in range(1, n):
+        if epochs[j] - epochs[j - 1] > gap_sec:
+            if j - start >= min_len:
+                streaks.append((start, j - 1))
+            start = j
+    if n - start >= min_len:
+        streaks.append((start, n - 1))
+    return streaks
+
 
 def build_ping_stats(
     pairs: List[Dict[str, Any]],

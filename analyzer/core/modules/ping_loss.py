@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, List
 from ..models import Frame, AnalysisSection
-from ..ping_matching import build_ping_matches
+from ..ping_matching import build_ping_matches, find_time_streaks
 from ..thresholds import RETRY_DANGER_PCT, RSSI_DANGER_DBM
 
 
@@ -103,20 +103,11 @@ def analyze(
             f"{diag['cause']:>20} | {diag['retry_pct']:>5.0f}% | {rssi_str:>5}"
         )
 
-    # 연속 loss 구간
+    # 연속 loss 구간 (전역 — 시간 기준, 장치 혼합). losses는 epoch 오름차순.
     lines.append("")
-    lines.append("연속 Loss 구간:")
+    lines.append("연속 Loss 구간 (전역):")
     if len(losses) >= 2:
-        streaks = []
-        streak_start = 0
-        for j in range(1, len(losses)):
-            if losses[j].epoch - losses[j - 1].epoch > 2.0:
-                if j - streak_start >= 2:
-                    streaks.append((streak_start, j - 1))
-                streak_start = j
-        if len(losses) - streak_start >= 2:
-            streaks.append((streak_start, len(losses) - 1))
-
+        streaks = find_time_streaks([f.epoch for f in losses])
         if streaks:
             for s, e in streaks:
                 dur = losses[e].epoch - losses[s].epoch
@@ -129,6 +120,27 @@ def analyze(
             lines.append("  연속 loss 구간 없음 (산발적 발생)")
     else:
         lines.append("  단발성 loss 1건")
+
+    # 장치별 연속 loss 구간 — 특정 장치(src→dst 흐름)가 연속 실패한 구간을 분리 표시.
+    # 전역 구간은 서로 다른 장치의 loss가 시간상 가까우면 한 구간으로 섞이므로, 흐름별로
+    # 따로 묶어 "어느 장치가 언제부터 연속 실패했는지"를 명확히 한다.
+    lines.append("")
+    lines.append("장치별 연속 Loss 구간:")
+    by_flow: Dict[str, List[Frame]] = {}
+    for f in losses:
+        by_flow.setdefault(f"{f.ip_src}→{f.ip_dst}", []).append(f)
+    dev_streak_found = False
+    for flow in sorted(by_flow):
+        fl = sorted(by_flow[flow], key=lambda x: x.epoch)
+        for s, e in find_time_streaks([x.epoch for x in fl]):
+            dev_streak_found = True
+            dur = fl[e].epoch - fl[s].epoch
+            lines.append(
+                f"  {flow}: {fl[s].time_short} ~ {fl[e].time_short} "
+                f"({e - s + 1}건, {dur:.1f}초) 근거: #{fl[s].number}~#{fl[e].number}"
+            )
+    if not dev_streak_found:
+        lines.append("  장치별 연속 loss 구간 없음")
 
     lines.append("")
     lines.append("원인별 분포:")

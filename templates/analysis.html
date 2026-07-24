@@ -118,6 +118,7 @@
                 <span class="text-gray-500">오버레이:</span>
                 <label class="flex items-center gap-1 cursor-pointer hover:text-white text-gray-300"><input type="checkbox" data-overlay="roaming" class="timeline-overlay accent-orange-500"> 로밍 이벤트(점선) <span class="text-gray-500">— 상세는 로밍 탭</span></label>
                 <label class="flex items-center gap-1 cursor-pointer hover:text-white text-gray-300"><input type="checkbox" data-overlay="zone"    checked class="timeline-overlay accent-red-500">    이상 구간(빨간 배경)</label>
+                <label class="flex items-center gap-1 cursor-pointer hover:text-white text-gray-300"><input type="checkbox" data-overlay="lossrun" checked class="timeline-overlay accent-purple-500"> 연속 손실 구간(보라 배경) <span class="text-gray-500">— 장치별</span></label>
                 <label class="flex items-center gap-1 cursor-pointer hover:text-white text-gray-300"><input type="checkbox" data-overlay="cliff"   checked class="timeline-overlay accent-orange-500"> RSSI Cliff(▼)</label>
             </div>
             <div class="flex items-center gap-2 text-xs">
@@ -234,6 +235,26 @@
         <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
             <h3 class="text-sm font-semibold text-gray-400 mb-2">Ping 통계</h3>
             <div id="ping-stats" class="text-sm space-y-2"></div>
+        </div>
+    </div>
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4" id="ping-streak-section">
+        <h3 class="text-sm font-semibold text-gray-400 mb-1">장치별 연속 실패 구간
+            <span class="text-gray-500 font-normal">(특정 장치가 연속으로 ping 실패한 구간)</span></h3>
+        <p class="text-xs text-gray-500 mb-2">인접 손실 간격 ≤2초로 2건 이상 이어진 구간을 장치(흐름)별로 분리 — 전역 타임라인과 달리 장치가 섞이지 않습니다.</p>
+        <div class="overflow-x-auto">
+            <table class="w-full text-xs font-mono" id="ping-streak-table">
+                <thead class="text-gray-400 border-b border-gray-700">
+                    <tr>
+                        <th class="text-left py-2 px-1">장치</th>
+                        <th class="text-left py-2 px-1">시작 ~ 끝</th>
+                        <th class="text-right py-2 px-1">연속</th>
+                        <th class="text-right py-2 px-1">지속</th>
+                        <th class="text-left py-2 px-1">Seq 범위</th>
+                        <th class="text-left py-2 px-1">근거 Frame</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
         </div>
     </div>
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">

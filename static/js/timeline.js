@@ -372,6 +372,24 @@
         });
     });
 
+    /* ── 장치별 연속 손실 구간 하이라이트 (보라 배경) ── 백엔드 ping.loss_streaks.
+       구버전 result엔 없어 빈 배열 → 밴드 없음. 여러 장치 구간이 겹치면 색이 짙어진다. */
+    const lossStreaks = ping.loss_streaks || [];
+    lossStreaks.forEach(s => {
+        if (typeof s.start_epoch !== 'number' || typeof s.end_epoch !== 'number') return;
+        // 동일 epoch(순간) 구간도 보이도록 최소 폭 부여
+        const x1e = s.end_epoch > s.start_epoch ? s.end_epoch : s.start_epoch + 0.5;
+        allShapes.push({
+            _kind: 'lossrun',
+            type: 'rect',
+            x0: epochToDate(s.start_epoch), x1: epochToDate(x1e),
+            y0: 0, y1: 1, yref: 'paper',
+            fillcolor: 'rgba(168,85,247,0.13)',
+            line: { width: 0 },
+            layer: 'below',
+        });
+    });
+
     /* ── RSSI cliff 마커 ── (그룹 토글용 _overlay 메타 부여) */
     const cliffs = DATA.signal_cliffs || {};
     const cliffColors = ['#f97316', '#ec4899', '#8b5cf6'];
@@ -486,6 +504,7 @@
         const want = {
             roaming: document.querySelector('.timeline-overlay[data-overlay="roaming"]')?.checked ?? true,
             zone:    document.querySelector('.timeline-overlay[data-overlay="zone"]')?.checked    ?? true,
+            lossrun: document.querySelector('.timeline-overlay[data-overlay="lossrun"]')?.checked ?? true,
             cliff:   document.querySelector('.timeline-overlay[data-overlay="cliff"]')?.checked   ?? true,
         };
         const filteredShapes = allShapes
