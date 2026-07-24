@@ -82,6 +82,10 @@ def analyze(
             summary="ping loss 없음",
         )
 
+    # 방어적 정렬 — 아래 전역/장치별 streak 탐지가 시간순을 전제한다. 현재 _find_losses는
+    # epoch 정렬된 리스트를 주지만(build_ping_matches에서 정렬), 상류 변경에도 안전하도록 고정.
+    losses.sort(key=lambda f: f.epoch)
+
     lines.append(f"응답 없는 ICMP Request: {len(losses)}건")
     lines.append("")
     lines.append(

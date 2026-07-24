@@ -1110,7 +1110,12 @@
             streakTbody.innerHTML = `<tr><td colspan="6" class="text-gray-500 text-center py-6">${hint}</td></tr>`;
         } else {
             streakTbody.innerHTML = streaks.map(s => {
-                const refs = (s.frame_refs || []).map(n => '#' + n).join(' ');
+                const shown = s.frame_refs || [];
+                const refs = shown.map(n => '#' + n).join(' ');
+                // count(연속 총건)보다 표시된 근거가 적으면(20건 cap 또는 seq_gap=번호없음) 생략 수를 +N으로.
+                const moreN = Math.max(0, (s.count || 0) - shown.length);
+                const refsCell = (refs ? escapeHtml(refs) : '')
+                    + (moreN > 0 ? ` <span class="text-gray-600">…+${moreN}</span>` : '');
                 const seqRange = (s.first_seq != null && s.last_seq != null)
                     ? `${escapeHtml(String(s.first_seq))} ~ ${escapeHtml(String(s.last_seq))}` : '-';
                 return `<tr class="border-b border-gray-700/30 text-red-400 bg-red-900/10 hover:bg-gray-700/30">
@@ -1119,7 +1124,7 @@
                     <td class="py-1 px-1 text-right font-bold">${s.count}건</td>
                     <td class="py-1 px-1 text-right">${Number(s.duration_sec || 0).toFixed(1)}초</td>
                     <td class="py-1 px-1">${seqRange}</td>
-                    <td class="py-1 px-1 text-gray-400 truncate max-w-[220px]" title="${escapeHtml(refs)}">${refs || '-'}</td>
+                    <td class="py-1 px-1 text-gray-400 truncate max-w-[220px]" title="${escapeHtml(refs)}">${refsCell || '-'}</td>
                 </tr>`;
             }).join('');
         }
