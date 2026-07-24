@@ -55,7 +55,7 @@ python3 app.py
 | `ai_api_key` | `PCAP_AI_API_KEY` | API 키 (환경변수 권장) |
 | `ai_model` | `PCAP_AI_MODEL` | 예: `claude-sonnet-4-6` |
 | `ai_auto_review` | `PCAP_AI_AUTO_REVIEW` | 분석 완료 시 자동 AI 리뷰 |
-| `ui_offline_assets` | `PCAP_UI_OFFLINE_ASSETS` | `true`면 CDN 대신 `static/vendor/` 사용 |
+| `ui_offline_assets` | `PCAP_UI_OFFLINE_ASSETS` | **기본 `true`**(오프라인) — 로컬 `static/vendor/` 사용. `false`면 CDN(`cdn.tailwindcss.com`·`cdn.plot.ly`) |
 
 ## 리포트 export
 
@@ -79,12 +79,16 @@ Linux 서버에서 PDF 한글이 깨지면 `fonts-noto-cjk` 설치.
 
 ## 오프라인 환경(폐쇄망)
 
-Tailwind/Plotly CDN을 못 쓰는 환경:
+UI는 **기본이 오프라인 모드**(`ui_offline_assets=true`)라 Tailwind/Plotly를 로컬 `static/vendor/`에서 로드한다 — 인터넷 없이도 대시보드가 정상 렌더링된다.
+
+- **배포본(release)**: `static/vendor/` 에셋이 포함되어 추가 작업 불필요.
+- **소스에서 직접 실행**: 에셋을 먼저 받아둬야 화면이 깨지지 않는다.
 
 ```bash
-make fetch-vendor          # curl로 static/vendor/에 다운로드
-# 그다음 설정 페이지에서 "오프라인 에셋 사용" 체크
+make fetch-vendor          # curl로 static/vendor/에 tailwind.js·plotly.min.js 다운로드
 ```
+
+CDN을 쓰려면(온라인 전용) 설정 페이지에서 "오프라인 에셋 사용"을 **해제**하거나 `PCAP_UI_OFFLINE_ASSETS=false`로 지정한다.
 
 ## 트러블슈팅
 
