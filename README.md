@@ -77,6 +77,20 @@ playwright install chromium        # ~150MB 다운로드, 인터넷 필요
 폐쇄망에서는 설치 불가 — 인쇄용 리포트로 동일 내용의 PDF를 저장하면 된다.
 Linux 서버에서 PDF 한글이 깨지면 `fonts-noto-cjk` 설치.
 
+## 캡처 시각 동기화 (timesync)
+
+여러 장비에서 따로 뜬 pcap끼리, 그리고 pcap과 장비 로그 사이의 시계가 어긋나 있으면
+같은 타임라인에서 볼 수 없다. NTP 프레임을 기준으로 어긋난 양을 측정하고 pcap
+타임스탬프를 보정하는 CLI 도구가 `scripts/timesync-*.py`에 있다.
+
+```bash
+python3 scripts/timesync-batch.py <캠페인디렉터리> --out <출력루트> \
+    --ssid <SSID> --psk <passphrase>
+```
+
+원본은 수정하지 않고 출력 디렉터리에 보정된 pcap을 만든다. 자세한 사용법·원리·
+트러블슈팅은 `docs/TIMESYNC.md` 참조.
+
 ## 오프라인 환경(폐쇄망)
 
 UI는 **기본이 오프라인 모드**(`ui_offline_assets=true`)라 Tailwind/Plotly를 로컬 `static/vendor/`에서 로드한다 — 인터넷 없이도 대시보드가 정상 렌더링된다.
