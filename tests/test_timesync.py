@@ -506,6 +506,22 @@ def test_shift_log_file_streams_without_buffering_whole_file(tmp_path, monkeypat
     assert seen[-1] is True, "마지막 줄 처리 시점에 출력 파일이 아직 없다 = 일괄 쓰기"
 
 
+def test_shift_log_file_refuses_same_src_and_dst(tmp_path):
+    """스트리밍 쓰기라 src==dst 면 읽기 전에 원본이 잘린다 — 거부해야 한다."""
+    p = tmp_path / "a.log"
+    p.write_text("2026-07-21 14:57:01 line one\n2026-07-21 14:57:02 line two\n")
+    before = p.read_bytes()
+
+    with pytest.raises(ValueError, match="같은 파일"):
+        ts.shift_log_file(p, p, 10.0)
+    assert p.read_bytes() == before, "원본이 손상되면 안 된다"
+
+    # 경로 표기가 달라도(., 상대경로) 같은 파일이면 막아야 한다.
+    with pytest.raises(ValueError, match="같은 파일"):
+        ts.shift_log_file(p, tmp_path / "." / "a.log", 10.0)
+    assert p.read_bytes() == before
+
+
 def test_shift_log_file_removes_partial_output_on_error(tmp_path, monkeypatch):
     """중간에 끊기면 반쪽 파일을 남기지 않는다 (shift_pcap_file 과 같은 규약)."""
     src = tmp_path / "in.log"

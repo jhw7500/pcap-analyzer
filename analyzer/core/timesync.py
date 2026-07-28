@@ -820,7 +820,14 @@ def shift_log_file(
 
     읽으면서 바로 쓴다 — 로그가 수 GB 여도 메모리에 통째로 올리지 않는다.
     중간에 끊기면 `shift_pcap_file` 과 같이 만들다 만 출력 파일을 지운다.
+
+    `src` 와 `dst` 가 같으면 거부한다. 스트리밍 쓰기라 출력 파일을 여는 순간 원본이
+    0바이트로 잘리고, 읽을 것이 없어 조용히 빈 파일만 남는다. 원본 보존이 이 도구의
+    제1원칙이라 호출자 실수를 여기서 막는다.
     """
+    if Path(src).resolve() == Path(dst).resolve():
+        raise ValueError(f"입력과 출력이 같은 파일이다 — 원본이 지워진다: {src}")
+
     pats = patterns if patterns is not None else compile_patterns()
     total = changed = 0
 
