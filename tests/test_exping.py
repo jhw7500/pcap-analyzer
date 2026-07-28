@@ -239,6 +239,27 @@ def test_extract_exchanges_reports_tshark_failure():
         ep.extract_exchanges("/nonexistent.pcapng", tshark="/bin/false")
 
 
+def test_extract_exchanges_survives_huge_stderr(tmp_path):
+    """stderr 를 파이프로 받으면 버퍼가 차는 순간 교착한다 — 임시 파일로 받아야 한다.
+
+    경고가 쏟아지는 손상 캡처를 흉내낸다. 회귀하면 이 테스트는 끝나지 않는다.
+    """
+    fake = tmp_path / "fake-tshark"
+    fake.write_text(
+        "#!/bin/sh\n"
+        # 파이프 버퍼(보통 64KB)를 훌쩍 넘기는 stderr 를 먼저 쏟는다.
+        "awk 'BEGIN{for(i=0;i<20000;i++) print \"warn: malformed frame\" > \"/dev/stderr\"}'\n"
+        "printf '1.5\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\n'\n"
+        "printf '1.502\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\n'\n"
+    )
+    fake.chmod(0o755)
+
+    exchanges, sender = ep.extract_exchanges("ignored.pcapng", tshark=str(fake))
+    assert sender == "10.0.0.1"
+    assert len(exchanges) == 1
+    assert exchanges[0].rtt == pytest.approx(0.002)
+
+
 def test_pick_sender_uses_request_majority():
     frames = [
         (1.0, "10.0.0.9", "10.0.0.2", "8", "1", "1"),

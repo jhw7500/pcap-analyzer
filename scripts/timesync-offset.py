@@ -253,6 +253,15 @@ def main() -> int:
               f"{'  (WPA 복호화 켜짐)' if opts['ssid'] and opts['psk'] else ''}")
         print()
 
+    # 키 자재는 측정 전에 한 번 검증한다 — pcap 마다 같은 예외로 죽는 것을 막는다.
+    if opts["ssid"] and opts["psk"]:
+        try:
+            timesync.encode_wpa_field(opts["ssid"])
+            timesync.encode_wpa_field(opts["psk"])
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+
     results = []
     for pcap in pcaps:
         if not args.quiet:
@@ -279,8 +288,9 @@ def main() -> int:
             print(f"    sys.log 매칭     : 없음 → NTP 프레임 {res.ntp_responses}건 전체 사용")
         else:
             n_ev = dict((lbl, len(e)) for lbl, e in event_sets).get(res.syslog, len(events))
-            used = f"  ({Path(res.syslog).parent.name})" if len(event_sets) > 1 and res.syslog else ""
-            print(f"    sys.log 매칭     : {res.matched}/{n_ev}{used}")
+            # 표시용 변수는 결과 JSON 에 담기는 `used`(옵션 딕셔너리)와 이름이 겹치면 안 된다.
+            whose = f"  ({Path(res.syslog).parent.name})" if len(event_sets) > 1 and res.syslog else ""
+            print(f"    sys.log 매칭     : {res.matched}/{n_ev}{whose}")
         if res.residual:
             print(f"    매칭 잔차        : {_fmt_stats(res.residual)}")
         if res.capture_minus_ntp:

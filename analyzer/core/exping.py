@@ -27,6 +27,7 @@ import math
 import re
 import subprocess
 import sys
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -393,23 +394,33 @@ def extract_exchanges(
     메모리에 올리지 않기 위해서다. `check=True` 를 쓰지 않는 이유는
     `timesync.extract_ntp_responses()` 와 같다: 종료코드를 직접 보고 사람이 읽을 수
     있는 오류를 낸다. 프레임을 건졌다면 비정상 종료라도 그 결과는 쓴다.
+
+    stderr 는 파이프가 아니라 임시 파일로 받는다. 파이프로 받으면 경고가 많은 캡처에서
+    stderr 버퍼(보통 64KB)가 차는 순간 tshark 가 쓰기에서 멈추고, 부모는 stdout 만
+    읽고 있어 EOF 가 오지 않아 서로 영원히 기다린다.
     """
-    proc = subprocess.Popen(
-        build_tshark_cmd(pcap, tshark),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
     frames: list[IcmpFrame] = []
-    for line in proc.stdout or ():
-        parsed = parse_icmp_line(line)
-        if parsed is not None:
-            frames.append(parsed)
-    _, err = proc.communicate()
-    if proc.returncode != 0 and not frames:
-        detail = (err or "").strip().splitlines()
+    with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as errf:
+        proc = subprocess.Popen(
+            build_tshark_cmd(pcap, tshark),
+            stdout=subprocess.PIPE,
+            stderr=errf,
+            text=True,
+        )
+        for line in proc.stdout or ():
+            parsed = parse_icmp_line(line)
+            if parsed is not None:
+                frames.append(parsed)
+        if proc.stdout is not None:
+            proc.stdout.close()
+        returncode = proc.wait()
+        errf.seek(0)
+        err = errf.read()
+
+    if returncode != 0 and not frames:
+        detail = err.strip().splitlines()
         raise ValueError(
-            f"tshark 가 실패했다 (exit {proc.returncode}): {detail[-1] if detail else '출력 없음'}"
+            f"tshark 가 실패했다 (exit {returncode}): {detail[-1] if detail else '출력 없음'}"
         )
     src = sender or pick_sender(frames)
     return pair_exchanges(frames, src, timeout), src
