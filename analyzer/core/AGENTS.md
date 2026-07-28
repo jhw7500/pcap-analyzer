@@ -17,6 +17,7 @@ pcap 분석의 핵심 컴포넌트. 데이터 모델 정의, tshark를 통한 �
 | `detector.py` | AP/STA MAC 역할 자동 감지. Beacon/ProbeResp 송신자를 AP로, Data 프레임 통신 대상을 STA로 판별. `mac_name()` 유틸리티. |
 | `reporter.py` | 텍스트 리포트 포맷팅. 전체/간결 모드 지원. |
 | `log_merger.py` | 외부 로그 파일(syslog, wpa_supplicant 등) 파싱 + 로밍 키워드 필터링. |
+| `exping.py` | EXPING(시험용 ping 도구) 로그 형식 입출력 + pcap 재구성. `read_csv()`/`write_csv()`/`write_xlsx()`, `extract_exchanges()` → `exchanges_to_rows()`. 웹 파이프라인이 아니라 `scripts/exping-*.py` CLI 전용. 손실 통계용 `ping_matching.py`와 목적이 다르다 — 이쪽은 추론 없이 EXPING의 기록 규칙만 재현한다. 사용법·근거는 `docs/EXPING.md`. |
 
 ## Subdirectories
 
