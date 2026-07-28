@@ -119,6 +119,36 @@ def test_extract_ntp_responses_no_warning_on_success(monkeypatch):
     assert rows == [] and warnings == []
 
 
+def _load_batch_cli():
+    """`timesync-batch.py` 는 하이픈 때문에 일반 import 가 안 된다."""
+    import importlib.util
+    from pathlib import Path as _Path
+
+    path = _Path(__file__).resolve().parent.parent / "scripts" / "timesync-batch.py"
+    spec = importlib.util.spec_from_file_location("timesync_batch_cli", path)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_mask_cmd_hides_psk():
+    """명령 에코가 PSK 를 평문으로 터미널·CI 로그에 남기면 안 된다."""
+    batch = _load_batch_cli()
+    cmd = ["python3", "offset.py", "ds", "--ssid", "CANTOPS", "--psk", "s3cr3t-pass", "--tz", "UTC"]
+    masked = batch.mask_cmd(cmd)
+    assert "s3cr3t-pass" not in masked
+    assert "--psk ***" in masked
+    # 가릴 대상이 아닌 값은 그대로 보여야 진단에 쓸 수 있다.
+    assert "--ssid CANTOPS" in masked
+    assert "--tz UTC" in masked
+
+
+def test_mask_cmd_handles_trailing_secret_flag():
+    batch = _load_batch_cli()
+    assert batch.mask_cmd(["x", "--psk"]) == "x --psk"
+
+
 def test_parse_ntp_timestamp_is_locale_independent(monkeypatch):
     """`%b` 는 LC_TIME 을 타므로 월 이름을 직접 매핑한다 — 비영어 로케일에서 0건 방지."""
     import locale as _locale

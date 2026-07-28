@@ -77,10 +77,40 @@ def find_datasets(root: Path) -> list[Path]:
     return list(found)
 
 
+#: 자식 프로세스 상한(초). tshark/editcap 이 손상 캡처에서 멈추면 배치 전체가 매달린다.
+#: 2시간 133MB 캡처 실측이 분 단위라 넉넉하게 잡는다.
+CHILD_TIMEOUT = 3600
+
+#: 명령 에코에서 값을 가려야 하는 플래그.
+_SECRET_FLAGS = frozenset({"--psk"})
+
+
+def mask_cmd(cmd: list[str]) -> str:
+    """명령 에코용 문자열. PSK 같은 비밀값은 가린다.
+
+    터미널·CI 로그·화면 공유에 평문으로 남는 것을 막는다. (프로세스 목록 노출은
+    tshark CLI 구조상 못 막는다 — docs/TIMESYNC.md 참조.)
+    """
+    out: list[str] = []
+    hide = False
+    for part in cmd:
+        if hide:
+            out.append("***")
+            hide = False
+            continue
+        out.append(part)
+        hide = part in _SECRET_FLAGS
+    return " ".join(out)
+
+
 def run(cmd: list[str], log) -> int:
     """서브프로세스를 돌리며 출력을 그대로 흘려보낸다."""
-    print(f"    $ {' '.join(cmd)}", flush=True)
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    print(f"    $ {mask_cmd(cmd)}", flush=True)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=CHILD_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print(f"      [stderr] {CHILD_TIMEOUT}초 안에 끝나지 않아 중단했다", flush=True)
+        return 124
     for line in (proc.stdout or "").splitlines():
         print(f"      {line}", flush=True)
     for line in (proc.stderr or "").splitlines():
@@ -156,8 +186,16 @@ def main() -> int:
             print()
             continue
 
-        doc = json.loads(offset_json.read_text(encoding="utf-8"))
-        usable = [s for s in doc["sources"] if s.get("log_shift_seconds") is not None]
+        # 1단계가 rc=0 이어도 결과 JSON 이 온전하다는 보장은 없다(디스크 가득참, 중단 등).
+        try:
+            doc = json.loads(offset_json.read_text(encoding="utf-8"))
+            sources = doc["sources"]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(f"    [!] 결과 JSON 을 읽을 수 없다: {exc}")
+            summary.append({"dataset": ds.name, "status": f"bad-offset-json({type(exc).__name__})"})
+            print()
+            continue
+        usable = [s for s in sources if s.get("log_shift_seconds") is not None]
         entry = {
             "dataset": ds.name,
             "status": "measured",
