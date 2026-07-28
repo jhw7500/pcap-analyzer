@@ -239,6 +239,42 @@ def test_extract_exchanges_reports_tshark_failure():
         ep.extract_exchanges("/nonexistent.pcapng", tshark="/bin/false")
 
 
+def test_extract_exchanges_warns_on_partial_capture(tmp_path, capsys):
+    """프레임을 건졌어도 tshark 가 비정상 종료하면 조용히 넘기면 안 된다.
+
+    잘린 캡처를 그대로 쓰면 못 읽은 요청만큼 손실률이 실제보다 낮게 나온다.
+    """
+    fake = tmp_path / "fake-tshark"
+    fake.write_text(
+        "#!/bin/sh\n"
+        "printf '1.5\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\n'\n"
+        "printf '1.502\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\n'\n"
+        "echo 'tshark: The file appears to be damaged' >&2\n"
+        "exit 2\n"
+    )
+    fake.chmod(0o755)
+
+    exchanges, _ = ep.extract_exchanges("ignored.pcapng", tshark=str(fake))
+    assert len(exchanges) == 1, "건진 프레임은 그대로 쓴다"
+    err = capsys.readouterr().err
+    assert "exit 2" in err
+    assert "damaged" in err
+    assert "낮게 나올 수 있으니" in err
+
+
+def test_extract_exchanges_silent_when_tshark_succeeds(tmp_path, capsys):
+    """정상 종료면 경고를 내지 않는다 — 늑대소년이 되면 안 된다."""
+    fake = tmp_path / "ok-tshark"
+    fake.write_text(
+        "#!/bin/sh\n"
+        "printf '1.5\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\n'\n"
+        "printf '1.502\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\n'\n"
+    )
+    fake.chmod(0o755)
+    ep.extract_exchanges("ignored.pcapng", tshark=str(fake))
+    assert capsys.readouterr().err == ""
+
+
 def test_extract_exchanges_survives_huge_stderr(tmp_path):
     """stderr 를 파이프로 받으면 버퍼가 차는 순간 교착한다 — 임시 파일로 받아야 한다.
 

@@ -417,10 +417,21 @@ def extract_exchanges(
         errf.seek(0)
         err = errf.read()
 
-    if returncode != 0 and not frames:
+    if returncode != 0:
         detail = err.strip().splitlines()
-        raise ValueError(
-            f"tshark 가 실패했다 (exit {returncode}): {detail[-1] if detail else '출력 없음'}"
+        last = detail[-1] if detail else "출력 없음"
+        if not frames:
+            raise ValueError(f"tshark 가 실패했다 (exit {returncode}): {last}")
+        # 프레임을 건졌어도 비정상 종료면 캡처가 중간에 끊겼을 수 있다. 조용히 넘기면
+        # 못 읽은 요청만큼 손실률이 실제보다 **낮게** 나오는데 사용자는 알 길이 없다.
+        print(
+            f"[!] tshark 가 exit {returncode} 로 끝났다 — 결과가 일부일 수 있다: {last}",
+            file=sys.stderr,
+        )
+        print(
+            f"[!] 읽은 ICMP 프레임 {len(frames):,}개로 계속한다. "
+            "손실률이 실제보다 낮게 나올 수 있으니 캡처 무결성을 확인하라.",
+            file=sys.stderr,
         )
     src = sender or pick_sender(frames)
     return pair_exchanges(frames, src, timeout), src
