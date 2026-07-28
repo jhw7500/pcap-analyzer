@@ -4,4 +4,8 @@
 # - 설치: pip install -r requirements-exping.txt
 # - csv 출력만 쓰려면 설치할 필요 없다 (exping-from-pcap.py --csv-only).
 # - 웹 대시보드는 이 패키지를 쓰지 않는다. 그래서 requirements.txt 가 아니라 별도다.
-openpyxl>=3.1
+#
+# 메이저 상한을 묶어둔다 — 기본 글꼴 설정에 openpyxl 비공개 속성(`_fonts`)을 쓴다.
+# 공개 API 가 없어서인데, 4.x 에서 내부 구조가 바뀌면 조용히 어긋날 수 있다.
+# (실패해도 글꼴만 포기하고 데이터는 정상 출력된다.)
+openpyxl>=3.1,<4

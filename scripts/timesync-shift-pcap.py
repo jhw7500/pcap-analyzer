@@ -181,6 +181,29 @@ def main() -> int:
             rel = Path(src.name)
         plan.append((src, outdir / rel, timesync.pcap_shift_seconds(s["log_shift_seconds"])))
 
+    # 데이터셋 밖 pcap 은 파일명만 남으므로(rel = src.name) 이름이 같으면 출력이 겹친다.
+    # 그대로 두면 뒤 editcap 이 앞 결과를 조용히 덮어쓴다 — 쓰기 전에 막는다.
+    by_dst: dict[Path, list[Path]] = {}
+    for src, dst, _ in plan:
+        by_dst.setdefault(dst, []).append(src)
+    collided = {d: ss for d, ss in by_dst.items() if len(ss) > 1}
+    if collided:
+        print(
+            f"ERROR: 출력 경로가 겹치는 pcap 이 있다 ({len(collided)}곳). "
+            "덮어쓰기를 막기 위해 아무것도 쓰지 않는다:",
+            file=sys.stderr,
+        )
+        for dst, srcs in list(collided.items())[:10]:
+            print(f"  {dst}", file=sys.stderr)
+            for s in srcs:
+                print(f"      <- {s}", file=sys.stderr)
+        print(
+            "  데이터셋 밖의 pcap 은 파일명으로만 구분된다. 이름을 다르게 하거나 "
+            "--source 로 하나씩 처리하라.",
+            file=sys.stderr,
+        )
+        return 2
+
     if missing:
         print(f"ERROR: pcap 파일을 찾을 수 없다 ({len(missing)}개):", file=sys.stderr)
         for m in missing[:10]:

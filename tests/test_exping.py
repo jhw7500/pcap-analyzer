@@ -199,6 +199,18 @@ def test_parse_icmp_tsv_skips_malformed_lines():
     assert got == [(1.0, "10.0.0.1", "10.0.0.2", "8", "1", "5")]
 
 
+def test_parse_icmp_line_returns_none_for_bad_input():
+    assert ep.parse_icmp_line("1.0\ta\tb\t8\t1\t5\n") == (1.0, "a", "b", "8", "1", "5")
+    assert ep.parse_icmp_line("1.0\ta\tb\n") is None  # 필드 부족
+    assert ep.parse_icmp_line("x\ta\tb\t8\t1\t5\n") is None  # 시각 파싱 실패
+
+
+def test_extract_exchanges_reports_tshark_failure():
+    """tshark 가 비정상 종료하고 건진 프레임도 없으면 traceback 대신 ValueError."""
+    with pytest.raises(ValueError, match="tshark 가 실패했다"):
+        ep.extract_exchanges("/nonexistent.pcapng", tshark="/bin/false")
+
+
 def test_pick_sender_uses_request_majority():
     frames = [
         (1.0, "10.0.0.9", "10.0.0.2", "8", "1", "1"),
@@ -411,6 +423,25 @@ def test_write_xlsx_copies_theme_from_reference(tmp_path):
     ep.write_xlsx(out, ep.exchanges_to_rows([_ex(1.0)]), "base", theme_from=ref)
     with zipfile.ZipFile(out) as z:
         assert z.read("xl/theme/theme1.xml") == want
+
+
+def test_write_xlsx_survives_bad_theme_file(tmp_path, capsys):
+    """--theme-from 이 xlsx 가 아니어도 중단하지 않고 기본 테마로 쓴다."""
+    openpyxl = pytest.importorskip("openpyxl")
+    bad = tmp_path / "not-a-workbook.xlsx"
+    bad.write_text("이건 zip 이 아니다")
+    out = tmp_path / "w.xlsx"
+    ep.write_xlsx(out, ep.exchanges_to_rows([_ex(1.0)]), "base", theme_from=bad)
+    assert "기본 테마로 진행" in capsys.readouterr().err
+    assert openpyxl.load_workbook(out).worksheets[0].max_row == 2
+
+
+def test_write_xlsx_survives_missing_theme_file(tmp_path, capsys):
+    openpyxl = pytest.importorskip("openpyxl")
+    out = tmp_path / "w.xlsx"
+    ep.write_xlsx(out, ep.exchanges_to_rows([_ex(1.0)]), "base", theme_from=tmp_path / "nope.xlsx")
+    assert "기본 테마로 진행" in capsys.readouterr().err
+    assert openpyxl.load_workbook(out).worksheets[0].max_row == 2
 
 
 def test_write_xlsx_accepts_rows_read_from_csv(tmp_path):

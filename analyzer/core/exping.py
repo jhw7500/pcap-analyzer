@@ -26,6 +26,8 @@ import datetime as dt
 import math
 import re
 import subprocess
+import sys
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -213,19 +215,28 @@ def write_xlsx(
 
     wb = openpyxl.Workbook()
     # 기준 파일과 같은 기본 글꼴. openpyxl 기본은 Calibri 라 그냥 두면 눈에 띈다.
-    wb._fonts[0] = Font(
-        name=DEFAULT_FONT_NAME,
-        sz=11,
-        color=Color(theme=1, type="theme"),
-        family=2,
-        charset=129,
-        scheme="minor",
-    )
-    if theme_from:
-        import zipfile
+    # `_fonts` 는 비공개 속성이다 — 기본 글꼴을 바꾸는 공개 API 가 없다. openpyxl 이
+    # 내부 구조를 바꾸면 글꼴만 포기하고 계속 간다 (데이터에는 영향 없음).
+    # requirements-exping.txt 에서 메이저 버전을 묶어 급변을 막는다.
+    try:
+        wb._fonts[0] = Font(
+            name=DEFAULT_FONT_NAME,
+            sz=11,
+            color=Color(theme=1, type="theme"),
+            family=2,
+            charset=129,
+            scheme="minor",
+        )
+    except (AttributeError, IndexError, TypeError) as exc:  # pragma: no cover - 방어
+        print(f"[!] 기본 글꼴 설정 실패, 그대로 진행한다 ({exc})", file=sys.stderr)
 
-        with zipfile.ZipFile(theme_from) as z:
-            wb.loaded_theme = z.read("xl/theme/theme1.xml")
+    if theme_from:
+        # 테마는 표 색만 좌우한다. 못 읽어도 중단하지 않고 기본 테마로 간다.
+        try:
+            with zipfile.ZipFile(theme_from) as z:
+                wb.loaded_theme = z.read("xl/theme/theme1.xml")
+        except (OSError, zipfile.BadZipFile, KeyError) as exc:
+            print(f"[!] 테마를 못 읽어 기본 테마로 진행한다: {theme_from} ({exc})", file=sys.stderr)
 
     center = Alignment(vertical="center")
     dup_name, plain_name = sheet_names(base)
@@ -284,19 +295,21 @@ def build_tshark_cmd(pcap: str | Path, tshark: str = "tshark") -> list[str]:
     return cmd
 
 
+def parse_icmp_line(line: str) -> IcmpFrame | None:
+    """tshark 탭 출력 한 줄. 필드가 빠졌거나 시각을 못 읽으면 None."""
+    f = line.rstrip("\n").split("\t")
+    if len(f) != len(TSHARK_FIELDS):
+        return None
+    try:
+        epoch = float(f[0])
+    except ValueError:
+        return None
+    return (epoch, f[1], f[2], f[3], f[4], f[5])
+
+
 def parse_icmp_tsv(text: str) -> list[IcmpFrame]:
     """tshark 탭 출력 파싱. 필드가 빠졌거나 시각을 못 읽는 줄은 버린다."""
-    out = []
-    for line in text.splitlines():
-        f = line.split("\t")
-        if len(f) != len(TSHARK_FIELDS):
-            continue
-        try:
-            epoch = float(f[0])
-        except ValueError:
-            continue
-        out.append((epoch, f[1], f[2], f[3], f[4], f[5]))
-    return out
+    return [f for f in (parse_icmp_line(ln) for ln in text.splitlines()) if f is not None]
 
 
 def pick_sender(frames: list[IcmpFrame]) -> str:
@@ -356,10 +369,29 @@ def extract_exchanges(
     sender: str | None = None,
     timeout: float = DEFAULT_REPLY_TIMEOUT,
 ) -> tuple[list[Exchange], str]:
-    """pcap 을 읽어 (교환 목록, 송신 호스트) 를 낸다."""
-    proc = subprocess.run(
-        build_tshark_cmd(pcap, tshark), capture_output=True, text=True, check=True
+    """pcap 을 읽어 (교환 목록, 송신 호스트) 를 낸다.
+
+    tshark 출력을 한 줄씩 걸러 담는다 — 프레임이 수백만인 캡처에서 출력 전체를
+    메모리에 올리지 않기 위해서다. `check=True` 를 쓰지 않는 이유는
+    `timesync.extract_ntp_responses()` 와 같다: 종료코드를 직접 보고 사람이 읽을 수
+    있는 오류를 낸다. 프레임을 건졌다면 비정상 종료라도 그 결과는 쓴다.
+    """
+    proc = subprocess.Popen(
+        build_tshark_cmd(pcap, tshark),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
-    frames = parse_icmp_tsv(proc.stdout)
+    frames: list[IcmpFrame] = []
+    for line in proc.stdout or ():
+        parsed = parse_icmp_line(line)
+        if parsed is not None:
+            frames.append(parsed)
+    _, err = proc.communicate()
+    if proc.returncode != 0 and not frames:
+        detail = (err or "").strip().splitlines()
+        raise ValueError(
+            f"tshark 가 실패했다 (exit {proc.returncode}): {detail[-1] if detail else '출력 없음'}"
+        )
     src = sender or pick_sender(frames)
     return pair_exchanges(frames, src, timeout), src
