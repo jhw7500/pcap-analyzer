@@ -91,6 +91,21 @@ python3 scripts/timesync-batch.py <캠페인디렉터리> --out <출력루트> \
 원본은 수정하지 않고 출력 디렉터리에 보정된 pcap을 만든다. 자세한 사용법·원리·
 트러블슈팅은 `docs/TIMESYNC.md` 참조.
 
+## EXPING 로그 도구 (exping)
+
+시험에 쓰는 ping 도구 EXPING의 CSV/xlsx를 다루는 CLI 도구가 `scripts/exping-*.py`에 있다.
+
+```bash
+# CSV -> xlsx 무손실 변환 (원본 로그가 온전할 때)
+python3 scripts/exping-csv-to-xlsx.py <csv...> --theme-from <기준xlsx>
+
+# 로그가 잘렸거나 시계가 어긋났으면 보정된 pcap에서 재구성
+python3 scripts/exping-from-pcap.py <pcap> --out-dir <디렉터리>
+```
+
+xlsx 출력에는 `pip install -r requirements-exping.txt`가 필요하다(csv만 쓰면 불필요).
+역공학한 형식 규칙과 한계는 `docs/EXPING.md` 참조.
+
 ## 오프라인 환경(폐쇄망)
 
 UI는 **기본이 오프라인 모드**(`ui_offline_assets=true`)라 Tailwind/Plotly를 로컬 `static/vendor/`에서 로드한다 — 인터넷 없이도 대시보드가 정상 렌더링된다.

@@ -1,0 +1,7 @@
+# 선택 기능: EXPING 로그 도구의 xlsx 출력
+#   scripts/exping-from-pcap.py, scripts/exping-csv-to-xlsx.py
+#
+# - 설치: pip install -r requirements-exping.txt
+# - csv 출력만 쓰려면 설치할 필요 없다 (exping-from-pcap.py --csv-only).
+# - 웹 대시보드는 이 패키지를 쓰지 않는다. 그래서 requirements.txt 가 아니라 별도다.
+openpyxl>=3.1
