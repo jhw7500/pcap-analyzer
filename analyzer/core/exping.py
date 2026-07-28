@@ -109,13 +109,27 @@ def format_status(rtt: float | None, offset_ms: float = RTT_OFFSET_MS) -> str:
     return "Time:%6dms" % max(0, math.floor(rtt * 1000 + offset_ms))
 
 
+def local_stamp(epoch: float, tz: dt.tzinfo | None = None) -> dt.datetime:
+    """epoch 을 표시용 naive datetime 으로. `tz` 생략 시 시스템 지역시각.
+
+    엑셀은 타임존 붙은 datetime 을 거부하므로 변환 후 tzinfo 를 떼어낸다.
+    `os.environ["TZ"]` + `time.tzset()` 을 쓰지 않는 이유: tzset 은 POSIX 전용이라
+    Windows 에서 죽고, 프로세스 전역 상태를 건드려 다른 코드에 샌다.
+    """
+    if tz is None:
+        return dt.datetime.fromtimestamp(epoch)
+    return dt.datetime.fromtimestamp(epoch, tz).replace(tzinfo=None)
+
+
 def exchanges_to_rows(
-    exchanges: list[Exchange], offset_ms: float = RTT_OFFSET_MS
+    exchanges: list[Exchange],
+    offset_ms: float = RTT_OFFSET_MS,
+    tz: dt.tzinfo | None = None,
 ) -> list[SheetRow]:
     """교환 목록을 시트 행으로. 日時 는 요청 시각을 초 단위로 절삭한다."""
     rows: list[SheetRow] = []
     for ex in exchanges:
-        stamp = dt.datetime.fromtimestamp(ex.time).replace(microsecond=0)
+        stamp = local_stamp(ex.time, tz).replace(microsecond=0)
         rows.append(
             (
                 RESULT_OK if ex.answered else RESULT_NG,
@@ -189,8 +203,12 @@ def sheet_names(base: str) -> tuple[str, str]:
 
 
 def table_name(base: str) -> str:
-    """엑셀 표 이름 — 영숫자/밑줄만 허용되고 끝의 밑줄은 엑셀이 떼어낸다."""
-    return re.sub(r"\W", "_", base).strip("_")
+    """엑셀 표 이름 — 영숫자/밑줄만 허용되고 끝의 밑줄은 엑셀이 떼어낸다.
+
+    단어 문자가 하나도 없는 이름(예: `---`)이면 빈 문자열이 되어 엑셀이 거부하므로
+    대체 이름을 쓴다.
+    """
+    return re.sub(r"\W", "_", base).strip("_") or "ExpingTable"
 
 
 def write_xlsx(

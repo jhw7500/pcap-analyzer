@@ -119,6 +119,59 @@ def test_extract_ntp_responses_no_warning_on_success(monkeypatch):
     assert rows == [] and warnings == []
 
 
+def test_parse_ntp_timestamp_is_locale_independent(monkeypatch):
+    """`%b` 는 LC_TIME 을 타므로 월 이름을 직접 매핑한다 — 비영어 로케일에서 0건 방지."""
+    import locale as _locale
+
+    def boom(*_a, **_k):
+        raise AssertionError("월 이름 파싱에 로케일을 쓰면 안 된다")
+
+    monkeypatch.setattr(_locale, "setlocale", boom)
+    got = ts.parse_ntp_timestamp("Jul 21, 2026 05:57:35.004315599 UTC")
+    want = datetime(2026, 7, 21, 5, 57, 35, 4315, tzinfo=timezone.utc).timestamp()
+    assert got == pytest.approx(want, abs=1e-6)
+    # 12개월 전부
+    for i, mon in enumerate(
+        ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), 1
+    ):
+        epoch = ts.parse_ntp_timestamp(f"{mon}  5, 2026 00:00:00.000000000 UTC")
+        assert epoch is not None
+        assert datetime.fromtimestamp(epoch, timezone.utc).month == i
+
+
+def test_parse_ntp_timestamp_rejects_unknown_month():
+    assert ts.parse_ntp_timestamp("Xyz 21, 2026 05:57:35.000000000 UTC") is None
+
+
+# --------------------------------------------------------------------------
+# WPA 키 인코딩 — tshark UAT 실측 동작에 맞춘다
+# --------------------------------------------------------------------------
+
+
+def test_encode_wpa_field_percent_encodes_colon_and_percent():
+    """tshark 는 이 필드를 퍼센트 디코딩한 뒤 passphrase:ssid 로 쪼갠다.
+
+    `%` 를 먼저 바꿔야 `%3a` 의 `%` 가 다시 인코딩되지 않는다.
+    """
+    assert ts.encode_wpa_field("plain") == "plain"
+    assert ts.encode_wpa_field("pa:ss") == "pa%3ass"
+    assert ts.encode_wpa_field("100%") == "100%25"
+    assert ts.encode_wpa_field("a%3ab") == "a%253ab"  # 리터럴 "%3a" 는 그대로 살아야 한다
+    assert ts.encode_wpa_field("back\\slash,comma") == "back\\slash,comma"  # 통과 문자
+
+
+def test_encode_wpa_field_rejects_double_quote():
+    """UAT 파서가 레코드 경계로 읽는다. 이중화 이스케이프도 실측에서 실패했다."""
+    with pytest.raises(ValueError, match='"'):
+        ts.encode_wpa_field('pass"word')
+
+
+def test_build_ntp_tshark_cmd_encodes_key_material():
+    cmd = ts.build_ntp_tshark_cmd("x.pcap", ssid="my:ssid", passphrase="pa%ss:word")
+    key = next(a for a in cmd if a.startswith("uat:80211_keys"))
+    assert key == 'uat:80211_keys:"wpa-pwd","pa%25ss%3aword:my%3assid"'
+
+
 def test_build_ntp_tshark_cmd_decryption_flags():
     plain = ts.build_ntp_tshark_cmd("x.pcap")
     assert "wlan.enable_decryption:TRUE" not in plain
@@ -400,6 +453,47 @@ def test_shift_log_file_dry_run_writes_nothing(tmp_path):
     dst = tmp_path / "out" / "a.log"
     total, changed = ts.shift_log_file(src, dst, 1.0, dry_run=True)
     assert (total, changed) == (1, 1)
+    assert not dst.exists()
+
+
+def test_shift_log_file_streams_without_buffering_whole_file(tmp_path, monkeypatch):
+    """읽으면서 바로 쓴다 — 전체를 메모리에 담지 않는다(수 GB 로그 OOM 방지)."""
+    src = tmp_path / "big.log"
+    src.write_text("".join(f"2026-07-21 14:57:{i % 60:02d} line{i}\n" for i in range(500)))
+    dst = tmp_path / "out.log"
+
+    # 마지막 줄을 쓰기 직전 시점에 출력 파일이 이미 존재하면 스트리밍이다.
+    seen: list[bool] = []
+    real_shift = ts.shift_line
+
+    def spy(line, delta, pats):
+        seen.append(dst.exists())
+        return real_shift(line, delta, pats)
+
+    monkeypatch.setattr(ts, "shift_line", spy)
+    total, _ = ts.shift_log_file(src, dst, 1.0)
+    assert total == 500
+    assert seen[-1] is True, "마지막 줄 처리 시점에 출력 파일이 아직 없다 = 일괄 쓰기"
+
+
+def test_shift_log_file_removes_partial_output_on_error(tmp_path, monkeypatch):
+    """중간에 끊기면 반쪽 파일을 남기지 않는다 (shift_pcap_file 과 같은 규약)."""
+    src = tmp_path / "in.log"
+    src.write_text("".join(f"2026-07-21 14:57:{i % 60:02d} line{i}\n" for i in range(10)))
+    dst = tmp_path / "out.log"
+
+    calls = {"n": 0}
+    real_shift = ts.shift_line
+
+    def boom(line, delta, pats):
+        calls["n"] += 1
+        if calls["n"] > 3:
+            raise RuntimeError("중단")
+        return real_shift(line, delta, pats)
+
+    monkeypatch.setattr(ts, "shift_line", boom)
+    with pytest.raises(RuntimeError, match="중단"):
+        ts.shift_log_file(src, dst, 1.0)
     assert not dst.exists()
 
 

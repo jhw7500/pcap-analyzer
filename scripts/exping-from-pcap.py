@@ -24,16 +24,13 @@ EXPING 로그가 없거나, 있어도 쓸 수 없을 때를 위한 도구다. �
 
 import argparse
 import collections
-import datetime as dt
-import os
 import sys
-import time
 from pathlib import Path
 from typing import NoReturn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from analyzer.core import exping  # noqa: E402
+from analyzer.core import exping, timesync  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -75,8 +72,10 @@ def main() -> int:
 
     if not Path(args.pcap).exists():
         _fail(f"pcap 이 없다: {args.pcap}")
-    os.environ["TZ"] = args.tz
-    time.tzset()
+    try:
+        tz = timesync.resolve_tz(args.tz)
+    except ValueError as exc:
+        _fail(str(exc))
 
     try:
         exchanges, sender = exping.extract_exchanges(
@@ -95,9 +94,9 @@ def main() -> int:
         if not exchanges:
             _fail("응답 있는 요청이 하나도 없다")
 
-    rows = exping.exchanges_to_rows(exchanges, args.rtt_offset)
-    first = dt.datetime.fromtimestamp(exchanges[0].time)
-    last = dt.datetime.fromtimestamp(exchanges[-1].time)
+    rows = exping.exchanges_to_rows(exchanges, args.rtt_offset, tz)
+    first = exping.local_stamp(exchanges[0].time, tz)
+    last = exping.local_stamp(exchanges[-1].time, tz)
     base = args.name or f"exping_{sender}({first:%H%M}_{last:%H%M})"
 
     out_dir = Path(args.out_dir)

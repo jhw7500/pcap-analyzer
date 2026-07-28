@@ -90,6 +90,34 @@ def test_table_name_sanitises_and_strips_trailing_underscore():
     assert ep.table_name("a b.c") == "a_b_c"
 
 
+def test_table_name_never_empty():
+    """단어 문자가 없으면 빈 이름이 되어 엑셀이 거부한다."""
+    assert ep.table_name("---") == "ExpingTable"
+    assert ep.table_name("") == "ExpingTable"
+
+
+# --------------------------------------------------------------------------
+# 타임존 (os.environ/tzset 없이 처리한다 — tzset 은 POSIX 전용)
+# --------------------------------------------------------------------------
+
+
+def test_local_stamp_honours_explicit_tz():
+    from datetime import timedelta, timezone
+
+    epoch = 1784700837.5  # 2026-07-22 06:13:57.5 UTC
+    assert ep.local_stamp(epoch, timezone.utc) == dt.datetime(2026, 7, 22, 6, 13, 57, 500000)
+    kst = ep.local_stamp(epoch, timezone(timedelta(hours=9)))
+    assert kst == dt.datetime(2026, 7, 22, 15, 13, 57, 500000)
+    assert kst.tzinfo is None, "엑셀은 타임존 붙은 datetime 을 거부한다"
+
+
+def test_exchanges_to_rows_uses_given_tz():
+    from datetime import timedelta, timezone
+
+    rows = ep.exchanges_to_rows([_ex(1784700837.9)], tz=timezone(timedelta(hours=9)))
+    assert rows[0][1] == dt.datetime(2026, 7, 22, 15, 13, 57)
+
+
 # --------------------------------------------------------------------------
 # CSV 입출력
 # --------------------------------------------------------------------------

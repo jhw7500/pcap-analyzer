@@ -28,6 +28,14 @@ from statistics import median
 # tshark 가 NTP 타임스탬프를 렌더링하는 형식: "Jul 21, 2026 05:57:35.004315599 UTC"
 _NTP_TS_RE = re.compile(r"^(?P<body>[A-Z][a-z]{2} +\d+, +\d{4} +\d{2}:\d{2}:\d{2})\.(?P<frac>\d+)")
 
+#: 월 약어 → 숫자. `%b` 가 LC_TIME 로케일을 타는 것을 피하려고 직접 매핑한다.
+_MONTHS: dict[str, str] = {
+    m: f"{i:02d}"
+    for i, m in enumerate(
+        ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"), 1
+    )
+}
+
 # 로그 타임스탬프 패턴 — 모두 줄 시작에 앵커한다.
 # 본문 안에 박힌 날짜(예: AP 로그의 "NTP: Setting clock (2015-01-01 00:00:07)")를
 # 실수로 이동시키지 않기 위해 반드시 앵커가 필요하다.
@@ -219,13 +227,42 @@ def parse_ntp_timestamp(raw: str) -> float | None:
         body = f"{base}.{frac}"
     else:
         body = f"{body}.000000"
+    # `%b` 는 LC_TIME 로케일을 탄다. tshark 는 로케일과 무관하게 영어 월 이름을
+    # 내보내므로, 분석 서버 로케일이 비영어면 파싱이 통째로 실패하고 NTP 0건이 된다.
+    # 월 이름을 직접 숫자로 바꿔 로케일 의존을 끊는다.
+    mon = _MONTHS.get(body[:3].title())
+    if mon is None:
+        return None
     try:
-        dt = datetime.strptime(body, "%b %d, %Y %H:%M:%S.%f")
+        dt = datetime.strptime(f"{mon}{body[3:]}", "%m %d, %Y %H:%M:%S.%f")
     except ValueError:
         return None
     epoch = dt.replace(tzinfo=timezone.utc).timestamp()
     # NTP 미설정 필드는 1900-01-01(=epoch -2208988800) 근처로 렌더링된다.
     return epoch if epoch > 0 else None
+
+
+def encode_wpa_field(value: str) -> str:
+    """tshark `uat:80211_keys` 의 `wpa-pwd` 레코드에 넣을 수 있게 가공한다.
+
+    이 필드는 tshark 가 **퍼센트 디코딩**한 뒤 `passphrase:ssid` 로 쪼갠다. 실측한
+    tshark 동작(4.x):
+
+    - `:` 를 그냥 넣으면 `Only one ':' is allowed …` 로 거부된다 → `%3a` 로 인코딩
+    - `%` 를 그냥 넣으면 디코딩되어 **조용히 다른 키**가 된다 → `%25` 로 인코딩
+      (tshark 도 `use "%25" for a literal "%"` 라고 안내한다)
+    - `"` 는 UAT 파서가 레코드 경계로 읽어 깨진다. `""` 이중화도 실패해서
+      빠져나갈 방법이 없다 → ValueError 로 거부한다
+    - `\\` 와 `,` 는 그대로 통과한다
+
+    순서가 중요하다 — `%` 를 먼저 바꿔야 `%3a` 의 `%` 가 다시 인코딩되지 않는다.
+    """
+    if '"' in value:
+        raise ValueError(
+            'SSID/passphrase 에 " 가 있으면 tshark 에 넘길 수 없다 '
+            "(UAT 파서가 레코드 경계로 읽고, 이중화 이스케이프도 통하지 않는다)"
+        )
+    return value.replace("%", "%25").replace(":", "%3a")
 
 
 def build_ntp_tshark_cmd(
@@ -267,7 +304,7 @@ def build_ntp_tshark_cmd(
             "-o",
             "wlan.enable_decryption:TRUE",
             "-o",
-            f'uat:80211_keys:"wpa-pwd","{passphrase}:{ssid}"',
+            f'uat:80211_keys:"wpa-pwd","{encode_wpa_field(passphrase)}:{encode_wpa_field(ssid)}"',
         ]
     return cmd
 
@@ -553,7 +590,8 @@ def measure_offset_best(
             best = res
         if best.matched == len(responses):
             break  # 더 나아질 수 없다
-    assert best is not None
+    if best is None:  # event_sets 가 비어있지 않으면 도달 불가 — -O 에서도 살아남게 raise
+        raise RuntimeError("내부 오류: 후보 로그가 하나도 평가되지 않았다")
     if best.matched == 0:
         # 어느 로그와도 안 맞았다 — 대응 구간이 없는 캡처다. NTP 프레임만으로 낸다.
         best = analyze_offset(pcap, responses, tshark_warnings, [], **kwargs)
@@ -779,22 +817,36 @@ def shift_log_file(
 
     바이트를 그대로 보존하기 위해 surrogateescape 로 읽고 쓰며,
     개행문자(CRLF/LF)도 원본 그대로 유지한다.
+
+    읽으면서 바로 쓴다 — 로그가 수 GB 여도 메모리에 통째로 올리지 않는다.
+    중간에 끊기면 `shift_pcap_file` 과 같이 만들다 만 출력 파일을 지운다.
     """
     pats = patterns if patterns is not None else compile_patterns()
     total = changed = 0
-    out_lines: list[str] = []
-    with open(src, encoding="utf-8", errors="surrogateescape", newline="") as fh:
-        for line in fh:
-            total += 1
-            new_line, did = shift_line(line, delta, pats)
-            changed += did
-            if not dry_run:
-                out_lines.append(new_line)
-    if not dry_run:
-        dst = Path(dst)
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        with open(dst, "w", encoding="utf-8", errors="surrogateescape", newline="") as fh:
-            fh.writelines(out_lines)
+
+    if dry_run:
+        with open(src, encoding="utf-8", errors="surrogateescape", newline="") as fh:
+            for line in fh:
+                total += 1
+                changed += shift_line(line, delta, pats)[1]
+        return total, changed
+
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with (
+            open(src, encoding="utf-8", errors="surrogateescape", newline="") as fin,
+            open(dst, "w", encoding="utf-8", errors="surrogateescape", newline="") as fout,
+        ):
+            for line in fin:
+                total += 1
+                new_line, did = shift_line(line, delta, pats)
+                changed += did
+                fout.write(new_line)
+    except BaseException:
+        # 반쪽 파일이 남으면 다음 실행에서 원본으로 오인될 수 있다.
+        dst.unlink(missing_ok=True)
+        raise
     return total, changed
 
 
