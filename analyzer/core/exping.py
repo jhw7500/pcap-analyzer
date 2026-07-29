@@ -28,6 +28,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +55,10 @@ STATUS_TIMEOUT = "Request timed out"
 #: 실행마다 최적값이 0.28~0.44 ms 로 갈린다. 지연이 큰 캡처를 다룰 때는
 #: `--rtt-offset` 으로 조정할 수 있다.
 RTT_OFFSET_MS = 0.276
+
+#: tshark 자식 프로세스 상한(초). 손상 캡처에서 멈추면 CLI 가 무기한 매달린다.
+#: 실측 최대 133MB / 2시간 캡처가 분 단위라 넉넉하다. timesync-batch.py 와 같은 값.
+CHILD_TIMEOUT = 3600
 
 #: 응답으로 인정하는 상한(초). 이보다 늦게 온 echo reply 는 EXPING 도 타임아웃 처리한다.
 #:
@@ -274,6 +279,8 @@ def write_xlsx(
     ws = wb.active
     ws.title = dup_name
     fill(ws, TABLE_SHEET_TIME_FORMAT)
+    # fill() 의 루프는 ws["B"][1:] 이라 B1 을 건너뛴다 — 머리글 셀 서식은 여기서만 정한다.
+    # (기준 파일과 맞추는 부분이니 "중복"으로 보고 지우면 조용히 어긋난다.)
     ws["B1"].number_format = TABLE_SHEET_TIME_FORMAT
     for col, width in zip("ABCDEF", COLUMN_WIDTHS):
         ws.column_dimensions[col].width = width
@@ -298,13 +305,16 @@ TSHARK_FIELDS: tuple[str, ...] = (
     "icmp.type",
     "icmp.ident",
     "icmp.seq",
+    # 802.11 헤더가 붙은 프레임에만 값이 있다. 유선 캡처에서는 늘 빈 칸이다.
+    # 파일 단위 encap 은 인터페이스가 여럿인 pcapng 에서 틀린 답을 준다 — 프레임 단위로 본다.
+    "wlan.fc.type",
 )
 
 ICMP_ECHO_REQUEST = "8"
 ICMP_ECHO_REPLY = "0"
 
 #: 파싱된 ICMP 프레임 한 줄 — TSHARK_FIELDS 와 같은 순서.
-IcmpFrame = tuple[float, str, str, str, str, str]
+IcmpFrame = tuple[float, str, str, str, str, str, str]
 
 
 def build_tshark_cmd(pcap: str | Path, tshark: str = "tshark") -> list[str]:
@@ -323,7 +333,7 @@ def parse_icmp_line(line: str) -> IcmpFrame | None:
         epoch = float(f[0])
     except ValueError:
         return None
-    return (epoch, f[1], f[2], f[3], f[4], f[5])
+    return (epoch, f[1], f[2], f[3], f[4], f[5], f[6])
 
 
 def parse_icmp_tsv(text: str) -> list[IcmpFrame]:
@@ -334,7 +344,7 @@ def parse_icmp_tsv(text: str) -> list[IcmpFrame]:
 def pick_sender(frames: list[IcmpFrame]) -> str:
     """echo request 를 가장 많이 보낸 호스트를 EXPING 실행 PC 로 본다."""
     counts: dict[str, int] = {}
-    for _, src, _dst, typ, _ident, _seq in frames:
+    for _, src, _dst, typ, _ident, _seq, _wlan in frames:
         if typ == ICMP_ECHO_REQUEST:
             counts[src] = counts.get(src, 0) + 1
     if not counts:
@@ -349,9 +359,19 @@ def pair_exchanges(
 
     응답은 (ident, seq, 상대IP) 로 찾는다. 대상이 여러 개면 EXPING 은 대상을 번갈아
     보내고 로그도 그 순서 그대로다 — 그래서 대상별로 나누지 않고 시각 순 한 줄로 낸다.
+
+    **짝지은 응답을 목록에서 빼지 않는다.** 같은 키가 창 안에 두 번 나오면 같은 응답이
+    여러 요청에 매핑될 수 있는데, 그래도 그냥 두는 이유:
+
+    - seq 순환은 못 온다. icmp.seq 는 16비트라 관측된 8.5 ping/s 로 2시간 넘게 걸리는데,
+      응답 인정 창은 1초다.
+    - 창 안에서 키가 겹치는 경우는 모니터 캡처의 802.11 retry 사본뿐이다. 그때는 문제가
+      "응답 재사용"이 아니라 **요청 행 자체가 중복**인 것이라(무선 11,224 대 유선 9,296),
+      응답을 소비하도록 바꾸면 OK 9,467 → 7,967 로 되레 틀려진다.
+    - 지원 대상인 유선 캡처에서는 중복 키가 0건이라 아무 차이가 없다.
     """
     replies: dict[tuple[str, str, str], list[float]] = {}
-    for epoch, src, dst, typ, ident, seq in frames:
+    for epoch, src, dst, typ, ident, seq, _wlan in frames:
         if typ == ICMP_ECHO_REPLY and dst == sender:
             replies.setdefault((ident, seq, src), []).append(epoch)
     for v in replies.values():
@@ -362,7 +382,7 @@ def pair_exchanges(
         key=lambda f: f[0],
     )
     out: list[Exchange] = []
-    for epoch, _src, dst, _typ, ident, seq in requests:
+    for epoch, _src, dst, _typ, ident, seq, _wlan in requests:
         cand = [x for x in replies.get((ident, seq, dst), ()) if epoch <= x <= epoch + timeout]
         out.append(Exchange(epoch, dst, (cand[0] - epoch) if cand else None))
     return out
@@ -382,11 +402,32 @@ def drop_trailing_unanswered(exchanges: list[Exchange]) -> tuple[list[Exchange],
     return kept, dropped
 
 
+def count_wireless_requests(frames: list[IcmpFrame], sender: str) -> tuple[int, int]:
+    """(sender 가 보낸 echo request 수, 그중 802.11 프레임에서 온 수).
+
+    무선(모니터) 캡처를 넣으면 도구는 그냥 돌아가지만 결과가 조용히 틀린다 —
+    모니터가 못 들은 프레임이 전부 손실로 계산된다. 실측(2026-07-21 TEST1):
+    유선 9,296행 / ＮＧ 15 / 0.16% 대 무선 11,224행 / ＮＧ 1,757 / **15.65%**.
+
+    파일 단위 encap 이 아니라 프레임 단위로 세는 이유: 인터페이스가 여럿인 pcapng
+    (유선+무선을 함께 뜬 것, mergecap 결과)에서는 파일 단위 판정이 무의미하고
+    같은 ping 이 두 번 세어진다.
+    """
+    total = wireless = 0
+    for _epoch, src, _dst, typ, _ident, _seq, wlan in frames:
+        if typ == ICMP_ECHO_REQUEST and src == sender:
+            total += 1
+            wireless += bool(wlan)
+    return total, wireless
+
+
 def extract_exchanges(
     pcap: str | Path,
     tshark: str = "tshark",
     sender: str | None = None,
     timeout: float = DEFAULT_REPLY_TIMEOUT,
+    child_timeout: float | None = CHILD_TIMEOUT,
+    allow_wireless: bool = False,
 ) -> tuple[list[Exchange], str]:
     """pcap 을 읽어 (교환 목록, 송신 호스트) 를 낸다.
 
@@ -407,15 +448,39 @@ def extract_exchanges(
             stderr=errf,
             text=True,
         )
-        for line in proc.stdout or ():
-            parsed = parse_icmp_line(line)
-            if parsed is not None:
-                frames.append(parsed)
-        if proc.stdout is not None:
-            proc.stdout.close()
-        returncode = proc.wait()
+        # 파이프 읽기에서 블록되면 루프 안의 시각 검사는 영영 실행되지 않는다.
+        # 밖에서 죽여야 한다. 외부 kill 과 구분하려고 발동 여부를 따로 남긴다.
+        timed_out: list[bool] = []
+
+        def _kill_child() -> None:
+            timed_out.append(True)
+            proc.kill()
+
+        killer = threading.Timer(child_timeout, _kill_child) if child_timeout else None
+        if killer is not None:
+            killer.daemon = True
+            killer.start()
+        try:
+            for line in proc.stdout or ():
+                parsed = parse_icmp_line(line)
+                if parsed is not None:
+                    frames.append(parsed)
+            returncode = proc.wait()
+        except BaseException:
+            # 여기서 안 죽이면 tshark 가 고아로 남아 pcap 파일 핸들을 계속 쥔다.
+            proc.kill()
+            proc.wait()
+            raise
+        finally:
+            if killer is not None:
+                killer.cancel()
+            if proc.stdout is not None:
+                proc.stdout.close()
         errf.seek(0)
         err = errf.read()
+
+    if timed_out:
+        raise TimeoutError(f"tshark 가 {child_timeout:g}초 안에 끝나지 않아 중단했다: {pcap}")
 
     if returncode != 0:
         detail = err.strip().splitlines()
@@ -434,4 +499,25 @@ def extract_exchanges(
             file=sys.stderr,
         )
     src = sender or pick_sender(frames)
+
+    total, wireless = count_wireless_requests(frames, src)
+    if wireless and not allow_wireless:
+        if wireless == total:
+            raise ValueError(
+                f"무선(802.11) 캡처다 — 유선 캡처를 넣어라: {pcap}\n"
+                "  모니터가 못 들은 프레임이 전부 손실로 계산돼 손실률이 크게 부풀려진다 "
+                "(실측 0.16% 대 15.65%).\n"
+                "  그래도 진행하려면 --allow-wireless 를 붙여라."
+            )
+        print(
+            f"[!] echo request {total:,}건 중 {wireless:,}건이 802.11 프레임이다 — "
+            "인터페이스가 여럿인 캡처로 보인다.",
+            file=sys.stderr,
+        )
+        print(
+            "[!] 같은 ping 이 두 번 세어져 행 수와 손실률이 왜곡될 수 있다. "
+            "유선 인터페이스만 담긴 캡처를 쓰는 편이 낫다.",
+            file=sys.stderr,
+        )
+
     return pair_exchanges(frames, src, timeout), src

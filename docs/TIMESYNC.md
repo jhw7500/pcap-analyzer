@@ -148,7 +148,7 @@ python3 scripts/timesync-batch.py <루트> --out <출력루트> [--skip-existing
 | 옵션 | 설명 |
 |---|---|
 | `--out` | **필수.** 출력 루트 |
-| `--skip-existing` | 이미 `offset.json`이 있으면 건너뜀 (중단 후 재개) |
+| `--skip-existing` | 중단 후 재개 — `offset.json`이 있으면 측정만 건너뛰고 **보정은 이어서** 한다. 보정본까지 다 있으면 그 데이터셋 전체를 건너뛴다 |
 | `--measure-only` | 측정만, pcap 보정 안 함 |
 | `--dry-run` | 대상만 나열 |
 

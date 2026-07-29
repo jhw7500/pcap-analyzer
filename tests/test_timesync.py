@@ -132,6 +132,26 @@ def _load_batch_cli():
     return mod
 
 
+def test_coerce_wraps_scalar_pcap_into_list():
+    """`pcap` 의 기본값은 None 이라 '기본값이 list 인가'로는 안 걸린다.
+
+    안 감싸면 소비자가 문자열을 글자 단위로 순회해 tshark 를 글자 수만큼 부른다.
+    """
+    assert ts._coerce("pcap", "cap.pcapng") == ["cap.pcapng"]
+    assert ts._coerce("glob", "*.log") == ["*.log"]
+    assert ts._coerce("pattern", "^x") == ["^x"]
+    # 이미 리스트면 그대로, 리스트 옵션이 아니면 감싸지 않는다.
+    assert ts._coerce("pcap", ["a", "b"]) == ["a", "b"]
+    assert ts._coerce("tshark", "tshark") == "tshark"
+
+
+def test_load_config_wraps_scalar_pcap(tmp_path):
+    cfg = tmp_path / "timesync.json"
+    cfg.write_text(json.dumps({"pcap": "cap.pcapng"}), encoding="utf-8")
+    loaded, _ = ts.load_config(cfg)
+    assert ts.merge_options({}, loaded)["pcap"] == ["cap.pcapng"]
+
+
 def test_mask_cmd_hides_psk():
     """명령 에코가 PSK 를 평문으로 터미널·CI 로그에 남기면 안 된다."""
     batch = _load_batch_cli()
@@ -383,11 +403,15 @@ def test_shift_line_ignores_body_dates():
     assert got == "2026-07-21 14:56:37\tNTP: Setting clock (2015-01-01 00:00:07)\n"
 
 
-def test_shift_line_survives_overflowing_offset():
-    """회귀: 거대한 오프셋의 OverflowError 가 2단계를 중단시키고 반쪽 출력을 남겼다."""
+@pytest.mark.parametrize("delta", [1e15, -1e15, 1e300])
+def test_shift_line_survives_out_of_range_offset(delta):
+    """회귀: 거대한 오프셋의 OverflowError 가 2단계를 중단시키고 반쪽 출력을 남겼다.
+
+    delta 가 datetime 범위를 넘겨도 예외를 밖으로 던지지 않고 원본 줄을 그대로 돌려준다.
+    """
     pats = ts.compile_patterns()
     line = "2026-07-21 14:57:01.205 x\n"
-    got, changed = ts.shift_line(line, 1e15, pats)
+    got, changed = ts.shift_line(line, delta, pats)
     assert changed is False
     assert got == line
 
@@ -420,13 +444,16 @@ def test_compile_patterns_rejects_pattern_without_ts_group():
         ts.compile_patterns([r"^(?P<ts>["])
 
 
-def test_shift_line_survives_out_of_range_offset():
-    """delta 가 datetime 범위를 넘겨도 예외를 밖으로 던지면 안 된다."""
-    pats = ts.compile_patterns()
-    line = "2026-07-21 14:57:01.205 x\n"
-    got, changed = ts.shift_line(line, 1e15, pats)
-    assert changed is False
-    assert got == line
+def test_shift_timestamp_text_keeps_sub_microsecond_digits():
+    """delta 는 timedelta 해상도(마이크로초)까지다 — 그 아래 자릿수를 0으로 덮으면 안 된다.
+
+    나노초 로그(tcpdump --time-stamp-precision=nano)를 다룰 때 조용히 정밀도가 사라진다.
+    """
+    ns = "2026-07-21 14:57:01.123456789"
+    assert ts._shift_timestamp_text(ns, 0.0) == ns
+    assert ts._shift_timestamp_text(ns, 1.0) == "2026-07-21 14:57:02.123456789"
+    # 마이크로초까지는 종전대로 이동하고 반올림한다.
+    assert ts._shift_timestamp_text("2026-07-21 14:57:01.205", 1.0) == "2026-07-21 14:57:02.205"
 
 
 def test_parse_sync_events_skips_malformed_line(tmp_path):
