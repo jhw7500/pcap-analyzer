@@ -439,6 +439,9 @@ def extract_exchanges(
     stderr 는 파이프가 아니라 임시 파일로 받는다. 파이프로 받으면 경고가 많은 캡처에서
     stderr 버퍼(보통 64KB)가 차는 순간 tshark 가 쓰기에서 멈추고, 부모는 stdout 만
     읽고 있어 EOF 가 오지 않아 서로 영원히 기다린다.
+
+    `child_timeout` 은 tshark 상한(초)이다. `None`(또는 0)이면 상한을 걸지 않는다 —
+    무기한 대기를 감수한다는 뜻이니 의도한 경우에만 쓴다.
     """
     frames: list[IcmpFrame] = []
     with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as errf:

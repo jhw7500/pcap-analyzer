@@ -227,6 +227,20 @@ def test_parse_icmp_tsv_skips_malformed_lines():
     assert got == [(1.0, "10.0.0.1", "10.0.0.2", "8", "1", "5", "")]
 
 
+def test_parse_icmp_line_guard_follows_field_list():
+    """필드 수 가드는 TSHARK_FIELDS 에서 파생돼야 한다 — 개수를 하드코딩하면 깨진다.
+
+    필드를 하나 늘렸을 때(wlan.fc.type 추가) 예전 폭의 줄이 들어오면 가드를 통과한 뒤
+    인덱스 오류로 죽을 수 있다. 지금은 파생이라 조용히 None 이다.
+    """
+    short = "\t".join(["1.0"] + ["x"] * (len(ep.TSHARK_FIELDS) - 2)) + "\n"
+    assert ep.parse_icmp_line(short) is None  # 한 칸 모자람 — epoch 는 유효하다
+    long = "\t".join(["1.0"] + ["x"] * len(ep.TSHARK_FIELDS)) + "\n"
+    assert ep.parse_icmp_line(long) is None  # 한 칸 넘침
+    exact = "\t".join(["1.0"] + ["x"] * (len(ep.TSHARK_FIELDS) - 1)) + "\n"
+    assert ep.parse_icmp_line(exact) is not None
+
+
 def test_parse_icmp_line_returns_none_for_bad_input():
     assert ep.parse_icmp_line("1.0\ta\tb\t8\t1\t5\t\n") == (1.0, "a", "b", "8", "1", "5", "")
     assert ep.parse_icmp_line("1.0\ta\tb\n") is None  # 필드 부족
@@ -344,21 +358,21 @@ def test_extract_exchanges_kills_hung_tshark(tmp_path):
     """파이프 읽기에서 막히면 루프 안 검사로는 못 잡는다 — 밖에서 죽여야 한다."""
     hung = _fake_tshark(tmp_path, _WIRED + "exec sleep 300\n")  # exec: fd 를 쥔 손자를 남기지 않는다
     with pytest.raises(TimeoutError, match="끝나지 않아"):
-        ep.extract_exchanges("x.pcapng", tshark=hung, child_timeout=1.0)
+        # 상한 자체를 검증하는 테스트라 값은 작을수록 좋다 (CI 시간).
+        ep.extract_exchanges("x.pcapng", tshark=hung, child_timeout=0.3)
 
 
 def test_extract_exchanges_kills_child_on_exception(tmp_path, monkeypatch):
     """중간에 예외가 나도 tshark 를 고아로 남기지 않는다 (pcap 핸들을 계속 쥔다)."""
     slow = _fake_tshark(tmp_path, _WIRED + "exec sleep 300\n")  # exec: fd 를 쥔 손자를 남기지 않는다
-    real = ep.parse_icmp_line
 
     def boom(line):
         raise RuntimeError("중단")
 
+    # monkeypatch 는 테스트 종료 시 자동 복원된다 — 수동 되돌리기는 없어야 한다.
     monkeypatch.setattr(ep, "parse_icmp_line", boom)
     with pytest.raises(RuntimeError, match="중단"):
         ep.extract_exchanges("x.pcapng", tshark=slow, child_timeout=30.0)
-    monkeypatch.setattr(ep, "parse_icmp_line", real)
 
 
 def test_extract_exchanges_survives_huge_stderr(tmp_path):
