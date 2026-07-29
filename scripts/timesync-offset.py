@@ -229,7 +229,14 @@ def main() -> int:
     # 사람이 읽는 요약용 대표값 (가장 이벤트가 많은 로그)
     syslog, events = max(event_sets, key=lambda kv: len(kv[1]))
 
-    pcaps = [Path(p) for p in opts["pcap"]] if opts["pcap"] else timesync.find_pcaps(dataset)
+    # 절대경로로 잡아 둔다 — 결과 JSON 의 sources[].pcap 이 그대로 2단계 입력이 되는데,
+    # 상대경로면 다른 작업 디렉터리에서 못 찾거나 rglob 폴백이 동명 파일 중 하나를
+    # 임의로 고른다.
+    pcaps = (
+        [Path(p).resolve() for p in opts["pcap"]]
+        if opts["pcap"]
+        else [p.resolve() for p in timesync.find_pcaps(dataset)]
+    )
     if not pcaps:
         print(f"ERROR: pcap 을 찾지 못했다: {dataset}", file=sys.stderr)
         return 2
@@ -315,8 +322,11 @@ def main() -> int:
     usable = [r for r in results if r.log_shift_seconds is not None]
     payload = {
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "dataset": str(dataset),
-        "syslog": str(syslog),
+        # 절대경로로 적는다. 2단계(timesync-shift-pcap.py)는 다른 작업 디렉터리에서
+        # 돌리는 것을 전제로 만들어졌는데, 상대경로로 저장하면 그때 resolve_src 가
+        # 새 cwd 기준으로 해석해 pcap 을 전부 "없음"으로 보고한다.
+        "dataset": str(dataset.resolve()),
+        "syslog": str(Path(syslog).resolve()),
         "sync_events": len(events),
         "config_file": str(cfg_path) if cfg_path else None,
         # 이 블록을 그대로 --config 로 되먹일 수 있다.

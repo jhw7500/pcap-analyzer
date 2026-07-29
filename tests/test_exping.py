@@ -218,19 +218,19 @@ def _tsv(*rows):
 
 def test_parse_icmp_tsv_skips_malformed_lines():
     text = _tsv(
-        (1.0, "10.0.0.1", "10.0.0.2", "8", "1", "5"),
+        (1.0, "10.0.0.1", "10.0.0.2", "8", "1", "5", ""),
         ("", "10.0.0.1", "10.0.0.2", "8", "1", "6"),  # 시각 없음
         ("bad", "10.0.0.1", "10.0.0.2", "8", "1", "7"),  # 시각 파싱 실패
         (2.0, "10.0.0.1"),  # 필드 부족
     )
     got = ep.parse_icmp_tsv(text)
-    assert got == [(1.0, "10.0.0.1", "10.0.0.2", "8", "1", "5")]
+    assert got == [(1.0, "10.0.0.1", "10.0.0.2", "8", "1", "5", "")]
 
 
 def test_parse_icmp_line_returns_none_for_bad_input():
-    assert ep.parse_icmp_line("1.0\ta\tb\t8\t1\t5\n") == (1.0, "a", "b", "8", "1", "5")
+    assert ep.parse_icmp_line("1.0\ta\tb\t8\t1\t5\t\n") == (1.0, "a", "b", "8", "1", "5", "")
     assert ep.parse_icmp_line("1.0\ta\tb\n") is None  # 필드 부족
-    assert ep.parse_icmp_line("x\ta\tb\t8\t1\t5\n") is None  # 시각 파싱 실패
+    assert ep.parse_icmp_line("x\ta\tb\t8\t1\t5\t\n") is None  # 시각 파싱 실패
 
 
 def test_extract_exchanges_reports_tshark_failure():
@@ -247,8 +247,8 @@ def test_extract_exchanges_warns_on_partial_capture(tmp_path, capsys):
     fake = tmp_path / "fake-tshark"
     fake.write_text(
         "#!/bin/sh\n"
-        "printf '1.5\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\n'\n"
-        "printf '1.502\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\n'\n"
+        "printf '1.5\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        "printf '1.502\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
         "echo 'tshark: The file appears to be damaged' >&2\n"
         "exit 2\n"
     )
@@ -267,12 +267,98 @@ def test_extract_exchanges_silent_when_tshark_succeeds(tmp_path, capsys):
     fake = tmp_path / "ok-tshark"
     fake.write_text(
         "#!/bin/sh\n"
-        "printf '1.5\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\n'\n"
-        "printf '1.502\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\n'\n"
+        "printf '1.5\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        "printf '1.502\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
     )
     fake.chmod(0o755)
     ep.extract_exchanges("ignored.pcapng", tshark=str(fake))
     assert capsys.readouterr().err == ""
+
+
+def _fake_tshark(tmp_path, body: str, name: str = "fake-tshark"):
+    f = tmp_path / name
+    f.write_text("#!/bin/sh\n" + body)
+    f.chmod(0o755)
+    return str(f)
+
+
+# --------------------------------------------------------------------------
+# 무선(802.11) 캡처 가드
+# --------------------------------------------------------------------------
+
+#: 유선 프레임 2개(요청+응답). 마지막 필드(wlan.fc.type)가 비어 있다.
+_WIRED = (
+    "printf '1.5\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+    "printf '1.502\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+)
+#: 같은 교환이지만 802.11 헤더가 붙어 있다(wlan.fc.type=2).
+_WIRELESS = (
+    "printf '1.5\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t2\\n'\n"
+    "printf '1.502\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t2\\n'\n"
+)
+
+
+def test_count_wireless_requests_counts_only_senders_requests():
+    frames = [
+        (1.0, "10.0.0.1", "10.0.0.2", "8", "7", "1", ""),
+        (1.1, "10.0.0.1", "10.0.0.2", "8", "7", "2", "2"),  # 무선
+        (1.2, "10.0.0.9", "10.0.0.2", "8", "7", "3", "2"),  # 남의 요청
+        (1.3, "10.0.0.2", "10.0.0.1", "0", "7", "1", "2"),  # 응답은 안 센다
+    ]
+    assert ep.count_wireless_requests(frames, "10.0.0.1") == (2, 1)
+
+
+def test_extract_exchanges_rejects_wireless_capture(tmp_path):
+    """무선 캡처는 조용히 틀린 손실률을 내므로 막는다 (실측 0.16% 대 15.65%)."""
+    with pytest.raises(ValueError, match="무선"):
+        ep.extract_exchanges("x.pcapng", tshark=_fake_tshark(tmp_path, _WIRELESS))
+
+
+def test_extract_exchanges_allows_wireless_when_asked(tmp_path):
+    exchanges, sender = ep.extract_exchanges(
+        "x.pcapng", tshark=_fake_tshark(tmp_path, _WIRELESS), allow_wireless=True
+    )
+    assert sender == "10.0.0.1" and len(exchanges) == 1
+
+
+def test_extract_exchanges_warns_on_mixed_interface_capture(tmp_path, capsys):
+    """유선+무선이 섞인 pcapng 는 같은 ping 이 두 번 세어진다 — 경고는 하되 막지는 않는다."""
+    mixed = _fake_tshark(tmp_path, _WIRED + _WIRELESS.replace("\\t7\\t1\\t", "\\t7\\t2\\t"))
+    exchanges, _ = ep.extract_exchanges("x.pcapng", tshark=mixed)
+    assert len(exchanges) == 2
+    err = capsys.readouterr().err
+    assert "802.11" in err and "두 번 세어져" in err
+
+
+def test_extract_exchanges_quiet_on_pure_wired(tmp_path, capsys):
+    ep.extract_exchanges("x.pcapng", tshark=_fake_tshark(tmp_path, _WIRED))
+    assert capsys.readouterr().err == ""
+
+
+# --------------------------------------------------------------------------
+# 자식 프로세스 상한 / 정리
+# --------------------------------------------------------------------------
+
+
+def test_extract_exchanges_kills_hung_tshark(tmp_path):
+    """파이프 읽기에서 막히면 루프 안 검사로는 못 잡는다 — 밖에서 죽여야 한다."""
+    hung = _fake_tshark(tmp_path, _WIRED + "exec sleep 300\n")  # exec: fd 를 쥔 손자를 남기지 않는다
+    with pytest.raises(TimeoutError, match="끝나지 않아"):
+        ep.extract_exchanges("x.pcapng", tshark=hung, child_timeout=1.0)
+
+
+def test_extract_exchanges_kills_child_on_exception(tmp_path, monkeypatch):
+    """중간에 예외가 나도 tshark 를 고아로 남기지 않는다 (pcap 핸들을 계속 쥔다)."""
+    slow = _fake_tshark(tmp_path, _WIRED + "exec sleep 300\n")  # exec: fd 를 쥔 손자를 남기지 않는다
+    real = ep.parse_icmp_line
+
+    def boom(line):
+        raise RuntimeError("중단")
+
+    monkeypatch.setattr(ep, "parse_icmp_line", boom)
+    with pytest.raises(RuntimeError, match="중단"):
+        ep.extract_exchanges("x.pcapng", tshark=slow, child_timeout=30.0)
+    monkeypatch.setattr(ep, "parse_icmp_line", real)
 
 
 def test_extract_exchanges_survives_huge_stderr(tmp_path):
@@ -285,8 +371,8 @@ def test_extract_exchanges_survives_huge_stderr(tmp_path):
         "#!/bin/sh\n"
         # 파이프 버퍼(보통 64KB)를 훌쩍 넘기는 stderr 를 먼저 쏟는다.
         "awk 'BEGIN{for(i=0;i<20000;i++) print \"warn: malformed frame\" > \"/dev/stderr\"}'\n"
-        "printf '1.5\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\n'\n"
-        "printf '1.502\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\n'\n"
+        "printf '1.5\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        "printf '1.502\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
     )
     fake.chmod(0o755)
 
@@ -298,17 +384,17 @@ def test_extract_exchanges_survives_huge_stderr(tmp_path):
 
 def test_pick_sender_uses_request_majority():
     frames = [
-        (1.0, "10.0.0.9", "10.0.0.2", "8", "1", "1"),
-        (2.0, "10.0.0.1", "10.0.0.2", "8", "1", "2"),
-        (3.0, "10.0.0.1", "10.0.0.2", "8", "1", "3"),
-        (4.0, "10.0.0.2", "10.0.0.1", "0", "1", "3"),  # reply 는 세지 않는다
+        (1.0, "10.0.0.9", "10.0.0.2", "8", "1", "1", ""),
+        (2.0, "10.0.0.1", "10.0.0.2", "8", "1", "2", ""),
+        (3.0, "10.0.0.1", "10.0.0.2", "8", "1", "3", ""),
+        (4.0, "10.0.0.2", "10.0.0.1", "0", "1", "3", ""),  # reply 는 세지 않는다
     ]
     assert ep.pick_sender(frames) == "10.0.0.1"
 
 
 def test_pick_sender_raises_without_requests():
     with pytest.raises(ValueError, match="echo request"):
-        ep.pick_sender([(1.0, "a", "b", "0", "1", "1")])
+        ep.pick_sender([(1.0, "a", "b", "0", "1", "1", "")])
 
 
 # --------------------------------------------------------------------------
@@ -318,9 +404,9 @@ def test_pick_sender_raises_without_requests():
 
 def test_pair_exchanges_matches_by_ident_seq_and_peer():
     frames = [
-        (1.000, "10.0.0.1", "10.0.0.2", "8", "7", "1"),
-        (1.002, "10.0.0.2", "10.0.0.1", "0", "7", "1"),
-        (1.100, "10.0.0.1", "10.0.0.2", "8", "7", "2"),  # 응답 없음
+        (1.000, "10.0.0.1", "10.0.0.2", "8", "7", "1", ""),
+        (1.002, "10.0.0.2", "10.0.0.1", "0", "7", "1", ""),
+        (1.100, "10.0.0.1", "10.0.0.2", "8", "7", "2", ""),  # 응답 없음
     ]
     got = ep.pair_exchanges(frames, "10.0.0.1")
     assert len(got) == 2
@@ -330,8 +416,8 @@ def test_pair_exchanges_matches_by_ident_seq_and_peer():
 
 def test_pair_exchanges_ignores_reply_beyond_timeout():
     frames = [
-        (1.0, "10.0.0.1", "10.0.0.2", "8", "7", "1"),
-        (3.5, "10.0.0.2", "10.0.0.1", "0", "7", "1"),
+        (1.0, "10.0.0.1", "10.0.0.2", "8", "7", "1", ""),
+        (3.5, "10.0.0.2", "10.0.0.1", "0", "7", "1", ""),
     ]
     assert ep.pair_exchanges(frames, "10.0.0.1", timeout=1.0)[0].rtt is None
     assert ep.pair_exchanges(frames, "10.0.0.1", timeout=5.0)[0].rtt == pytest.approx(2.5)
@@ -340,8 +426,8 @@ def test_pair_exchanges_ignores_reply_beyond_timeout():
 def test_pair_exchanges_does_not_borrow_other_targets_reply():
     """같은 (ident, seq) 라도 상대 IP 가 다르면 남의 응답이다."""
     frames = [
-        (1.0, "10.0.0.1", "10.0.0.2", "8", "7", "1"),
-        (1.1, "10.0.0.3", "10.0.0.1", "0", "7", "1"),  # .3 이 보낸 응답
+        (1.0, "10.0.0.1", "10.0.0.2", "8", "7", "1", ""),
+        (1.1, "10.0.0.3", "10.0.0.1", "0", "7", "1", ""),  # .3 이 보낸 응답
     ]
     assert ep.pair_exchanges(frames, "10.0.0.1")[0].rtt is None
 
@@ -352,8 +438,8 @@ def test_pair_exchanges_keeps_multi_target_time_order():
     t = 100.0
     for i in range(6):
         target = f"10.0.0.{21 + i % 3}"
-        frames.append((t, "10.0.0.1", target, "8", "7", str(i)))
-        frames.append((t + 0.001, target, "10.0.0.1", "0", "7", str(i)))
+        frames.append((t, "10.0.0.1", target, "8", "7", str(i), ""))
+        frames.append((t + 0.001, target, "10.0.0.1", "0", "7", str(i), ""))
         t += 0.11
     got = ep.pair_exchanges(frames, "10.0.0.1")
     assert [e.target[-2:] for e in got] == ["21", "22", "23", "21", "22", "23"]
@@ -362,8 +448,8 @@ def test_pair_exchanges_keeps_multi_target_time_order():
 
 def test_pair_exchanges_ignores_requests_from_other_hosts():
     frames = [
-        (1.0, "10.0.0.9", "10.0.0.2", "8", "7", "1"),
-        (2.0, "10.0.0.1", "10.0.0.2", "8", "7", "2"),
+        (1.0, "10.0.0.9", "10.0.0.2", "8", "7", "1", ""),
+        (2.0, "10.0.0.1", "10.0.0.2", "8", "7", "2", ""),
     ]
     got = ep.pair_exchanges(frames, "10.0.0.1")
     assert len(got) == 1 and got[0].time == 2.0
@@ -371,10 +457,10 @@ def test_pair_exchanges_ignores_requests_from_other_hosts():
 
 def test_pair_exchanges_picks_earliest_reply_at_or_after_request():
     frames = [
-        (5.0, "10.0.0.1", "10.0.0.2", "8", "7", "1"),
-        (4.0, "10.0.0.2", "10.0.0.1", "0", "7", "1"),  # 요청보다 이르다 — 무시
-        (5.3, "10.0.0.2", "10.0.0.1", "0", "7", "1"),
-        (5.9, "10.0.0.2", "10.0.0.1", "0", "7", "1"),
+        (5.0, "10.0.0.1", "10.0.0.2", "8", "7", "1", ""),
+        (4.0, "10.0.0.2", "10.0.0.1", "0", "7", "1", ""),  # 요청보다 이르다 — 무시
+        (5.3, "10.0.0.2", "10.0.0.1", "0", "7", "1", ""),
+        (5.9, "10.0.0.2", "10.0.0.1", "0", "7", "1", ""),
     ]
     assert ep.pair_exchanges(frames, "10.0.0.1")[0].rtt == pytest.approx(0.3)
 
@@ -471,6 +557,9 @@ def test_write_xlsx_structure(tmp_path):
     table_sheet, plain_sheet = wb.worksheets
     assert table_sheet.max_row == len(rows) + 1
     assert [c.value for c in table_sheet[1]] == list(ep.HEADER)
+    assert table_sheet["B1"].number_format == ep.TABLE_SHEET_TIME_FORMAT, (
+        "머리글 셀 B1 은 fill() 이 건너뛴다 — 별도 지정이 사라지면 기준 파일과 어긋난다"
+    )
     assert table_sheet["B2"].number_format == ep.TABLE_SHEET_TIME_FORMAT
     assert plain_sheet["B2"].number_format == ep.PLAIN_SHEET_TIME_FORMAT
     assert [table_sheet.column_dimensions[c].width for c in "ABCDEF"] == list(ep.COLUMN_WIDTHS)

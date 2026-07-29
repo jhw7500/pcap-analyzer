@@ -49,7 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--skip-existing",
         action="store_true",
-        help="이미 offset.json 이 있는 데이터셋은 건너뛴다 (중단 후 재개용)",
+        help="중단 후 재개용 — offset.json 이 있으면 측정을 건너뛰고 보정만 이어서 한다. "
+        "보정본까지 모두 있으면 데이터셋 전체를 건너뛴다",
     )
     p.add_argument(
         "--measure-only",
@@ -101,6 +102,29 @@ def mask_cmd(cmd: list[str]) -> str:
         out.append(part)
         hide = part in _SECRET_FLAGS
     return " ".join(out)
+
+
+def shift_dst(pcap: str, dataset: Path | None, outdir: Path) -> Path:
+    """2단계가 이 소스를 어디에 쓸지 계산한다.
+
+    `timesync-shift-pcap.py` 의 계획 로직과 **같아야 한다** — 다르면 완료 판정이 틀린다.
+    """
+    src = Path(pcap)
+    try:
+        rel = src.resolve().relative_to(dataset.resolve()) if dataset else Path(src.name)
+    except (ValueError, OSError):
+        rel = Path(src.name)
+    return outdir / rel
+
+
+def shift_outputs_complete(usable: list[dict], dataset: str | None, outdir: Path) -> bool:
+    """오프셋이 나온 소스의 보정본이 **모두** 있으면 True.
+
+    존재만 본다. 강제종료로 잘린 파일은 못 거른다 — 다시 보정하는 쪽이
+    측정보다 훨씬 싸므로 애매하면 다시 하는 편이 안전하다.
+    """
+    base = Path(dataset) if isinstance(dataset, str) else None
+    return all(shift_dst(s["pcap"], base, outdir).is_file() for s in usable)
 
 
 def run(cmd: list[str], log) -> int:
@@ -168,18 +192,20 @@ def main() -> int:
         elapsed = time.monotonic() - t0
         print(f"=== [{i}/{len(datasets)}] {ds.name}  (경과 {elapsed / 60:.1f}분) ===", flush=True)
 
-        if args.skip_existing and offset_json.is_file():
-            print("    이미 측정됨 — 건너뜀")
-            summary.append({"dataset": ds.name, "status": "skipped"})
-            print()
-            continue
-
+        # --skip-existing 은 "중단 후 재개"용이다. offset.json 만 보고 데이터셋을 통째로
+        # 건너뛰면, 측정 후 보정 전에 끊긴 배치는 보정본을 영영 못 만들면서 성공(skipped)으로
+        # 보고된다. 측정만 재사용하고 보정 단계로 넘어간다.
         log: list[str] = []
-        rc = run(
-            [sys.executable, str(OFFSET_CLI), str(ds), "--no-config", "-o", str(offset_json)]
-            + passthru,
-            log,
-        )
+        reused = bool(args.skip_existing and offset_json.is_file())
+        if reused:
+            print("    이미 측정됨 — 1단계 건너뜀 (기존 offset.json 재사용)")
+            rc = 0
+        else:
+            rc = run(
+                [sys.executable, str(OFFSET_CLI), str(ds), "--no-config", "-o", str(offset_json)]
+                + passthru,
+                log,
+            )
         if rc != 0 or not offset_json.is_file():
             print(f"    [!] 1단계 실패 (rc={rc})")
             summary.append({"dataset": ds.name, "status": f"measure-failed(rc={rc})"})
@@ -203,7 +229,13 @@ def main() -> int:
             "shifts": {Path(s["pcap"]).name: s["log_shift_seconds"] for s in usable},
         }
 
-        if not args.measure_only and usable:
+        if args.measure_only or not usable:
+            if reused:
+                entry["status"] = "skipped"
+        elif reused and shift_outputs_complete(usable, doc.get("dataset"), dst / "pcap"):
+            print("    보정본도 모두 있음 — 건너뜀")
+            entry["status"] = "skipped"
+        else:
             rc = run(
                 [sys.executable, str(SHIFT_CLI), str(offset_json), "--out", str(dst / "pcap")]
                 + (["--editcap", args.editcap] if args.editcap else []),

@@ -78,6 +78,10 @@ DEFAULT_OPTIONS: dict = {
     "pattern": [],  # 2단계 추가 타임스탬프 정규식
 }
 
+#: 값을 여러 개 받는 옵션. 설정 JSON 에 문자열 하나만 와도 리스트로 감싼다.
+#: 기본값이 list 인지로 판별하면 `pcap`(기본값 None)이 빠진다 — 명시적으로 적는다.
+LIST_OPTION_KEYS: frozenset[str] = frozenset({"pcap", "glob", "pattern"})
+
 
 @dataclass
 class NtpResponse:
@@ -727,11 +731,11 @@ def analyze_offset(
         result.samples.append(
             {
                 "syslog_line": m.event.line_no,
-                "syslog_time": _fmt_epoch(m.event.ts),
-                "ntp_org": _fmt_epoch(m.response.org),
+                "syslog_time": _fmt_epoch(m.event.ts, tz),
+                "ntp_org": _fmt_epoch(m.response.org, tz),
                 "frame": m.response.frame_no,
-                "arrival": _fmt_epoch(m.response.arrival),
-                "ntp_xmt": _fmt_epoch(m.response.xmt),
+                "arrival": _fmt_epoch(m.response.arrival, tz),
+                "ntp_xmt": _fmt_epoch(m.response.xmt, tz),
                 "capture_minus_ntp": round(m.capture_minus_ntp, 6),
             }
         )
@@ -764,7 +768,10 @@ def _shift_timestamp_text(ts: str, delta: float) -> str:
             dt += timedelta(seconds=1)
             val = 0
         return dt.strftime("%Y-%m-%d %H:%M:%S") + "." + str(val).zfill(width)
-    return dt.strftime("%Y-%m-%d %H:%M:%S") + "." + str(dt.microsecond).zfill(6).ljust(width, "0")
+    # 6자리 초과(나노초 등): delta 는 timedelta 해상도라 마이크로초까지만 유효하다.
+    # 마이크로초까지만 옮기고 그 아래 자릿수는 원본 그대로 이어붙인다 —
+    # 0으로 덮으면 있지도 않은 정밀도를 지어내거나 있던 정밀도를 지운다.
+    return dt.strftime("%Y-%m-%d %H:%M:%S") + "." + str(dt.microsecond).zfill(6) + frac[6:]
 
 
 def shift_line(line: str, delta: float, patterns: list[re.Pattern]) -> tuple[str, bool]:
@@ -940,9 +947,11 @@ def _coerce(key: str, value):
     """설정 JSON 값의 타입을 옵션 기본값에 맞춰 정규화한다."""
     if value is None:
         return None
-    default = DEFAULT_OPTIONS[key]
-    if isinstance(default, list) and isinstance(value, str):
-        return [value]  # 리스트 옵션에 문자열 하나만 준 경우 관용 처리
+    if key in LIST_OPTION_KEYS and isinstance(value, str):
+        # 리스트 옵션에 문자열 하나만 준 경우 관용 처리.
+        # 기본값이 list 인지로 판별하면 안 된다 — `pcap` 의 기본값은 None 이라
+        # 그 방식으로는 안 걸리고, 소비자가 문자열을 글자 단위로 순회한다.
+        return [value]
     if key in ("tolerance", "offset"):
         try:
             return float(value)

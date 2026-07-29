@@ -55,6 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"정수 ms 변환 보정값. 기본 {exping.RTT_OFFSET_MS}",
     )
     p.add_argument("--theme-from", help="표 스타일 테마를 가져올 기준 xlsx")
+    p.add_argument("--allow-wireless", action="store_true",
+                   help="무선(802.11) 캡처도 허용한다. 손실률이 크게 부풀려지니 권하지 않는다")
     p.add_argument("--keep-trailing-lost", action="store_true",
                    help="끝의 무응답 요청을 지우지 않는다 (기본은 지움 — ＮＧ 오탐 방지)")
     p.add_argument("--csv-only", action="store_true", help="xlsx 없이 csv 만 쓴다")
@@ -79,7 +81,11 @@ def main() -> int:
 
     try:
         exchanges, sender = exping.extract_exchanges(
-            args.pcap, tshark=args.tshark, sender=args.sender, timeout=args.timeout
+            args.pcap,
+            tshark=args.tshark,
+            sender=args.sender,
+            timeout=args.timeout,
+            allow_wireless=args.allow_wireless,
         )
     except FileNotFoundError:
         _fail(f"tshark 를 찾을 수 없다: {args.tshark}")
