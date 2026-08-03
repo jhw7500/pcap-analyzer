@@ -126,7 +126,7 @@
 
         const wiredInput = document.getElementById('wired-file');
         if (wiredInput && wiredInput.files.length) {
-            const maxMb = parseInt(fileInput.dataset.maxMb || '200', 10);
+            const maxMb = parseInt(wiredInput.dataset.maxMb || fileInput.dataset.maxMb || '200', 10);
             if (wiredInput.files[0].size > maxMb * 1024 * 1024) {
                 alert(`유선 pcap이 업로드 상한(${maxMb}MB)을 초과합니다.`);
                 return;

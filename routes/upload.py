@@ -184,14 +184,14 @@ async def upload_pcap(
     # 브라우저는 미선택 file input도 빈 filename 파트로 보낸다 — filename으로 판별
     if wired_file is not None and (wired_file.filename or ""):
         try:
-            wired_tmp_name, werr = await _save_pcap_upload(wired_file)
+            wired_tmp, werr = await _save_pcap_upload(wired_file)
         except Exception:
             Path(tmp_name).unlink(missing_ok=True)
             raise
         if werr is not None:
+            wired_tmp = ""
             Path(tmp_name).unlink(missing_ok=True)
             return werr
-        wired_tmp = wired_tmp_name
         wired_name = wired_file.filename
 
     # 클라이언트가 미리 만든 job_id를 우선 사용(본인 job만 폴링/취소하기 위함).

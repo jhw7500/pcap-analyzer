@@ -712,15 +712,51 @@ def _structured_system_stats(frames: List[Frame], index) -> Dict[str, Any]:
 _WIRED_LOSS_WINDOW_SEC = 2.0
 #: 대조하는 streak 수 상한 — 이슈 목록 폭주 방지
 _WIRED_LOSS_MAX_STREAKS = 20
+#: 재전송 "폭주"로 인정하는 최소 건수/비율 — 이 둘을 모두 넘겨야 이상 징후로 본다.
+#: 낱개 retry는 정상 동작이라 이상 징후에 포함하지 않는다.
+_WIRED_LOSS_RETRY_MIN = 3
+_WIRED_LOSS_RETRY_PCT = 30.0
 
 
-def _ground_truth_issue_candidates(gt, frames):
+def _cliffs_overlapping_window(signal_cliffs, win):
+    """모든 STA의 cliff 중 시간 구간이 손실 창과 겹치는 것들. [(sta_name, cliff), ...].
+
+    signal_cliffs는 직렬화 라운드트립에서 null이거나 dict가 아닌 항목을 포함할 수
+    있다(구버전 result 호환) — sta_diags의 기존 방어 패턴과 동일하게 isinstance로 거른다.
+    cliff는 {epoch, duration_sec, drop_db, ...}(analyzer/web/signal_cliff.py) — 프레임
+    참조가 없어 [epoch, epoch+duration_sec] 구간으로 겹침을 판정한다.
+    """
+    out = []
+    if not isinstance(signal_cliffs, dict):
+        return out
+    for sta_name, sc in signal_cliffs.items():
+        if not isinstance(sc, dict):
+            continue
+        for c in sc.get("cliffs") or []:
+            if not isinstance(c, dict):
+                continue
+            c_start = c.get("epoch")
+            if not isinstance(c_start, (int, float)):
+                continue
+            dur = c.get("duration_sec")
+            c_end = c_start + dur if isinstance(dur, (int, float)) else c_start
+            if c_start <= win["end_epoch"] and c_end >= win["start_epoch"]:
+                out.append((sta_name, c))
+    return out
+
+
+def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None):
     """유선 확정 손실 streak별 무선 대조 이슈 후보. 근거 프레임이 없으면 후보 제외.
+
+    이상 징후 = 로밍/해제 프레임 ≥1 또는 재전송 폭주(_WIRED_LOSS_RETRY_MIN건 이상 &&
+    _WIRED_LOSS_RETRY_PCT% 이상) 또는 창과 겹치는 signal_cliff ≥1 (스펙 §4).
+    낱개 retry(폭주 미달)만으로는 이상 징후로 보지 않는다 — 정상 동작 범위.
 
     frame_refs는 무선 pcap의 frame.number다 — 유선 프레임 번호를 섞으면 프레임
     테이블 조회가 깨진다. 캡처 구멍(창 안에 무선 프레임 0건)은 근거를 댈 수
     없어 이슈를 만들지 않는다(근거 없는 결론 금지) — 알려진 한계.
     """
+    signal_cliffs = signal_cliffs if isinstance(signal_cliffs, dict) else {}
     out = []
     for streak in (gt.get("streaks") or [])[:_WIRED_LOSS_MAX_STREAKS]:
         start, end = streak.get("start_epoch"), streak.get("end_epoch")
@@ -731,18 +767,45 @@ def _ground_truth_issue_candidates(gt, frames):
         in_win = [f for f in frames if win["start_epoch"] <= f.epoch <= win["end_epoch"]]
         if not in_win:
             continue
+        # "10"(DisAssoc)만 실효 — "12"(DeAuth)는 is_roaming_related(ROAMING_SUBTYPES)가
+        # 이미 포함, 가독성 위해 병기
         roam = [f for f in in_win if f.is_roaming_related or f.subtype in ("10", "12")]
-        retry = [f for f in in_win if f.retry]
-        anomaly = sorted({f.number for f in roam} | {f.number for f in retry})
+        data_frames = [f for f in in_win if f.is_data]
+        retry_frames = [f for f in data_frames if f.retry]
+        retry_pct = (len(retry_frames) * 100.0 / len(data_frames)) if data_frames else 0.0
+        retry_burst = (
+            len(retry_frames) >= _WIRED_LOSS_RETRY_MIN
+            and retry_pct >= _WIRED_LOSS_RETRY_PCT
+        )
+        cliffs = _cliffs_overlapping_window(signal_cliffs, win)
+
+        reasons = []
+        if roam:
+            reasons.append(f"로밍/해제 {len(roam)}건")
+        if retry_burst:
+            reasons.append(
+                f"재전송 폭주({len(retry_frames)}/{len(data_frames)}={retry_pct:.0f}%)"
+            )
+        if cliffs:
+            reasons.append(f"RSSI 절벽 {len(cliffs)}건")
+
         head = (f"유선 확정 손실 {streak.get('count')}건 "
                 f"({streak.get('target', '?')}, {streak.get('duration_sec')}초)")
-        if anomaly:
+        if reasons:
+            # refs: 실제로 창 안에 있는 로밍/retry 프레임(폭주 미달이라도)을 우선 근거로
+            # 삼고, cliff 스키마에 frame 참조가 있으면(현재는 없음, 향후 확장 대비) 더한다.
+            # 셋 다 비면(cliff만 근거인데 창 안 로밍/retry가 0건) 창 안 전체로 폴백.
+            anomaly = {f.number for f in roam} | {f.number for f in retry_frames}
+            for _sta_name, c in cliffs:
+                cliff_refs = c.get("frame_refs")
+                if isinstance(cliff_refs, list):
+                    anomaly.update(n for n in cliff_refs if isinstance(n, int))
+            refs = sorted(anomaly) if anomaly else [f.number for f in in_win]
             issue = {
                 "severity": "high", "category": "유선 손실",
-                "msg": f"{head} — 구간 내 무선: 로밍/해제 {len(roam)}건, 재전송 {len(retry)}건",
+                "msg": f"{head} — 구간 내 무선: {', '.join(reasons)}",
                 "action": "통합 타임라인에서 해당 구간의 로밍·재전송·RSSI를 확인하세요.",
             }
-            refs = anomaly
         else:
             issue = {
                 "severity": "medium", "category": "유선 손실",
@@ -1108,7 +1171,9 @@ def _structured_diagnosis(
             )
 
     # 유선 ground truth 손실 구간 ↔ 무선 이벤트 대조 (스펙 §4)
-    for cand in _ground_truth_issue_candidates(ping.get("ground_truth") or {}, frames or []):
+    for cand in _ground_truth_issue_candidates(
+        ping.get("ground_truth") or {}, frames or [], structured.get("signal_cliffs")
+    ):
         _add_net_issue(cand["issue"], cand["refs"], cand["window"],
                        signal_type=cand["signal_type"])
 
