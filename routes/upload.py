@@ -209,6 +209,7 @@ async def upload_pcap(
             "created": time.time(),
             "cancel": cancel_event,
             "tmp": tmp_name,
+            "wired_tmp": wired_tmp,
         }
         _prune_jobs_locked()
 

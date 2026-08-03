@@ -769,7 +769,7 @@
     /* 유선 ground truth 카드 — ping.ground_truth 있을 때만 (스펙 §4) */
     const gt = ping.ground_truth || null;
     const gtDiv = document.getElementById('ping-ground-truth');
-    if (gt && gtDiv && typeof gt.ng === 'number') {
+    if (gt && gtDiv && typeof gt.ng === 'number' && typeof gt.total === 'number') {
         const s = pingStatsData;
         const wirelessLoss = (s.loss_count != null && s.loss_pct != null)
             ? `${s.loss_count.toLocaleString()}건 (${s.loss_pct}%)` : '—';
