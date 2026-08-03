@@ -60,3 +60,12 @@ def test_no_wired_path_keeps_existing_shape(monkeypatch):
     assert "ground_truth" not in result["structured"]["ping"]
     sources = result["structured"]["sources"]
     assert len(sources) == 1 and sources[0]["role"] == "wireless"
+
+
+def test_wired_loss_issue_reaches_diagnosis(monkeypatch):
+    _patch_common(monkeypatch, dict(GT_OK))
+    result = pipeline.run_analysis("wireless.pcapng", wired_path="wired.pcapng")
+    issues = result["structured"]["diagnosis"]["issues"]
+    wired = [i for i in issues if i.get("signal_type") == "wired_loss"]
+    assert len(wired) == 1
+    assert wired[0]["frame_refs"] == [3, 4]

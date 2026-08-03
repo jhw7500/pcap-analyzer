@@ -708,6 +708,53 @@ def _structured_system_stats(frames: List[Frame], index) -> Dict[str, Any]:
     return _device_entry_stats(frames, lambda f: bool(f.ta), "", "SYSTEM")
 
 
+#: 유선 손실 구간 대조 창 (streak 앞뒤 초) — 로밍·재전송이 손실보다 약간 앞설 수 있다
+_WIRED_LOSS_WINDOW_SEC = 2.0
+#: 대조하는 streak 수 상한 — 이슈 목록 폭주 방지
+_WIRED_LOSS_MAX_STREAKS = 20
+
+
+def _ground_truth_issue_candidates(gt, frames):
+    """유선 확정 손실 streak별 무선 대조 이슈 후보. 근거 프레임이 없으면 후보 제외.
+
+    frame_refs는 무선 pcap의 frame.number다 — 유선 프레임 번호를 섞으면 프레임
+    테이블 조회가 깨진다. 캡처 구멍(창 안에 무선 프레임 0건)은 근거를 댈 수
+    없어 이슈를 만들지 않는다(근거 없는 결론 금지) — 알려진 한계.
+    """
+    out = []
+    for streak in (gt.get("streaks") or [])[:_WIRED_LOSS_MAX_STREAKS]:
+        start, end = streak.get("start_epoch"), streak.get("end_epoch")
+        if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+            continue
+        win = {"start_epoch": start - _WIRED_LOSS_WINDOW_SEC,
+               "end_epoch": end + _WIRED_LOSS_WINDOW_SEC}
+        in_win = [f for f in frames if win["start_epoch"] <= f.epoch <= win["end_epoch"]]
+        if not in_win:
+            continue
+        roam = [f for f in in_win if f.is_roaming_related or f.subtype in ("10", "12")]
+        retry = [f for f in in_win if f.retry]
+        anomaly = sorted({f.number for f in roam} | {f.number for f in retry})
+        head = (f"유선 확정 손실 {streak.get('count')}건 "
+                f"({streak.get('target', '?')}, {streak.get('duration_sec')}초)")
+        if anomaly:
+            issue = {
+                "severity": "high", "category": "유선 손실",
+                "msg": f"{head} — 구간 내 무선: 로밍/해제 {len(roam)}건, 재전송 {len(retry)}건",
+                "action": "통합 타임라인에서 해당 구간의 로밍·재전송·RSSI를 확인하세요.",
+            }
+            refs = anomaly
+        else:
+            issue = {
+                "severity": "medium", "category": "유선 손실",
+                "msg": f"{head} — 구간 내 무선 이상 징후 없음 (트래픽 {len(in_win)}건 정상)",
+                "action": "무선 구간 외 원인(유선/AP 상위단)을 의심하세요.",
+            }
+            refs = [f.number for f in in_win]
+        out.append({"issue": issue, "refs": refs, "window": win,
+                    "signal_type": "wired_loss"})
+    return out
+
+
 def _structured_diagnosis(
     structured: Dict[str, Any], frames: List[Frame] = None, index=None
 ) -> Dict[str, Any]:
@@ -1059,6 +1106,11 @@ def _structured_diagnosis(
                     "time_window": issue.get("time_window"),
                 }
             )
+
+    # 유선 ground truth 손실 구간 ↔ 무선 이벤트 대조 (스펙 §4)
+    for cand in _ground_truth_issue_candidates(ping.get("ground_truth") or {}, frames or []):
+        _add_net_issue(cand["issue"], cand["refs"], cand["window"],
+                       signal_type=cand["signal_type"])
 
     severity_order = {"high": 0, "medium": 1, "low": 2}
     all_issues.sort(key=lambda x: severity_order.get(x["severity"], 3))
