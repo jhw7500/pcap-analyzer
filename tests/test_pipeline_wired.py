@@ -1,5 +1,7 @@
 """run_analysis의 wired_path 통합 — sources·ground_truth 부착."""
 import os
+import threading
+
 import config
 import analyzer.pipeline as pipeline
 from tests.conftest import make_frame, STA1, AP1
@@ -95,3 +97,33 @@ def test_wired_filters_forwarded_to_build_ground_truth(monkeypatch):
     assert captured["time_start"] == "2026-01-01 10:00:00"
     assert captured["time_end"] == "2026-01-01 11:00:00"
     assert captured["ip_filter"] == "10.0.0.2"
+
+
+def test_wired_cancel_reaches_run_analysis_result(monkeypatch):
+    """유선 GT가 취소를 보고하면 전체 분석도 취소로 끝난다 — /api/cancel이 성공을
+    보고했는데 결과는 정상 분석으로 남는 일이 없도록."""
+    _patch_common(monkeypatch, {"cancelled": True})
+    result = pipeline.run_analysis("wireless.pcapng", wired_path="wired.pcapng")
+    assert result == {"cancelled": True}
+
+
+def test_cancel_event_forwarded_to_build_ground_truth(monkeypatch):
+    """취소 이벤트가 유선 GT까지 전달돼야 tshark 자식을 실제로 끊을 수 있다."""
+    captured = {}
+    cancel = threading.Event()
+
+    def _fake_build_ground_truth(pcap_path, **kwargs):
+        captured.update(kwargs)
+        return dict(GT_OK)
+
+    monkeypatch.setattr(pipeline, "extract_frames", lambda *a, **kw: _frames())
+    monkeypatch.setattr(pipeline, "detect_tshark_version",
+                        lambda *a, **kw: {"version": "test", "path": "tshark"})
+    monkeypatch.setattr(config, "detect_tshark", lambda: "tshark")
+    monkeypatch.setattr(pipeline, "build_ground_truth", _fake_build_ground_truth)
+    monkeypatch.setattr(os.path, "getsize", lambda *a, **kw: 1000)
+
+    pipeline.run_analysis(
+        "wireless.pcapng", wired_path="wired.pcapng", cancel_event=cancel
+    )
+    assert captured["cancel_event"] is cancel

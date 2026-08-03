@@ -199,6 +199,20 @@ def _drop_unreachable_tail(
     return kept, dropped
 
 
+def _trailing_unanswered_count(exchanges: List["exping.Exchange"]) -> int:
+    """마지막 응답 뒤에 붙은 무응답 요청 수 — 제거하지 않고 세기만 한다.
+
+    캡처 끝 시각을 확인하지 못했을 때 "손실률이 과대 계상될 수 있다"고 경고할
+    대상 건수다. 이 건수가 0이면 경고할 여지 자체가 없다.
+    """
+    n = 0
+    for x in reversed(exchanges):
+        if x.answered:
+            break
+        n += 1
+    return n
+
+
 def build_ground_truth(
     pcap_path: str,
     tshark_path: str = "tshark",
@@ -206,6 +220,7 @@ def build_ground_truth(
     time_start: str = "",
     time_end: str = "",
     ip_filter: str = "",
+    cancel_event: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """유선 pcap → ping ground truth dict. 실패 시 {"error": str, "warnings": [...]}.
 
@@ -215,18 +230,25 @@ def build_ground_truth(
 
     처리 순서: ① 필터가 적용된 부분집합("코호트")에서 sender 선정(_cohort_requests)
     ② 무선 캡처 가드 ③ 전체 캡처 기준 요청↔응답 짝짓기(exping.pair_exchanges)
-    ④ 캡처 끝 기준 물리적 꼬리 제거(_drop_unreachable_tail) ⑤ 시간/IP 필터로 최종
-    표시 구간 좁히기(_filter_exchanges) ⑥ 집계. ③이 필터 이전(전체 캡처 기준)인
-    이유: 창 끝 근처 요청의 응답이 창 밖(그러나 캡처 안)에 있어도 매칭돼야 한다.
-    ④가 ⑤보다 먼저인 이유: 필터로 창을 먼저 자르면 창 안 마지막 자리의 진짜
-    손실이 물리적 꼬리로 오인될 수 있다(trailing_dropped는 항상 물리적 꼬리 기준).
+    ④ 캡처 끝이 **capinfos로 확인된 경우에만** 물리적 꼬리 제거(_drop_unreachable_tail)
+    ⑤ 시간/IP 필터로 최종 표시 구간 좁히기(_filter_exchanges) ⑥ 집계. ③이 필터
+    이전(전체 캡처 기준)인 이유: 창 끝 근처 요청의 응답이 창 밖(그러나 캡처 안)에
+    있어도 매칭돼야 한다. ④가 ⑤보다 먼저인 이유: 필터로 창을 먼저 자르면 창 안
+    마지막 자리의 진짜 손실이 물리적 꼬리로 오인될 수 있다(trailing_dropped는 항상
+    물리적 꼬리 기준). 캡처 끝이 미확인이면 ④를 건너뛰고(drop 0건) 꼬리 무응답을
+    손실로 집계한 뒤 과대 계상 가능성을 warnings로 알린다.
 
-    취소 이벤트는 지원하지 않는다 — exping.extract_icmp_frames에 취소 훅이 없고
-    child_timeout(기본 3600초) 상한만 있다. ICMP 디스플레이 필터라 대체로 빠르다.
+    cancel_event(threading.Event)를 주면 추출 중 취소가 자식 tshark까지 전파되고
+    (exping.extract_icmp_frames), 그때는 error가 아니라 {"cancelled": True}를
+    반환한다 — 호출부(pipeline)가 전체 분석 취소와 같은 방식으로 처리하도록.
     """
     warnings: List[str] = []
     try:
-        frames = exping.extract_icmp_frames(pcap_path, tshark=tshark_path)
+        frames = exping.extract_icmp_frames(
+            pcap_path, tshark=tshark_path, cancel_event=cancel_event
+        )
+    except InterruptedError:
+        return {"cancelled": True}
     except FileNotFoundError:
         return {"error": f"tshark 를 찾을 수 없다: {tshark_path}", "warnings": warnings}
     except (ValueError, TimeoutError) as exc:
@@ -277,21 +299,24 @@ def build_ground_truth(
 
     capture_end = _detect_capture_end(pcap_path, tshark_path)
     if capture_end is None:
-        # capinfos 부재/실패 — 모든 ICMP 프레임(요청·응답·타 호스트 포함)의 최댓값을
-        # 프록시로 쓴다. 실제 pcap 끝보다 이를 수 있어(비-ICMP 트래픽이 뒤에 더
-        # 있을 수 있음) 꼬리 판정이 다소 보수적으로(더 많이 남기는 쪽으로) 치우칠
-        # 수 있다는 한계를 warnings로 알린다.
-        capture_end = max(f[0] for f in frames)
-        warnings.append(
-            "캡처 끝 시각을 확인하지 못해 ICMP 마지막 프레임으로 근사 "
-            "(capinfos 부재 또는 파싱 실패)"
-        )
-
-    exchanges, dropped = _drop_unreachable_tail(exchanges, capture_end, reply_timeout)
-    if dropped:
-        warnings.append(
-            f"꼬리 무응답 요청 {dropped}건 제외 — 캡처가 응답보다 먼저 끊긴 구간"
-        )
+        # 검증된 물리적 끝이 없으면 **아무것도 지우지 않는다**. ICMP 마지막 프레임을
+        # 프록시로 쓰면 임계값이 실제 캡처 끝보다 앞당겨져(뒤에 non-ICMP 트래픽이
+        # 더 있는 캡처) 진짜 손실까지 조용히 지워진다 — 특히 마지막 ICMP 프레임
+        # 자체가 손실된 요청인 경우. 손실을 숨기는 쪽보다 남겨 두고 과대 계상
+        # 가능성을 경고하는 쪽이 안전하다(사용자가 캡처를 보고 판단할 수 있다).
+        dropped = 0
+        tail = _trailing_unanswered_count(exchanges)
+        if tail:
+            warnings.append(
+                f"캡처 끝 시각 미확인 — 꼬리 무응답 {tail}건을 손실로 집계 "
+                "(캡처가 응답보다 먼저 끊긴 경우 손실률이 과대 계상될 수 있음)"
+            )
+    else:
+        exchanges, dropped = _drop_unreachable_tail(exchanges, capture_end, reply_timeout)
+        if dropped:
+            warnings.append(
+                f"꼬리 무응답 요청 {dropped}건 제외 — 캡처가 응답보다 먼저 끊긴 구간"
+            )
 
     # drop 이후 체크: 요청은 있었지만 응답이 전부 없는 경우 (100% 손실이거나,
     # 전부 캡처 끝 근접이라 판정 불가한 경우 — 둘 다 exchanges가 빈다)

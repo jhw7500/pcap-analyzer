@@ -781,16 +781,22 @@
             wirelessLossLabel = '무선 관측 손실(동일 송신원)';
             const senderItems = fullList.filter(p => p.src === gt.sender &&
                 (p.status === 'matched' || p.status === 'loss' || p.status === 'loss_gap'));
-            const hasMatched = senderItems.some(p => p.status === 'matched');
-            if (hasMatched) {
+            // sender가 보낸 echo request 중 짝을 못 지은 관측이 하나라도 있으면
+            // 모집단이 어긋난다 — 그 흐름의 정상 관측이 분모에서 통째로 빠져
+            // 손실률이 과대 표시된다. sender의 한 target은 양방향이고 다른
+            // target은 요청-only인 혼합 캡처에서는 matched가 존재하므로,
+            // "matched가 하나도 없을 때"라는 단방향 조건만으로는 걸러지지 않는다.
+            // observations entry(ping_matching._observation_entry)는 direction
+            // ('request'/'reply')과 icmp_type('8'=request)을 함께 싣는다 —
+            // 구버전 직렬화 result 호환을 위해 둘 다 본다.
+            const unpairedSenderReq = (ping.observations || []).some(o =>
+                o.src === gt.sender && (o.direction === 'request' || o.icmp_type === '8'));
+            if (unpairedSenderReq) {
+                wirelessLoss = '— (단방향/혼합 캡처 — 비교 불가)';
+            } else if (senderItems.length) {
                 const lossN = senderItems.filter(p => p.status === 'loss' || p.status === 'loss_gap').length;
                 const pct = (lossN * 100 / senderItems.length).toFixed(2);
                 wirelessLoss = `${lossN.toLocaleString()}건 (${pct}%)`;
-            } else if ((ping.observations || []).some(o => o.src === gt.sender)) {
-                // 요청(또는 응답)만 한쪽만 보이는 단방향 캡처 — matched가 전혀 없어
-                // full_list엔 loss_gap만 남는다. 그대로 재계산하면 100% 손실로
-                // 잘못 표시되므로 비교 불가를 명시한다.
-                wirelessLoss = '— (단방향 캡처 — 비교 불가)';
             }
         } else {
             const s = pingStatsData;

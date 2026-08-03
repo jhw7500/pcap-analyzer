@@ -718,8 +718,12 @@ _WIRED_LOSS_RETRY_MIN = 3
 _WIRED_LOSS_RETRY_PCT = 30.0
 
 
-def _cliffs_overlapping_window(signal_cliffs, win):
-    """모든 STA의 cliff 중 시간 구간이 손실 창과 겹치는 것들. [(sta_name, cliff), ...].
+def _cliffs_overlapping_window(signal_cliffs, win, allow_names=None):
+    """cliff 중 시간 구간이 손실 창과 겹치는 것들. [(sta_name, cliff), ...].
+
+    allow_names가 주어지면 그 STA 이름들의 cliff만 본다 — 대상 STA가 특정된
+    경우 무관한 STA의 절벽이 이 STA의 유선 손실을 이상 징후로 둔갑시키면 안 된다.
+    None이면(매핑 실패) 전체 STA를 본다.
 
     signal_cliffs는 직렬화 라운드트립에서 null이거나 dict가 아닌 항목을 포함할 수
     있다(구버전 result 호환) — sta_diags의 기존 방어 패턴과 동일하게 isinstance로 거른다.
@@ -730,6 +734,8 @@ def _cliffs_overlapping_window(signal_cliffs, win):
     if not isinstance(signal_cliffs, dict):
         return out
     for sta_name, sc in signal_cliffs.items():
+        if allow_names is not None and sta_name not in allow_names:
+            continue
         if not isinstance(sc, dict):
             continue
         for c in sc.get("cliffs") or []:
@@ -743,6 +749,43 @@ def _cliffs_overlapping_window(signal_cliffs, win):
             if c_start <= win["end_epoch"] and c_end >= win["start_epoch"]:
                 out.append((sta_name, c))
     return out
+
+
+def _cliff_sta_names(signal_stas, sta_macs):
+    """signal["stas"]의 이름→mac 매핑으로 sta_macs에 해당하는 STA 이름 집합.
+
+    signal_cliffs의 키는 STA 표시명(roles[mac]["name"])이라 MAC과 직접 비교할 수
+    없다. structured["signal"]["stas"][name]["mac"]이 그 역참조를 제공한다.
+    """
+    names = set()
+    if not isinstance(signal_stas, dict):
+        return names
+    for name, info in signal_stas.items():
+        if isinstance(info, dict) and info.get("mac") in sta_macs:
+            names.add(name)
+    return names
+
+
+def _cliff_frame_refs(cliffs, signal_stas, frames, index):
+    """cliff 근거 프레임 — evidence.cliff_evidence를 STA별로 재사용해 소싱.
+
+    "창 안 아무 프레임"을 근거로 대면 "이 구간에 RSSI 절벽이 있었다"는 결론과
+    프레임 사이에 인과가 없다. cliff 시각 ±1초의 그 STA 송신 프레임을 근거로
+    삼는 기존 헬퍼(sta_diags의 signal_cliff issue와 동일)를 그대로 쓴다.
+    """
+    from . import evidence as ev
+
+    by_mac = defaultdict(list)
+    for sta_name, c in cliffs:
+        info = signal_stas.get(sta_name) if isinstance(signal_stas, dict) else None
+        mac = info.get("mac") if isinstance(info, dict) else None
+        if mac:
+            by_mac[mac].append(c)
+    refs = []
+    for mac, mac_cliffs in by_mac.items():
+        nums, _win = ev.cliff_evidence(mac, mac_cliffs, frames, index)
+        refs.extend(nums)
+    return refs
 
 
 def _sender_sta_macs(frames, sender):
@@ -769,15 +812,17 @@ def _sender_sta_macs(frames, sender):
     return macs
 
 
-def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None):
+def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None, signal_stas=None,
+                                   index=None):
     """유선 확정 손실 streak별 무선 대조 이슈 후보. 근거 프레임이 없으면 후보 제외.
 
-    로밍/재전송 판정은 gt['sender']로 매핑된 STA로 스코프를 좁힌다 — 그러지
-    않으면 다중 STA 캡처에서 무관한 STA의 로밍/재전송이 다른 STA의 유선 손실을
-    이상 징후로 둔갑시킨다. 매핑 실패(암호화 미해제 캡처 등 IP 매칭 0건) 시
-    전체-무선 대조로 폴백하되 귀속이 불확실하므로 severity를 high→medium으로
-    낮추고 msg에 명시한다. signal_cliff 대조는 (리뷰 지시대로) STA로 좁히지
-    않고 기존처럼 전체 STA를 본다 — cliff 스키마엔 아직 STA→MAC 역참조가 없다.
+    로밍/재전송/RSSI 절벽 판정은 모두 gt['sender']로 매핑된 STA로 스코프를 좁힌다 —
+    그러지 않으면 다중 STA 캡처에서 무관한 STA의 이벤트가 다른 STA의 유선 손실을
+    이상 징후로 둔갑시킨다. cliff는 signal_cliffs의 키가 STA 표시명이라
+    signal_stas(=structured["signal"]["stas"], name→mac)로 역참조해 대상 STA의
+    것만 인정한다. 매핑 실패(암호화 미해제 캡처 등 IP 매칭 0건) 시 전체-무선
+    대조로 폴백하되 귀속이 불확실하므로 severity를 high→medium으로 낮추고 msg에
+    명시한다.
 
     이상 징후 = 로밍/해제 프레임 ≥1 또는 재전송 폭주(_WIRED_LOSS_RETRY_MIN건 이상 &&
     _WIRED_LOSS_RETRY_PCT% 이상) 또는 창과 겹치는 signal_cliff ≥1 (스펙 §4).
@@ -788,12 +833,15 @@ def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None):
     없어 이슈를 만들지 않는다(근거 없는 결론 금지) — 알려진 한계.
     """
     signal_cliffs = signal_cliffs if isinstance(signal_cliffs, dict) else {}
+    signal_stas = signal_stas if isinstance(signal_stas, dict) else {}
     sta_macs = _sender_sta_macs(frames, gt.get("sender") or "")
     mapped = bool(sta_macs)
     sta_label = (
         f"STA {', '.join(sorted(sta_macs))}" if mapped
         else "STA 매핑 불가 — 전체 무선 기준"
     )
+    # 매핑 성공 시 대상 STA의 cliff만, 실패 시 None(전체 STA)으로 폴백.
+    cliff_names = _cliff_sta_names(signal_stas, sta_macs) if mapped else None
 
     out = []
     for streak in (gt.get("streaks") or [])[:_WIRED_LOSS_MAX_STREAKS]:
@@ -820,7 +868,7 @@ def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None):
             len(retry_frames) >= _WIRED_LOSS_RETRY_MIN
             and retry_pct >= _WIRED_LOSS_RETRY_PCT
         )
-        cliffs = _cliffs_overlapping_window(signal_cliffs, win)
+        cliffs = _cliffs_overlapping_window(signal_cliffs, win, cliff_names)
 
         reasons = []
         if roam:
@@ -838,14 +886,13 @@ def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None):
             # 매핑 실패 시 귀속이 불확실하므로 severity를 medium으로 낮춘다
             # (근거·메시지는 그대로 보존 — 정보 자체는 여전히 유용하다).
             severity = "high" if mapped else "medium"
-            # refs: 실제로 창 안에 있는 로밍/retry 프레임(폭주 미달이라도)을 우선 근거로
-            # 삼고, cliff 스키마에 frame 참조가 있으면(현재는 없음, 향후 확장 대비) 더한다.
-            # 셋 다 비면(cliff만 근거인데 스코프 안 로밍/retry가 0건) 스코프 전체로 폴백.
+            # refs: 창 안 로밍/retry 프레임(폭주 미달이라도)에, cliff가 있으면
+            # cliff 시각 근처 프레임(_cliff_frame_refs)을 더한다 — 각 근거가
+            # msg에 적은 사유와 실제로 대응하도록. 끝내 아무것도 못 찾으면
+            # 스코프 전체로 폴백한다(근거 없는 결론 금지의 최후 수단).
             anomaly = {f.number for f in roam} | {f.number for f in retry_frames}
-            for _sta_name, c in cliffs:
-                cliff_refs = c.get("frame_refs")
-                if isinstance(cliff_refs, list):
-                    anomaly.update(n for n in cliff_refs if isinstance(n, int))
+            if cliffs:
+                anomaly.update(_cliff_frame_refs(cliffs, signal_stas, frames, index))
             refs = sorted(anomaly) if anomaly else [f.number for f in scoped]
             issue = {
                 "severity": severity, "category": "유선 손실",
@@ -1219,7 +1266,8 @@ def _structured_diagnosis(
 
     # 유선 ground truth 손실 구간 ↔ 무선 이벤트 대조 (스펙 §4)
     for cand in _ground_truth_issue_candidates(
-        ping.get("ground_truth") or {}, frames or [], structured.get("signal_cliffs")
+        ping.get("ground_truth") or {}, frames or [], structured.get("signal_cliffs"),
+        signal.get("stas"), index,
     ):
         _add_net_issue(cand["issue"], cand["refs"], cand["window"],
                        signal_type=cand["signal_type"])

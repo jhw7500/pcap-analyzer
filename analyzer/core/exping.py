@@ -425,6 +425,7 @@ def extract_icmp_frames(
     pcap: str | Path,
     tshark: str = "tshark",
     child_timeout: float | None = CHILD_TIMEOUT,
+    cancel_event: "threading.Event | None" = None,
 ) -> list[IcmpFrame]:
     """pcap 에서 ICMP echo request/reply 프레임만 스트리밍 추출한다.
 
@@ -447,7 +448,19 @@ def extract_icmp_frames(
 
     `child_timeout` 은 tshark 상한(초)이다. `None`(또는 0)이면 상한을 걸지 않는다 —
     무기한 대기를 감수한다는 뜻이니 의도한 경우에만 쓴다.
+
+    `cancel_event` 를 주면 그 이벤트가 set 되는 즉시 tshark 자식을 종료하고
+    `InterruptedError` 를 낸다(무선 추출 `extractor.extract_frames` 의 취소 계약과
+    같다 — 웹에서 /api/cancel 이 성공을 보고했는데 자식은 child_timeout 까지 살아
+    임시파일과 pcap 핸들을 쥐고 있는 일을 막는다). 부분 프레임으로 계속하지 않는
+    이유: 취소 시점까지 읽은 것만으로 집계하면 손실률이 조용히 틀린다. 예외를
+    새로 쓰는 이유: 기존 `ValueError`/`TimeoutError` 계약을 건드리지 않기 위함.
+    미전달(기본 `None`)이면 감시 스레드를 아예 만들지 않아 동작이 불변이다.
     """
+    if cancel_event is not None and cancel_event.is_set():
+        # 이미 취소된 뒤라면 자식을 띄우지도 않는다.
+        raise InterruptedError("취소됨")
+
     frames: list[IcmpFrame] = []
     with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as errf:
         proc = subprocess.Popen(
@@ -459,20 +472,56 @@ def extract_icmp_frames(
         # 파이프 읽기에서 블록되면 루프 안의 시각 검사는 영영 실행되지 않는다.
         # 밖에서 죽여야 한다. 외부 kill 과 구분하려고 발동 여부를 따로 남긴다.
         timed_out: list[bool] = []
+        cancelled: list[bool] = []
 
         def _kill_child() -> None:
             timed_out.append(True)
             proc.kill()
 
+        def _cancel_watcher() -> None:
+            # extractor._cancel_watcher 와 같은 패턴: 부모가 파이프 읽기에서 막혀
+            # 있으므로 감시 스레드가 자식을 죽이고 stdout 을 닫아 읽기를 깨운다.
+            while proc.poll() is None:
+                if cancel_event.wait(0.05):
+                    cancelled.append(True)
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    except OSError:
+                        pass
+                    try:
+                        if proc.stdout is not None:
+                            proc.stdout.close()
+                    except OSError:
+                        pass
+                    return
+
         killer = threading.Timer(child_timeout, _kill_child) if child_timeout else None
         if killer is not None:
             killer.daemon = True
             killer.start()
+        watcher = (
+            threading.Thread(target=_cancel_watcher, daemon=True)
+            if cancel_event is not None
+            else None
+        )
+        if watcher is not None:
+            watcher.start()
         try:
             for line in proc.stdout or ():
                 parsed = parse_icmp_line(line)
                 if parsed is not None:
                     frames.append(parsed)
+            returncode = proc.wait()
+        except (ValueError, OSError):
+            # 취소 감시 스레드가 stdout 을 닫으면 읽기가 여기로 떨어진다.
+            # 취소가 아니면 원래대로 올려보낸다.
+            if not cancelled:
+                proc.kill()
+                proc.wait()
+                raise
             returncode = proc.wait()
         except BaseException:
             # 여기서 안 죽이면 tshark 가 고아로 남아 pcap 파일 핸들을 계속 쥔다.
@@ -482,10 +531,15 @@ def extract_icmp_frames(
         finally:
             if killer is not None:
                 killer.cancel()
+            if watcher is not None:
+                watcher.join(timeout=1)
             if proc.stdout is not None:
                 proc.stdout.close()
         errf.seek(0)
         err = errf.read()
+
+    if cancelled or (cancel_event is not None and cancel_event.is_set()):
+        raise InterruptedError("취소됨")
 
     if timed_out:
         raise TimeoutError(f"tshark 가 {child_timeout:g}초 안에 끝나지 않아 중단했다: {pcap}")

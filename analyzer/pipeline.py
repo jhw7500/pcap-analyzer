@@ -179,7 +179,10 @@ def run_analysis(
             time_start=time_start,
             time_end=time_end,
             ip_filter=ip_filter,
+            cancel_event=cancel_event,
         )
+        if gt.get("cancelled"):
+            return {"cancelled": True}
         wired_src = {
             "name": Path(wired_path).name, "role": "wired",
             "frame_count": None, "warnings": list(gt.get("warnings", [])),

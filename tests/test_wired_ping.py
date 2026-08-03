@@ -1,11 +1,13 @@
 """wired_ping.build_ground_truth — 유선 pcap ping ground truth 빌더."""
 import datetime as dt
 import shutil
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
-from analyzer.core import wired_ping
+from analyzer.core import exping, wired_ping
 
 #: 실경로(real capinfos subprocess) 테스트용 — scapy로 합성된 deterministic pcap.
 #: 생성 스크립트(tests/fixtures/generate_sample_basic.py)의 BASE_EPOCH=1700000000.0
@@ -72,13 +74,16 @@ def test_streaks_grouped_per_target(tmp_path):
     assert st["duration_sec"] == pytest.approx(2.0)
 
 
-def test_trailing_unanswered_dropped_with_warning(tmp_path):
-    """캡처가 응답보다 먼저 끊긴 꼬리 무응답은 NG로 세지 않는다 (EXPING 규칙)."""
+def test_trailing_unanswered_dropped_with_warning(tmp_path, monkeypatch):
+    """캡처 끝이 **확인된** 경우, 그 끝에 붙은 꼬리 무응답은 NG로 세지 않는다."""
     body = (
         "printf '100.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
         "printf '100.002\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
         "printf '101.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t2\\t\\n'\n"  # 꼬리 무응답
     )
+    # capinfos로 캡처 끝(101.2)이 확인된 경우에만 drop한다 — threshold=100.2라
+    # 101.0 요청은 응답이 도착할 물리적 기회가 없었다.
+    monkeypatch.setattr(wired_ping, "_detect_capture_end", lambda *a, **kw: 101.2)
     gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=_fake_tshark(tmp_path, body))
     assert gt["total"] == 1 and gt["ng"] == 0
     assert gt["trailing_dropped"] == 1
@@ -285,7 +290,7 @@ def test_time_filter_end_does_not_misclassify_real_loss_as_trailing(tmp_path):
     assert not any("꼬리" in w for w in gt["warnings"])
 
 
-def test_physical_trailing_still_dropped_with_filter_active(tmp_path):
+def test_physical_trailing_still_dropped_with_filter_active(tmp_path, monkeypatch):
     """필터가 활성이어도 캡처 전체의 진짜(물리적) 꼬리 무응답은 여전히 제외된다."""
     t1 = _local_epoch("2026-01-01 10:00:00")   # A: 응답 있음
     t2 = _local_epoch("2026-01-01 10:00:05")   # B: 캡처 맨 끝 — 물리적 꼬리
@@ -294,6 +299,7 @@ def test_physical_trailing_still_dropped_with_filter_active(tmp_path):
         f"printf '{t1 + 0.002}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
         f"printf '{t2}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t2\\t\\n'\n"
     )
+    monkeypatch.setattr(wired_ping, "_detect_capture_end", lambda *a, **kw: t2 + 0.2)
     gt = wired_ping.build_ground_truth(
         "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
         time_start="2026-01-01 09:59:00",  # 필터는 활성이지만 아무것도 걸러내지 않음
@@ -331,17 +337,40 @@ def test_capture_end_aware_tail_keeps_real_loss_drops_only_near_end(tmp_path, mo
     assert any("꼬리" in w for w in gt["warnings"])
 
 
-def test_capinfos_absent_falls_back_to_icmp_max_epoch_with_warning(tmp_path):
-    """capinfos가 없거나(또는 대상 pcap을 못 읽으면) ICMP 마지막 프레임 epoch을
-    캡처 끝 프록시로 쓰고 경고를 남긴다. 테스트 환경에선 "x.pcapng"가 실제
-    파일이 아니라 capinfos가 설치돼 있어도 항상 실패해 자연히 이 경로를 탄다."""
+def test_capture_end_unknown_keeps_tail_unanswered_as_loss_with_warning(tmp_path):
+    """캡처 끝을 확인하지 못하면 **아무것도 지우지 않는다** — 꼬리 무응답도 손실로
+    집계하고 과대 계상 가능성만 경고한다 (PR #22 4라운드). ICMP 마지막 프레임을
+    프록시로 쓰던 이전 방식은 임계값을 실제 캡처 끝보다 앞당겨, 마지막 ICMP
+    프레임이 진짜 손실이고 pcap이 non-ICMP로 이어지는 캡처에서 그 손실을 조용히
+    지웠다. 테스트 환경에선 "x.pcapng"가 실존하지 않아 capinfos가 설치돼 있어도
+    항상 실패해 자연히 이 경로를 탄다."""
+    body = (
+        "printf '100.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        "printf '100.002\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+        "printf '101.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t2\\t\\n'\n"  # 꼬리 무응답
+        "printf '102.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t3\\t\\n'\n"  # 꼬리 무응답
+    )
+    gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=_fake_tshark(tmp_path, body))
+    assert "error" not in gt
+    assert gt["total"] == 3 and gt["ng"] == 2      # 꼬리 2건이 손실로 살아남는다
+    assert gt["trailing_dropped"] == 0             # 미확인이므로 drop 0건
+    assert gt["ng_epochs"] == [101.0, 102.0]
+    warn = [w for w in gt["warnings"] if "캡처 끝 시각 미확인" in w]
+    assert len(warn) == 1
+    assert "2건" in warn[0] and "과대" in warn[0]
+
+
+def test_capture_end_unknown_without_tail_has_no_warning(tmp_path):
+    """캡처 끝 미확인이어도 마지막 응답 이후 무응답이 0건이면 경고하지 않는다 —
+    손실률이 과대 계상될 여지 자체가 없다."""
     body = (
         "printf '100.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
         "printf '100.002\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
     )
     gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=_fake_tshark(tmp_path, body))
     assert "error" not in gt
-    assert any("capinfos" in w for w in gt["warnings"])
+    assert gt["trailing_dropped"] == 0
+    assert not any("캡처 끝 시각 미확인" in w for w in gt["warnings"])
 
 
 def test_detect_capture_end_real_capinfos():
@@ -383,6 +412,70 @@ def test_time_window_selects_cohort_sender_over_background_host(tmp_path):
     assert "error" not in gt
     assert gt["sender"] == "10.0.0.1"
     assert gt["total"] == 2 and gt["ng"] == 0
+
+
+def _slow_fake_tshark(tmp_path, sleep_sec: float = 5) -> str:
+    """오래 걸리는 가짜 tshark — 취소 전파 검증용.
+
+    `exec`로 sleep에 프로세스를 넘겨 **자식이 하나**가 되게 한다(실제 tshark와 동일).
+    exec 없이 sh가 sleep을 자식으로 두면 sh만 죽고 손자 sleep이 stdout 파이프를
+    계속 쥐어, 취소가 제대로 전파돼도 부모의 읽기가 sleep 종료까지 EOF를 못 받는다.
+    """
+    fake = tmp_path / "slow-tshark"
+    fake.write_text(f"#!/bin/sh\nexec sleep {sleep_sec}\n")
+    fake.chmod(0o755)
+    return str(fake)
+
+
+def test_extract_icmp_frames_cancel_before_start_raises_interrupted(tmp_path):
+    """이미 취소된 상태로 들어오면 tshark를 띄우지도 않고 InterruptedError."""
+    cancel = threading.Event()
+    cancel.set()
+    marker = tmp_path / "spawned"
+    fake = tmp_path / "marker-tshark"
+    fake.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    fake.chmod(0o755)
+    with pytest.raises(InterruptedError):
+        exping.extract_icmp_frames("x.pcapng", tshark=str(fake), cancel_event=cancel)
+    assert not marker.exists()
+
+
+def test_extract_icmp_frames_cancel_kills_running_tshark(tmp_path):
+    """실행 중 취소되면 자식 tshark를 즉시 종료하고 InterruptedError를 낸다 —
+    무선 추출(extractor._cancel_watcher)과 같은 계약. 취소를 무시하면 자식이
+    child_timeout(기본 3600초)까지 살아 임시파일과 pcap 핸들을 계속 쥔다."""
+    cancel = threading.Event()
+    timer = threading.Timer(0.2, cancel.set)
+    timer.daemon = True
+    timer.start()
+    t0 = time.monotonic()
+    with pytest.raises(InterruptedError):
+        exping.extract_icmp_frames(
+            "x.pcapng", tshark=_slow_fake_tshark(tmp_path), cancel_event=cancel
+        )
+    timer.cancel()
+    assert time.monotonic() - t0 < 3  # sleep 5초가 끝나기를 기다리지 않았다
+
+
+def test_extract_icmp_frames_without_cancel_event_unchanged(tmp_path):
+    """cancel_event 미전달(기본 None) 경로는 동작 불변 — 기존 호출부 회귀 방지."""
+    body = (
+        "printf '100.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        "printf '100.002\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+    )
+    frames = exping.extract_icmp_frames("x.pcapng", tshark=_fake_tshark(tmp_path, body))
+    assert len(frames) == 2 and frames[0][0] == pytest.approx(100.0)
+
+
+def test_build_ground_truth_cancelled_returns_cancelled_dict(tmp_path):
+    """취소되면 error가 아니라 {"cancelled": True} — 파이프라인이 전체 분석 취소와
+    같은 방식으로 처리한다(사용자에게 실패가 아니라 취소로 보여야 한다)."""
+    cancel = threading.Event()
+    cancel.set()
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_slow_fake_tshark(tmp_path), cancel_event=cancel
+    )
+    assert gt == {"cancelled": True}
 
 
 def test_ip_filter_selects_cohort_sender_among_multiple_hosts(tmp_path):

@@ -1,9 +1,12 @@
 """유선 확정 손실 구간 ↔ 무선 이벤트 대조 이슈."""
 from analyzer.web.structured import _ground_truth_issue_candidates
-from tests.conftest import make_frame, STA2
+from tests.conftest import make_frame, STA1, STA2
 
 #: gt['sender'] — STA1 자신이 ping 발신자인 배치를 가정(_sender_sta_macs 매핑용).
 SENDER_IP = "10.0.0.9"
+
+#: structured["signal"]["stas"] — cliff의 STA 이름을 MAC으로 되돌리는 매핑.
+SIGNAL_STAS = {"STA1(0002)": {"mac": STA1}, "STA2(0003)": {"mac": STA2}}
 
 GT = {"sender": SENDER_IP,
       "streaks": [{"target": "10.0.0.2", "start_epoch": 1005.0,
@@ -81,8 +84,13 @@ def test_retry_below_pct_threshold_is_not_burst():
 
 
 def test_signal_cliff_overlap_alone_triggers_high():
-    """로밍·재전송 폭주 없이 signal_cliff만 창과 겹쳐도 high — refs는 스코프 프레임 폴백."""
-    frames = [make_frame(number=5, epoch=1005.2, subtype="40", ip_src=SENDER_IP)]  # 정상 트래픽
+    """매핑된 sender STA의 cliff만 창과 겹쳐도 high — refs는 evidence.cliff_evidence가
+    소싱한 cliff 근처(±1초) 프레임이다. 창 안이지만 cliff와 떨어진 프레임은 근거가
+    아니다(PR #22 4라운드 — '창 안 아무 프레임' 폴백은 인과성이 없다)."""
+    frames = [
+        make_frame(number=5, epoch=1005.2, subtype="40", ip_src=SENDER_IP),  # cliff 근처
+        make_frame(number=6, epoch=1007.5, subtype="40"),  # 창 안이지만 cliff에서 2.5초 밖
+    ]
     signal_cliffs = {
         "STA1(0002)": {
             "cliffs": [{"epoch": 1005.0, "duration_sec": 1.0, "drop_db": 12,
@@ -90,12 +98,12 @@ def test_signal_cliff_overlap_alone_triggers_high():
             "moving_avg": [],
         },
     }
-    cands = _ground_truth_issue_candidates(GT, frames, signal_cliffs)
+    cands = _ground_truth_issue_candidates(GT, frames, signal_cliffs, SIGNAL_STAS)
     assert len(cands) == 1
     c = cands[0]
     assert c["issue"]["severity"] == "high"
     assert "RSSI 절벽 1건" in c["issue"]["msg"]
-    assert c["refs"] == [5]  # 로밍/retry 프레임이 없어 스코프 전체(=STA1)로 폴백
+    assert c["refs"] == [5]
 
 
 def test_signal_cliff_outside_window_not_counted():
@@ -107,10 +115,51 @@ def test_signal_cliff_outside_window_not_counted():
             "moving_avg": [],
         },
     }
-    cands = _ground_truth_issue_candidates(GT, frames, signal_cliffs)
+    cands = _ground_truth_issue_candidates(GT, frames, signal_cliffs, SIGNAL_STAS)
     assert len(cands) == 1
     assert cands[0]["issue"]["severity"] == "medium"
     assert "RSSI" not in cands[0]["issue"]["msg"]
+
+
+def test_unrelated_sta_cliff_does_not_trigger_anomaly():
+    """무관한 STA2의 RSSI 절벽이 손실 창과 겹쳐도, 매핑된 대상 STA1의 유선 손실을
+    이상 징후로 둔갑시키면 안 된다(PR #22 4라운드 — cliff도 로밍/retry와 같은
+    STA 스코프를 받는다)."""
+    frames = [
+        make_frame(number=1, epoch=1005.2, subtype="40", ip_src=SENDER_IP),  # STA1 정상
+        make_frame(number=2, epoch=1005.1, subtype="40", ta=STA2),           # STA2 트래픽
+    ]
+    signal_cliffs = {
+        "STA2(0003)": {
+            "cliffs": [{"epoch": 1005.0, "duration_sec": 1.0, "drop_db": 20}],
+            "moving_avg": [],
+        },
+    }
+    cands = _ground_truth_issue_candidates(GT, frames, signal_cliffs, SIGNAL_STAS)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c["issue"]["severity"] == "medium"
+    assert "이상 징후 없음" in c["issue"]["msg"]
+    assert c["refs"] == [1]  # STA2 프레임은 스코프 밖
+
+
+def test_mapping_failure_keeps_all_sta_cliffs():
+    """STA 매핑이 실패하면 어느 STA의 cliff인지 가릴 근거가 없으므로 기존대로
+    전체 cliff를 보되, 귀속이 불확실하므로 medium으로 낮춘다."""
+    frames = [make_frame(number=1, epoch=1005.1, subtype="40", ta=STA2)]
+    signal_cliffs = {
+        "STA2(0003)": {
+            "cliffs": [{"epoch": 1005.0, "duration_sec": 1.0, "drop_db": 20}],
+            "moving_avg": [],
+        },
+    }
+    cands = _ground_truth_issue_candidates(GT_NO_MATCH, frames, signal_cliffs, SIGNAL_STAS)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c["issue"]["severity"] == "medium"
+    assert "RSSI 절벽 1건" in c["issue"]["msg"]
+    assert "매핑 불가" in c["issue"]["msg"]
+    assert c["refs"] == [1]  # cliff_evidence(STA2)가 소싱한 근처 프레임
 
 
 def test_malformed_signal_cliffs_do_not_crash():
