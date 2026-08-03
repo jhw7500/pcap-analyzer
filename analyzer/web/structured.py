@@ -788,8 +788,12 @@ def _cliff_frame_refs(cliffs, signal_stas, frames, index):
     return refs
 
 
-def _sender_sta_macs(frames, sender, ap_macs=None, targets=None):
-    """gt['sender'](유선 캡처 기준 ping 발신 IP)의 무선 상대 STA MAC 집합.
+def _sender_sta_macs_by_target(frames, sender, ap_macs=None, targets=None):
+    """ping **대상 IP별** 무선 상대 STA MAC 집합. {target_ip: {mac, ...}}.
+
+    streak마다 그 streak의 target 매핑만 써야 한다 — sender가 여러 STA를 ping하는
+    캡처에서 전체 target의 매핑을 합쳐 쓰면(union) target B STA의 로밍/재전송
+    폭주/RSSI 절벽이 target A의 손실 구간을 설명하는 근거로 둔갑한다.
 
     앵커로 쓰는 프레임은 **그 GT가 집계한 ping 모집단**(sender↔targets의 ICMP echo
     request/reply)으로 한정한다. sender IP가 실린 아무 패킷이나 앵커로 쓰면, 같은
@@ -814,12 +818,14 @@ def _sender_sta_macs(frames, sender, ap_macs=None, targets=None):
     통째로 무력화된다. ap_macs가 비면(구 호출부 등) AP를 가릴 근거가 없으므로
     기존 방향 휴리스틱대로 동작한다 — sender가 STA 자신인 배치에서만 맞는다.
 
-    브로드캐스트/멀티캐스트는 제외(_is_unicast). sender가 비었거나 매칭이 0건이면
-    빈 집합 — 호출부가 "매핑 실패"로 처리해 전체-무선 대조로 폴백한다.
+    브로드캐스트/멀티캐스트는 제외(_is_unicast). 어떤 target의 앵커도 못 찾으면 그
+    키는 아예 없다 — 호출부가 그 streak만 "매핑 실패"로 처리해 전체-무선 대조로
+    폴백한다. sender가 STA 자신인 배치에서는 모든 target이 같은 MAC(그 STA의
+    라디오)으로 매핑되는데, 실제로 같은 라디오이므로 정상이다.
     """
-    macs = set()
+    by_target: Dict[str, set] = defaultdict(set)
     if not sender:
-        return macs
+        return {}
     from ..core.detector import _is_unicast
 
     ap_macs = ap_macs or set()
@@ -829,38 +835,36 @@ def _sender_sta_macs(frames, sender, ap_macs=None, targets=None):
     for f in frames:
         if f.is_icmp_request and f.ip_src == sender:
             # echo request(sender → 대상). 송신자가 AP면 다운링크 — 상대는 RA.
-            if target_ips and f.ip_dst not in target_ips:
-                continue
-            peer = f.ra if f.ta in ap_macs else f.ta
+            target, peer = f.ip_dst, (f.ra if f.ta in ap_macs else f.ta)
         elif f.is_icmp_reply and f.ip_dst == sender:
             # echo reply(대상 → sender). 수신자가 AP면 업링크 — 상대는 TA.
-            if target_ips and f.ip_src not in target_ips:
-                continue
-            peer = f.ta if f.ra in ap_macs else f.ra
+            target, peer = f.ip_src, (f.ta if f.ra in ap_macs else f.ra)
         else:
             continue
-        if _is_unicast(peer):
-            macs.add(peer)
-    # 양쪽이 다 AP인 프레임(DS 간 전달 등)이 섞여도 AP가 남지 않도록 최종 차집합.
-    return macs - ap_macs
+        if target_ips and target not in target_ips:
+            continue
+        # 양쪽이 다 AP인 프레임(DS 간 전달 등)이 섞여도 AP가 남지 않게 함께 배제.
+        if target and _is_unicast(peer) and peer not in ap_macs:
+            by_target[target].add(peer)
+    return dict(by_target)
 
 
 def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None, signal_stas=None,
                                    index=None, ap_macs=None):
     """유선 확정 손실 streak별 무선 대조 이슈 후보. 근거 프레임이 없으면 후보 제외.
 
-    로밍/재전송/RSSI 절벽 판정은 모두 gt['sender']로 매핑된 STA로 스코프를 좁힌다 —
-    그러지 않으면 다중 STA 캡처에서 무관한 STA의 이벤트가 다른 STA의 유선 손실을
-    이상 징후로 둔갑시킨다. 그 매핑의 앵커는 GT가 집계한 ping 모집단
-    (sender↔gt['targets']의 ICMP echo)으로 한정된다 — sender의 비-ICMP 트래픽이
-    무관한 STA를 끌어들이지 못하게. ap_macs(detected roles의 AP MAC)는 그 매핑에서 AP를
-    배제하는 데 쓴다 — sender가 AP 상류면 sender IP가 걸린 프레임의 상대가 AP라
-    AP를 매핑하게 되고, 그러면 그 AP를 경유하는 전체 무선이 스코프에 들어와
-    스코프가 무력화된다(_sender_sta_macs 참조). cliff는 signal_cliffs의 키가 STA 표시명이라
-    signal_stas(=structured["signal"]["stas"], name→mac)로 역참조해 대상 STA의
-    것만 인정한다. 매핑 실패(암호화 미해제 캡처 등 IP 매칭 0건) 시 전체-무선
-    대조로 폴백하되 귀속이 불확실하므로 severity를 high→medium으로 낮추고 msg에
-    명시한다.
+    로밍/재전송/RSSI 절벽 판정은 **그 streak의 target에 대응하는 STA**로 스코프를
+    좁힌다(_sender_sta_macs_by_target) — 그러지 않으면 다중 STA 캡처에서 무관한
+    STA나 다른 target STA의 이벤트가 이 손실을 설명하는 근거로 둔갑한다. 매핑
+    앵커는 GT가 집계한 ping 모집단(sender↔gt['targets']의 ICMP echo)으로 한정되고
+    (sender의 비-ICMP 트래픽이 무관한 STA를 끌어들이지 못하게), ap_macs(detected
+    roles의 AP MAC)로 AP를 배제한다 — sender가 AP 상류면 sender IP가 걸린 프레임의
+    상대가 AP라 AP를 매핑하게 되고, 그러면 그 AP를 경유하는 전체 무선이 스코프에
+    들어와 스코프가 무력화된다. cliff는 signal_cliffs의 키가 STA 표시명이라
+    signal_stas(=structured["signal"]["stas"], name→mac)로 역참조해 그 streak의 STA
+    것만 인정한다. 매핑 실패(그 target의 ping이 무선에 안 잡힘, 암호화 미해제 등)
+    시 **그 streak만** 전체-무선 대조로 폴백하되 귀속이 불확실하므로 severity를
+    high→medium으로 낮추고 msg에 명시한다.
 
     이상 징후 = 로밍/해제 프레임 ≥1 또는 재전송 폭주(_WIRED_LOSS_RETRY_MIN건 이상 &&
     _WIRED_LOSS_RETRY_PCT% 이상) 또는 창과 겹치는 signal_cliff ≥1 (스펙 §4).
@@ -872,22 +876,24 @@ def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None, signal_stas=N
     """
     signal_cliffs = signal_cliffs if isinstance(signal_cliffs, dict) else {}
     signal_stas = signal_stas if isinstance(signal_stas, dict) else {}
-    sta_macs = _sender_sta_macs(
+    mapping = _sender_sta_macs_by_target(
         frames, gt.get("sender") or "", ap_macs, gt.get("targets")
     )
-    mapped = bool(sta_macs)
-    sta_label = (
-        f"STA {', '.join(sorted(sta_macs))}" if mapped
-        else "STA 매핑 불가 — 전체 무선 기준"
-    )
-    # 매핑 성공 시 대상 STA의 cliff만, 실패 시 None(전체 STA)으로 폴백.
-    cliff_names = _cliff_sta_names(signal_stas, sta_macs) if mapped else None
 
     out = []
     for streak in (gt.get("streaks") or [])[:_WIRED_LOSS_MAX_STREAKS]:
         start, end = streak.get("start_epoch"), streak.get("end_epoch")
         if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
             continue
+        # 이 streak의 target STA만 — 다른 target STA의 이벤트는 이 손실의 근거가 아니다.
+        sta_macs = mapping.get(streak.get("target")) or set()
+        mapped = bool(sta_macs)
+        sta_label = (
+            f"STA {', '.join(sorted(sta_macs))}" if mapped
+            else "STA 매핑 불가 — 전체 무선 기준"
+        )
+        # 매핑 성공 시 그 STA의 cliff만, 실패 시 None(전체 STA)으로 폴백.
+        cliff_names = _cliff_sta_names(signal_stas, sta_macs) if mapped else None
         win = {"start_epoch": start - _WIRED_LOSS_WINDOW_SEC,
                "end_epoch": end + _WIRED_LOSS_WINDOW_SEC}
         in_win = [f for f in frames if win["start_epoch"] <= f.epoch <= win["end_epoch"]]

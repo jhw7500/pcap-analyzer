@@ -1,8 +1,13 @@
 """유선 확정 손실 구간 ↔ 무선 이벤트 대조 이슈."""
-from analyzer.web.structured import _ground_truth_issue_candidates
+import pytest
+
+from analyzer.web.structured import (
+    _ground_truth_issue_candidates,
+    _sender_sta_macs_by_target,
+)
 from tests.conftest import make_frame, AP1, STA1, STA2
 
-#: gt['sender'] — STA1 자신이 ping 발신자인 배치를 가정(_sender_sta_macs 매핑용).
+#: gt['sender'] — STA1 자신이 ping 발신자인 배치를 가정(STA 매핑용).
 SENDER_IP = "10.0.0.9"
 #: GT가 집계하는 ping 대상 IP.
 TARGET_IP = "10.0.0.2"
@@ -405,3 +410,131 @@ def test_missing_sender_key_treated_as_mapping_failure():
     assert len(cands) == 1
     assert cands[0]["issue"]["severity"] == "medium"
     assert "매핑 불가" in cands[0]["issue"]["msg"]
+
+
+# --------------------------------------------------------------------------
+# 매핑·귀속 축 전수 스윕 (PR #22 8라운드 — 토폴로지 × 시나리오를 한 곳에서 고정)
+#
+# 여기서 함께 검증하는 축:
+#   - streak별 target STA 귀속(8라운드): 다른 target STA의 이벤트가 이 streak로 새지 않는다
+#   - AP 배제(6라운드) / 비-ICMP·GT 밖 target 앵커 배제(7라운드) / 브로드캐스트 배제
+#   - target별 매핑 일부 실패 → 그 streak만 매핑 실패 폴백
+#   - cliff 스코프(4라운드)도 streak별 sta_macs를 따른다
+# --------------------------------------------------------------------------
+
+BROADCAST = "ff:ff:ff:ff:ff:ff"
+TARGET_A, TARGET_B, TARGET_C = "10.0.0.2", "10.0.0.3", "10.0.0.4"
+#: 무선 프레임이 하나도 없는 target(C) 포함 — 그 streak만 매핑 실패로 떨어져야 한다.
+GT_SWEEP = {
+    "sender": SENDER_IP,
+    "targets": {TARGET_A: {"total": 9, "ng": 3}, TARGET_B: {"total": 9, "ng": 2},
+                TARGET_C: {"total": 9, "ng": 1}},
+    "streaks": [
+        {"target": TARGET_A, "start_epoch": 1005.0, "end_epoch": 1006.0,
+         "count": 3, "duration_sec": 1.0},
+        {"target": TARGET_B, "start_epoch": 1105.0, "end_epoch": 1106.0,
+         "count": 2, "duration_sec": 1.0},
+        {"target": TARGET_C, "start_epoch": 1205.0, "end_epoch": 1206.0,
+         "count": 1, "duration_sec": 1.0},
+    ],
+}
+#: STA2의 RSSI 절벽이 target A의 손실 창과 겹친다 — A로 새면 안 된다.
+SWEEP_CLIFFS = {"STA2(0003)": {"cliffs": [{"epoch": 1005.1, "duration_sec": 0.5,
+                                           "drop_db": 20}], "moving_avg": []}}
+
+
+def _sweep_ping(topology, number, epoch, target, sta, icmp_type):
+    """토폴로지별 ping 프레임 한 장.
+
+    direct = sender가 STA 자신(업링크 요청 ta=STA, 다운링크 응답 ra=STA),
+    upstream = sender가 AP 상류의 유선 호스트(다운링크 요청 ta=AP·ra=STA,
+    업링크 응답 ta=STA·ra=AP).
+    """
+    if icmp_type == "8":  # echo request: sender → target
+        ta, ra = (sta, AP1) if topology == "direct" else (AP1, sta)
+        ip_src, ip_dst = SENDER_IP, target
+    else:                 # echo reply: target → sender
+        ta, ra = (AP1, sta) if topology == "direct" else (sta, AP1)
+        ip_src, ip_dst = target, SENDER_IP
+    return make_frame(number=number, epoch=epoch, subtype="40", ta=ta, ra=ra,
+                      ip_src=ip_src, ip_dst=ip_dst, icmp_type=icmp_type)
+
+
+def _sweep_frames(topology):
+    """오염원이 골고루 섞인 캡처.
+
+    direct 토폴로지에서는 sender의 모든 target ping이 같은 무선 MAC(STA1)에서
+    나가므로 target A/B 모두 STA1로 매핑된다 — 같은 라디오이므로 정상이다.
+    upstream에서는 target마다 다른 STA(A→STA1, B→STA2)로 갈린다.
+    """
+    sta_a = STA1
+    sta_b = STA1 if topology == "direct" else STA2
+    # 비-ICMP 오염: 두 토폴로지 모두 "sender IP가 실린 프레임의 상대가 STA3"이 되는
+    # 배치 — ICMP 조건이 없으면 STA3이 매핑에 섞인다.
+    if topology == "direct":
+        tcp = make_frame(number=9, epoch=1005.7, subtype="40", ta=STA3, ra=AP1,
+                         ip_src="10.0.0.7", ip_dst=SENDER_IP, tcp_len="512")
+        # 브로드캐스트 오염: 상대가 브로드캐스트로 계산되는 echo reply
+        bcast = make_frame(number=10, epoch=1005.8, subtype="40", ta=AP1, ra=BROADCAST,
+                           ip_src=TARGET_A, ip_dst=SENDER_IP, icmp_type="0")
+    else:
+        tcp = make_frame(number=9, epoch=1005.7, subtype="40", ta=AP1, ra=STA3,
+                         ip_src=SENDER_IP, ip_dst="10.0.0.7", tcp_len="512")
+        bcast = make_frame(number=10, epoch=1005.8, subtype="40", ta=AP1, ra=BROADCAST,
+                           ip_src=SENDER_IP, ip_dst=TARGET_A, icmp_type="8")
+    return [
+        # ── target A 손실 창(1003~1008) ──
+        _sweep_ping(topology, 1, 1005.0, TARGET_A, sta_a, "8"),
+        _sweep_ping(topology, 2, 1005.05, TARGET_A, sta_a, "0"),
+        make_frame(number=3, epoch=1005.5, subtype="40", ta=sta_a, ra=AP1),  # 대상 STA 정상
+        make_frame(number=4, epoch=1005.2, subtype="11", ta=STA2, ra=AP1),   # 다른 target STA 로밍
+        make_frame(number=5, epoch=1005.30, subtype="40", ta=STA2, ra=AP1, retry=True),
+        make_frame(number=6, epoch=1005.32, subtype="40", ta=STA2, ra=AP1, retry=True),
+        make_frame(number=7, epoch=1005.34, subtype="40", ta=STA2, ra=AP1, retry=True),
+        make_frame(number=8, epoch=1005.6, subtype="11", ta=STA3, ra=AP1),   # 무관 STA 로밍
+        tcp,
+        bcast,
+        # ── target B 손실 창(1103~1108) ──
+        _sweep_ping(topology, 11, 1105.0, TARGET_B, sta_b, "8"),
+        _sweep_ping(topology, 12, 1105.05, TARGET_B, sta_b, "0"),
+        make_frame(number=13, epoch=1105.3, subtype="11", ta=STA2, ra=AP1),  # STA2 로밍
+        make_frame(number=14, epoch=1105.4, subtype="40", ta=STA1, ra=AP1),  # STA1 정상
+        # ── target C 손실 창(1203~1208) — C의 ping은 무선에 하나도 안 잡혔다 ──
+        make_frame(number=15, epoch=1205.0, subtype="40", ta=STA3, ra=AP1),
+    ]
+
+
+@pytest.mark.parametrize("topology,target,severity,fragment,refs", [
+    # direct: A/B 모두 sender 자신의 라디오(STA1)로 매핑 — STA2/STA3 이벤트는 전부 밖.
+    ("direct", TARGET_A, "medium", "이상 징후 없음", [1, 2, 3]),
+    ("direct", TARGET_B, "medium", "이상 징후 없음", [11, 12, 14]),
+    ("direct", TARGET_C, "medium", "매핑 불가", [15]),
+    # upstream: A→STA1, B→STA2. A의 창에 있는 STA2의 로밍·재전송 폭주·RSSI 절벽은
+    # B의 STA 것이므로 A를 high로 만들면 안 되고, B는 자기 STA의 로밍으로 high다.
+    ("upstream", TARGET_A, "medium", "이상 징후 없음", [1, 2, 3]),
+    ("upstream", TARGET_B, "high", "로밍/해제 1건", [13]),
+    ("upstream", TARGET_C, "medium", "매핑 불가", [15]),
+])
+def test_mapping_sweep_attributes_events_per_streak(topology, target, severity,
+                                                    fragment, refs):
+    cands = _ground_truth_issue_candidates(
+        GT_SWEEP, _sweep_frames(topology), SWEEP_CLIFFS, SIGNAL_STAS, None, {AP1}
+    )
+    assert len(cands) == 3  # streak 3개 전부 근거를 대고 살아남는다
+    c = cands[[s["target"] for s in GT_SWEEP["streaks"]].index(target)]
+    assert c["issue"]["severity"] == severity
+    assert fragment in c["issue"]["msg"]
+    assert c["refs"] == refs
+    assert STA3 not in c["issue"]["msg"]     # 무관 STA는 어느 streak에도 안 붙는다
+    assert AP1 not in c["issue"]["msg"]      # AP는 STA로 매핑되지 않는다
+    assert BROADCAST not in c["issue"]["msg"]
+
+
+@pytest.mark.parametrize("topology,expected_b", [("direct", STA1), ("upstream", STA2)])
+def test_mapping_helper_splits_by_target_and_drops_noise(topology, expected_b):
+    """매핑 함수 자체의 계약을 한 줄로 고정 — target별 분리 + AP·브로드캐스트·
+    비ICMP·GT 밖 target 앵커 배제. 위 스윕이 의존하는 전제다."""
+    mapping = _sender_sta_macs_by_target(
+        _sweep_frames(topology), SENDER_IP, {AP1}, GT_SWEEP["targets"]
+    )
+    assert mapping == {TARGET_A: {STA1}, TARGET_B: {expected_b}}
