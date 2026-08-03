@@ -766,6 +766,30 @@
     const fullList = ping.full_list || [];
     const pingStatsData = ping.stats || {};
 
+    /* 유선 ground truth 카드 — ping.ground_truth 있을 때만 (스펙 §4) */
+    const gt = ping.ground_truth || null;
+    const gtDiv = document.getElementById('ping-ground-truth');
+    if (gt && gtDiv && typeof gt.ng === 'number') {
+        const s = pingStatsData;
+        const wirelessLoss = (s.loss_count != null && s.loss_pct != null)
+            ? `${s.loss_count.toLocaleString()}건 (${s.loss_pct}%)` : '—';
+        gtDiv.classList.remove('hidden');
+        gtDiv.innerHTML = `
+          <div class="bg-gray-800 border border-emerald-700 rounded-lg p-4">
+            <div class="text-emerald-300 font-semibold mb-2">유선 Ground Truth (포트 미러 캡처)</div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+              <div><div class="text-gray-400">확정 손실</div>
+                <div class="${gt.ng > 0 ? 'text-red-400' : 'text-green-400'}">${gt.ng.toLocaleString()}건 (${gt.loss_pct}%)</div></div>
+              <div><div class="text-gray-400">전체 요청</div><div>${gt.total.toLocaleString()}건</div></div>
+              <div><div class="text-gray-400">무선 관측 손실</div><div>${wirelessLoss}</div></div>
+              <div><div class="text-gray-400">연속 손실 구간</div><div>${(gt.streaks || []).length}곳</div></div>
+            </div>
+            <p class="text-gray-500 text-xs mt-2">
+              무선 관측 손실이 유선 확정 손실보다 크면 모니터 캡처 누락이 손실로 과대 계상된 것입니다
+              (docs/EXPING.md 실측: 0.16% 대 15.65%).</p>
+          </div>`;
+    }
+
     // Ping KPI
     const pingKpi = document.getElementById('ping-kpi');
     if (pingKpi && pingStatsData.count !== undefined) {
