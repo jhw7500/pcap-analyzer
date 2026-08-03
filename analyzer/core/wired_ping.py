@@ -35,13 +35,22 @@ def build_ground_truth(
     except (ValueError, TimeoutError) as exc:
         return {"error": str(exc), "warnings": warnings}
 
+    # drop 이전 체크: ICMP 교환이 처음부터 없는 경우
+    if not exchanges:
+        return {"error": f"{sender} 가 보낸 echo request 가 없다", "warnings": warnings}
+
     exchanges, dropped = exping.drop_trailing_unanswered(exchanges)
     if dropped:
         warnings.append(
             f"꼬리 무응답 요청 {dropped}건 제외 — 캡처가 응답보다 먼저 끊긴 구간"
         )
+
+    # drop 이후 체크: 요청은 있었지만 응답이 전부 없는 경우 (100% 손실)
     if not exchanges:
-        return {"error": f"{sender} 가 보낸 echo request 가 없다", "warnings": warnings}
+        return {
+            "error": f"응답 있는 요청이 하나도 없다 — 요청 {dropped}건 전부 무응답 (100% 손실이거나 미러 구성이 응답 방향을 놓친 캡처)",
+            "warnings": warnings
+        }
 
     ng = [x for x in exchanges if not x.answered]
     targets: Dict[str, Dict[str, int]] = {}

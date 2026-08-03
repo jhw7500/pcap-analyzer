@@ -86,6 +86,19 @@ def test_missing_tshark_returns_error():
     assert "tshark" in gt["error"]
 
 
+def test_all_requests_unanswered_100_loss(tmp_path):
+    """요청 3건 전부 무응답 (100% 손실) → 정확한 에러 메시지 (drop 이후 구분)."""
+    body = (
+        "printf '100.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        "printf '101.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t2\\t\\n'\n"
+        "printf '102.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t3\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=_fake_tshark(tmp_path, body))
+    assert "error" in gt
+    assert "응답 있는" in gt["error"]  # 요청이 있었지만 응답이 없다는 뜻
+    assert "3건" in gt["error"]  # dropped 건수 포함
+
+
 def test_no_icmp_returns_error(tmp_path):
     """ICMP echo request가 없으면 pick_sender ValueError → error dict."""
     gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=_fake_tshark(tmp_path, ":\n"))
