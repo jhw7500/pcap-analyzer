@@ -170,7 +170,16 @@ def run_analysis(
     }]
     if wired_path:
         _progress("유선 ground truth 분석 중...", 93)
-        gt = build_ground_truth(wired_path, tshark_path=_tshark_path or "tshark")
+        # time_start/end·ip_filter는 무선 extract_frames()와 동일 구간을 보도록
+        # 대칭 전달 — 그래야 유선 GT와 무선 관측이 같은 구간을 비교한다.
+        # mac_filter는 유선(비-802.11) exchange에 MAC 개념이 없어 미전달.
+        gt = build_ground_truth(
+            wired_path,
+            tshark_path=_tshark_path or "tshark",
+            time_start=time_start,
+            time_end=time_end,
+            ip_filter=ip_filter,
+        )
         wired_src = {
             "name": Path(wired_path).name, "role": "wired",
             "frame_count": None, "warnings": list(gt.get("warnings", [])),
@@ -178,7 +187,7 @@ def run_analysis(
         if "error" in gt:
             wired_src["warnings"].append(gt["error"])
         else:
-            structured["ping"]["ground_truth"] = gt
+            structured.setdefault("ping", {})["ground_truth"] = gt
         sources.append(wired_src)
     structured["sources"] = sources
     if _cancelled():

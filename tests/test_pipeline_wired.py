@@ -69,3 +69,29 @@ def test_wired_loss_issue_reaches_diagnosis(monkeypatch):
     wired = [i for i in issues if i.get("signal_type") == "wired_loss"]
     assert len(wired) == 1
     assert wired[0]["frame_refs"] == [3, 4]
+
+
+def test_wired_filters_forwarded_to_build_ground_truth(monkeypatch):
+    """time_start/time_end/ip_filter가 무선과 동일 구간을 보도록 유선 GT에도 전달된다."""
+    captured = {}
+
+    def _fake_build_ground_truth(pcap_path, **kwargs):
+        captured["pcap_path"] = pcap_path
+        captured.update(kwargs)
+        return dict(GT_OK)
+
+    monkeypatch.setattr(pipeline, "extract_frames", lambda *a, **kw: _frames())
+    monkeypatch.setattr(pipeline, "detect_tshark_version",
+                        lambda *a, **kw: {"version": "test", "path": "tshark"})
+    monkeypatch.setattr(config, "detect_tshark", lambda: "tshark")
+    monkeypatch.setattr(pipeline, "build_ground_truth", _fake_build_ground_truth)
+    monkeypatch.setattr(os.path, "getsize", lambda *a, **kw: 1000)
+
+    pipeline.run_analysis(
+        "wireless.pcapng", wired_path="wired.pcapng",
+        time_start="2026-01-01 10:00:00", time_end="2026-01-01 11:00:00",
+        ip_filter="10.0.0.2",
+    )
+    assert captured["time_start"] == "2026-01-01 10:00:00"
+    assert captured["time_end"] == "2026-01-01 11:00:00"
+    assert captured["ip_filter"] == "10.0.0.2"

@@ -1,4 +1,6 @@
 """wired_ping.build_ground_truth — 유선 pcap ping ground truth 빌더."""
+import datetime as dt
+
 import pytest
 
 from analyzer.core import wired_ping
@@ -10,6 +12,11 @@ def _fake_tshark(tmp_path, body: str) -> str:
     fake.write_text("#!/bin/sh\n" + body)
     fake.chmod(0o755)
     return str(fake)
+
+
+def _local_epoch(s: str) -> float:
+    """테스트 전용 — build_ground_truth._parse_local_epoch와 동일 규칙(로컬 tz)."""
+    return dt.datetime.strptime(s, "%Y-%m-%d %H:%M:%S").timestamp()
 
 
 def test_counts_ok_ng_and_loss_pct(tmp_path):
@@ -103,3 +110,111 @@ def test_no_icmp_returns_error(tmp_path):
     """ICMP echo request가 없으면 pick_sender ValueError → error dict."""
     gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=_fake_tshark(tmp_path, ":\n"))
     assert "error" in gt
+
+
+# --------------------------------------------------------------------------
+# 시간/IP 필터 (PR #22 리뷰 반영 — 무선 extract_frames()와 대칭)
+# --------------------------------------------------------------------------
+
+
+def test_time_filter_excludes_requests_outside_window(tmp_path):
+    """time_start 이전 요청은 필터 밖 — total에서 제외된다."""
+    before = _local_epoch("2026-01-01 09:59:50")
+    inside1 = _local_epoch("2026-01-01 10:00:05")
+    inside2 = _local_epoch("2026-01-01 10:00:06")
+    body = (
+        f"printf '{before}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        f"printf '{before + 0.002}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+        f"printf '{inside1}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t2\\t\\n'\n"
+        f"printf '{inside1 + 0.002}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t2\\t\\n'\n"
+        f"printf '{inside2}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t3\\t\\n'\n"
+        f"printf '{inside2 + 0.002}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t3\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
+        time_start="2026-01-01 10:00:00",
+    )
+    assert "error" not in gt
+    assert gt["total"] == 2 and gt["ng"] == 0
+
+
+def test_time_filter_end_excludes_requests_after_window(tmp_path):
+    """time_end 이후 요청은 필터 밖."""
+    inside = _local_epoch("2026-01-01 10:00:05")
+    after = _local_epoch("2026-01-01 10:01:00")
+    body = (
+        f"printf '{inside}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        f"printf '{inside + 0.002}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+        f"printf '{after}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t2\\t\\n'\n"
+        f"printf '{after + 0.002}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t2\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
+        time_end="2026-01-01 10:01:00",
+    )
+    assert "error" not in gt
+    assert gt["total"] == 1
+
+
+def test_ip_filter_keeps_only_matching_target(tmp_path):
+    """ip_filter에 sender가 없으면 target(dst) 매칭 exchange만 남는다."""
+    t0 = _local_epoch("2026-01-01 10:00:00")
+    body = (
+        f"printf '{t0}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        f"printf '{t0 + 0.002}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+        f"printf '{t0 + 1}\\t10.0.0.1\\t10.0.0.3\\t8\\t7\\t2\\t\\n'\n"
+        f"printf '{t0 + 1.002}\\t10.0.0.3\\t10.0.0.1\\t0\\t7\\t2\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
+        ip_filter="10.0.0.3",
+    )
+    assert "error" not in gt
+    assert gt["total"] == 1
+    assert gt["targets"] == {"10.0.0.3": {"total": 1, "ng": 0}}
+
+
+def test_ip_filter_keeps_all_when_sender_listed(tmp_path):
+    """무선 ip.addr==의 대칭: sender가 필터에 있으면 전체 유지(필터링 없음과 동일)."""
+    t0 = _local_epoch("2026-01-01 10:00:00")
+    body = (
+        f"printf '{t0}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        f"printf '{t0 + 0.002}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+        f"printf '{t0 + 1}\\t10.0.0.1\\t10.0.0.3\\t8\\t7\\t2\\t\\n'\n"
+        f"printf '{t0 + 1.002}\\t10.0.0.3\\t10.0.0.1\\t0\\t7\\t2\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
+        ip_filter="10.0.0.1",
+    )
+    assert "error" not in gt
+    assert gt["total"] == 2
+
+
+def test_unparseable_time_filter_returns_error(tmp_path):
+    """파싱 불가 시간 문자열은 조용히 전체 구간을 쓰지 않고 명시적 error를 낸다."""
+    body = (
+        "printf '100.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        "printf '100.002\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
+        time_start="not-a-date",
+    )
+    assert "error" in gt
+    assert "시간 필터" in gt["error"] and "not-a-date" in gt["error"]
+
+
+def test_filter_leaves_no_exchanges_returns_specific_error(tmp_path):
+    """필터로 exchanges가 전부 걸러지면 '요청 없음'과 다른 전용 에러를 낸다."""
+    t0 = _local_epoch("2026-01-01 10:00:00")
+    body = (
+        f"printf '{t0}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        f"printf '{t0 + 0.002}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
+        ip_filter="10.0.0.99",
+    )
+    assert "error" in gt
+    assert "필터 구간" in gt["error"]

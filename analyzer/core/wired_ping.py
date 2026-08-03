@@ -4,7 +4,8 @@
 그대로 재사용한다 — 대시보드용으로 EXPING xlsx 재현 규칙(RTT 정수 보정,
 전각 문자열)은 쓰지 않고 Exchange 수준에서 소비한다. docs/EXPING.md 참조.
 """
-from typing import Any, Dict, List
+import datetime as dt
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import exping
 from .ping_matching import find_time_streaks
@@ -14,13 +15,71 @@ MAX_STREAKS = 100
 #: ng_epochs 상한 — 타임라인 마커용 샘플
 MAX_NG_EPOCHS = 1000
 
+#: 시간 필터 입력 형식 — 초 생략형도 허용
+_TIME_FILTER_FORMATS: Tuple[str, ...] = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M")
+
+
+def _parse_local_epoch(value: str) -> Optional[float]:
+    """"YYYY-MM-DD HH:MM[:SS]" 문자열을 로컬 타임존 기준 epoch로 파싱.
+
+    무선 쪽 extractor.build_tshark_cmd의 `frame.time >= "..."` 필터도 tshark가
+    로컬 타임존으로 해석하므로, 이 함수도 로컬 타임존(datetime.timestamp())을
+    써야 두 필터가 같은 구간을 가리킨다. 실패 시 None.
+    """
+    for fmt in _TIME_FILTER_FORMATS:
+        try:
+            return dt.datetime.strptime(value, fmt).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def _filter_exchanges(
+    exchanges: List["exping.Exchange"],
+    sender: str,
+    time_start: str,
+    time_end: str,
+    ip_filter: str,
+) -> Tuple[Optional[List["exping.Exchange"]], str]:
+    """시간/IP 필터를 적용한다. 파싱 실패 시 (None, 에러메시지)를 반환.
+
+    mac_filter는 유선(비-802.11) exchange에 MAC 개념이 없어 적용하지 않는다
+    (호출부인 pipeline.py 주석 참조).
+    """
+    out = exchanges
+    if time_start:
+        start_epoch = _parse_local_epoch(time_start)
+        if start_epoch is None:
+            return None, f"시간 필터를 해석할 수 없다: {time_start}"
+        out = [x for x in out if x.time >= start_epoch]
+    if time_end:
+        end_epoch = _parse_local_epoch(time_end)
+        if end_epoch is None:
+            return None, f"시간 필터를 해석할 수 없다: {time_end}"
+        out = [x for x in out if x.time < end_epoch]
+    if ip_filter:
+        ips = {ip.strip() for ip in ip_filter.split(",") if ip.strip()}
+        # 무선 'ip.addr == X'는 src/dst 어느 쪽이든 매칭. sender는 이 캡처의
+        # 모든 exchange에서 고정 src이므로, sender가 필터에 있으면 전부
+        # 매칭되는 것과 같다(=필터링 없음). 아니면 target(=dst)으로 좁힌다.
+        if ips and sender not in ips:
+            out = [x for x in out if x.target in ips]
+    return out, ""
+
 
 def build_ground_truth(
     pcap_path: str,
     tshark_path: str = "tshark",
     reply_timeout: float = exping.DEFAULT_REPLY_TIMEOUT,
+    time_start: str = "",
+    time_end: str = "",
+    ip_filter: str = "",
 ) -> Dict[str, Any]:
     """유선 pcap → ping ground truth dict. 실패 시 {"error": str, "warnings": [...]}.
+
+    time_start/time_end/ip_filter는 무선 extract_frames()가 받는 동일 인자와
+    같은 구간을 가리키도록 대칭으로 구현했다 — 서로 다른 구간을 비교하지 않기
+    위함(무선 필터만 적용되고 유선은 전체 구간을 쓰면 손실률이 왜곡된다).
 
     취소 이벤트는 지원하지 않는다 — exping.extract_exchanges에 취소 훅이 없고
     child_timeout(기본 3600초) 상한만 있다. ICMP 디스플레이 필터라 대체로 빠르다.
@@ -38,6 +97,14 @@ def build_ground_truth(
     # drop 이전 체크: ICMP 교환이 처음부터 없는 경우
     if not exchanges:
         return {"error": f"{sender} 가 보낸 echo request 가 없다", "warnings": warnings}
+
+    if time_start or time_end or ip_filter:
+        filtered, err = _filter_exchanges(exchanges, sender, time_start, time_end, ip_filter)
+        if filtered is None:
+            return {"error": err, "warnings": warnings}
+        exchanges = filtered
+        if not exchanges:
+            return {"error": "필터 구간에 echo request 가 없다", "warnings": warnings}
 
     exchanges, dropped = exping.drop_trailing_unanswered(exchanges)
     if dropped:
