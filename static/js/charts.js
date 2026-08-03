@@ -769,7 +769,8 @@
     /* 유선 ground truth 카드 — ping.ground_truth 있을 때만 (스펙 §4) */
     const gt = ping.ground_truth || null;
     const gtDiv = document.getElementById('ping-ground-truth');
-    if (gt && gtDiv && typeof gt.ng === 'number' && typeof gt.total === 'number') {
+    if (gt && gtDiv && typeof gt.ng === 'number' && typeof gt.total === 'number'
+        && typeof gt.loss_pct === 'number') {
         // GT는 gt.sender 1개 호스트의 ping만 집계한다(pick_sender). 카드의
         // "무선 관측 손실"에 pingStatsData(전체 ICMP 흐름 집계)를 그대로 쓰면
         // 배경 호스트의 ping까지 섞여 서로 다른 모집단을 비교하게 된다 — GT와
@@ -780,10 +781,16 @@
             wirelessLossLabel = '무선 관측 손실(동일 송신원)';
             const senderItems = fullList.filter(p => p.src === gt.sender &&
                 (p.status === 'matched' || p.status === 'loss' || p.status === 'loss_gap'));
-            if (senderItems.length) {
+            const hasMatched = senderItems.some(p => p.status === 'matched');
+            if (hasMatched) {
                 const lossN = senderItems.filter(p => p.status === 'loss' || p.status === 'loss_gap').length;
                 const pct = (lossN * 100 / senderItems.length).toFixed(2);
                 wirelessLoss = `${lossN.toLocaleString()}건 (${pct}%)`;
+            } else if ((ping.observations || []).some(o => o.src === gt.sender)) {
+                // 요청(또는 응답)만 한쪽만 보이는 단방향 캡처 — matched가 전혀 없어
+                // full_list엔 loss_gap만 남는다. 그대로 재계산하면 100% 손실로
+                // 잘못 표시되므로 비교 불가를 명시한다.
+                wirelessLoss = '— (단방향 캡처 — 비교 불가)';
             }
         } else {
             const s = pingStatsData;

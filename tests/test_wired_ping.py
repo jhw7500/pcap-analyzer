@@ -93,13 +93,19 @@ def test_missing_tshark_returns_error():
     assert "tshark" in gt["error"]
 
 
-def test_all_requests_unanswered_100_loss(tmp_path):
-    """요청 3건 전부 무응답 (100% 손실) → 정확한 에러 메시지 (drop 이후 구분)."""
+def test_all_requests_unanswered_100_loss(tmp_path, monkeypatch):
+    """요청 3건 전부 무응답이고 전부 capture_end 근접(reply_timeout 이내)이면
+    캡처 절단인지 100% 손실인지 구분할 수 없어 전부 물리적 꼬리로 제외되고
+    '응답 있는 요청이 하나도 없다' 에러가 된다 (PR #22 3라운드: capture_end
+    기준 꼬리 판정으로 재구성 — 근거는 test_capture_end_aware_tail_* 참조)."""
     body = (
         "printf '100.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
-        "printf '101.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t2\\t\\n'\n"
-        "printf '102.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t3\\t\\n'\n"
+        "printf '100.1\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t2\\t\\n'\n"
+        "printf '100.2\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t3\\t\\n'\n"
     )
+    # capture_end=100.5 → threshold=99.5(기본 reply_timeout=1.0) → 세 요청
+    # (100.0/100.1/100.2) 모두 threshold보다 뒤라 전부 물리적 꼬리로 제외된다.
+    monkeypatch.setattr(wired_ping, "_detect_capture_end", lambda *a, **kw: 100.5)
     gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=_fake_tshark(tmp_path, body))
     assert "error" in gt
     assert "응답 있는" in gt["error"]  # 요청이 있었지만 응답이 없다는 뜻
@@ -156,8 +162,13 @@ def test_time_filter_end_excludes_requests_after_window(tmp_path):
     assert gt["total"] == 1
 
 
-def test_ip_filter_keeps_only_matching_target(tmp_path):
-    """ip_filter에 sender가 없으면 target(dst) 매칭 exchange만 남는다."""
+def test_ip_filter_narrows_targets_when_sender_also_listed(tmp_path):
+    """ip_filter에 sender와 target을 함께 주면(코호트가 sender를 찾고, exchange
+    단계는 'sender 포함 → 필터링 없음' 규칙이라) 전체가 유지된다 — PR #22
+    3라운드: ip_filter는 이제 sender 선정 코호트에도 적용되므로(src만 봄),
+    target IP 하나만으로는 sender를 못 찾아 예전처럼 그 target만 남기는
+    동작은 더 이상 성립하지 않는다(의도적 트레이드오프,
+    test_ip_filter_selects_cohort_sender_among_multiple_hosts 참조)."""
     t0 = _local_epoch("2026-01-01 10:00:00")
     body = (
         f"printf '{t0}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
@@ -167,11 +178,10 @@ def test_ip_filter_keeps_only_matching_target(tmp_path):
     )
     gt = wired_ping.build_ground_truth(
         "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
-        ip_filter="10.0.0.3",
+        ip_filter="10.0.0.1,10.0.0.3",
     )
     assert "error" not in gt
-    assert gt["total"] == 1
-    assert gt["targets"] == {"10.0.0.3": {"total": 1, "ng": 0}}
+    assert gt["total"] == 2
 
 
 def test_ip_filter_keeps_all_when_sender_listed(tmp_path):
@@ -266,3 +276,96 @@ def test_physical_trailing_still_dropped_with_filter_active(tmp_path):
     assert gt["total"] == 1 and gt["ng"] == 0
     assert gt["trailing_dropped"] == 1
     assert any("꼬리" in w for w in gt["warnings"])
+
+
+# --------------------------------------------------------------------------
+# capture_end 기준 물리적 꼬리 판정 (PR #22 3라운드 — Finding A)
+# --------------------------------------------------------------------------
+
+
+def test_capture_end_aware_tail_keeps_real_loss_drops_only_near_end(tmp_path, monkeypatch):
+    """capture_end - reply_timeout보다 이전(응답이 올 시간이 충분했던) 무응답은
+    진짜 손실로 남고, capture_end에 근접한(응답이 잡힐 기회가 없었을 수 있는)
+    무응답만 물리적 꼬리로 제외된다."""
+    body = (
+        "printf '100.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"   # A: 응답 있음
+        "printf '100.002\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+        "printf '105.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t2\\t\\n'\n"   # B: 무응답, threshold 밖 → 진짜 손실
+        "printf '109.5\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t3\\t\\n'\n"   # C: 무응답, threshold 안(끝 근접) → 물리적 꼬리
+    )
+    # capture_end=110.0, reply_timeout=기본 1.0 → threshold=109.0.
+    # B(105.0) <= threshold → 유지(진짜 손실). C(109.5) > threshold → 제외.
+    monkeypatch.setattr(wired_ping, "_detect_capture_end", lambda *a, **kw: 110.0)
+    gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=_fake_tshark(tmp_path, body))
+    assert "error" not in gt
+    assert gt["total"] == 2  # A(ok) + B(ng) — C는 물리적 꼬리로 제외돼 total에서 빠진다
+    assert gt["ng"] == 1
+    assert gt["ng_epochs"] == [105.0]
+    assert gt["trailing_dropped"] == 1
+    assert any("꼬리" in w for w in gt["warnings"])
+
+
+def test_capinfos_absent_falls_back_to_icmp_max_epoch_with_warning(tmp_path):
+    """capinfos가 없거나(또는 대상 pcap을 못 읽으면) ICMP 마지막 프레임 epoch을
+    캡처 끝 프록시로 쓰고 경고를 남긴다. 테스트 환경에선 "x.pcapng"가 실제
+    파일이 아니라 capinfos가 설치돼 있어도 항상 실패해 자연히 이 경로를 탄다."""
+    body = (
+        "printf '100.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        "printf '100.002\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=_fake_tshark(tmp_path, body))
+    assert "error" not in gt
+    assert any("capinfos" in w for w in gt["warnings"])
+
+
+# --------------------------------------------------------------------------
+# 필터 코호트 기준 sender 선정 (PR #22 3라운드 — Finding B)
+# --------------------------------------------------------------------------
+
+
+def test_time_window_selects_cohort_sender_over_background_host(tmp_path):
+    """배경 호스트(10.0.0.9)가 전체 캡처에서 최다 요청자여도, time_start 창
+    안에는 다른 호스트(10.0.0.1)만 ping했다면 그 창의 sender가 선택되고 그
+    흐름이 집계돼야 한다 — 전체 pcap 기준으로 sender를 고르면(구 코드) 배경
+    호스트가 잘못 선택된다."""
+    t0 = _local_epoch("2026-01-01 10:00:00")
+    lines = []
+    # 배경 호스트 10.0.0.9 — 창 밖(훨씬 이전 시각)에 요청 5건, 전체 최다
+    for i in range(5):
+        te = t0 - 100 - i
+        lines.append(f"printf '{te}\\t10.0.0.9\\t10.0.0.2\\t8\\t7\\t{100 + i}\\t\\n'")
+    # 창 안 — 10.0.0.1이 보낸 요청 2건(응답 있음)만 존재
+    lines.append(f"printf '{t0 + 1}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'")
+    lines.append(f"printf '{t0 + 1.002}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'")
+    lines.append(f"printf '{t0 + 2}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t2\\t\\n'")
+    lines.append(f"printf '{t0 + 2.002}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t2\\t\\n'")
+    body = "\n".join(lines) + "\n"
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
+        time_start="2026-01-01 10:00:00",
+    )
+    assert "error" not in gt
+    assert gt["sender"] == "10.0.0.1"
+    assert gt["total"] == 2 and gt["ng"] == 0
+
+
+def test_ip_filter_selects_cohort_sender_among_multiple_hosts(tmp_path):
+    """같은 시간대에 두 호스트가 함께 ping해도, ip_filter로 지정한 호스트의
+    요청 수가 더 적더라도 sender로 선택된다(ip_filter의 sender 지정 효과)."""
+    t0 = _local_epoch("2026-01-01 10:00:00")
+    body = (
+        # 10.0.0.9 — 요청 3건(더 많음, ip_filter 없으면 이쪽이 sender로 뽑힌다)
+        f"printf '{t0}\\t10.0.0.9\\t10.0.0.2\\t8\\t7\\t101\\t\\n'\n"
+        f"printf '{t0 + 0.1}\\t10.0.0.9\\t10.0.0.2\\t8\\t7\\t102\\t\\n'\n"
+        f"printf '{t0 + 0.2}\\t10.0.0.9\\t10.0.0.2\\t8\\t7\\t103\\t\\n'\n"
+        # 10.0.0.1 — 요청 1건(응답 있음, 더 적음)
+        f"printf '{t0 + 0.3}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        f"printf '{t0 + 0.302}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
+        ip_filter="10.0.0.1",
+    )
+    assert "error" not in gt
+    assert gt["sender"] == "10.0.0.1"
+    assert gt["total"] == 1 and gt["ng"] == 0

@@ -810,9 +810,9 @@ def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None):
             [f for f in in_win if f.ta in sta_macs or f.ra in sta_macs]
             if mapped else in_win
         )
-        # "10"(DisAssoc)만 실효 — "12"(DeAuth)는 is_roaming_related(ROAMING_SUBTYPES)가
-        # 이미 포함, 가독성 위해 병기
-        roam = [f for f in scoped if f.is_roaming_related or f.subtype in ("10", "12")]
+        # DeAuth(12)는 is_roaming_related(ROAMING_SUBTYPES)가 이미 포함하므로
+        # 여기선 그것만으로 안 잡히는 DisAssoc(10)만 보강한다.
+        roam = [f for f in scoped if f.is_roaming_related or f.subtype == "10"]
         data_frames = [f for f in scoped if f.is_data]
         retry_frames = [f for f in data_frames if f.retry]
         retry_pct = (len(retry_frames) * 100.0 / len(data_frames)) if data_frames else 0.0

@@ -421,15 +421,20 @@ def count_wireless_requests(frames: list[IcmpFrame], sender: str) -> tuple[int, 
     return total, wireless
 
 
-def extract_exchanges(
+def extract_icmp_frames(
     pcap: str | Path,
     tshark: str = "tshark",
-    sender: str | None = None,
-    timeout: float = DEFAULT_REPLY_TIMEOUT,
     child_timeout: float | None = CHILD_TIMEOUT,
-    allow_wireless: bool = False,
-) -> tuple[list[Exchange], str]:
-    """pcap 을 읽어 (교환 목록, 송신 호스트) 를 낸다.
+) -> list[IcmpFrame]:
+    """pcap 에서 ICMP echo request/reply 프레임만 스트리밍 추출한다.
+
+    `extract_exchanges` 의 하위 레이어다 — tshark 서브프로세스 실행·부분 실패
+    허용·자식 타임아웃·stderr 임시파일 캡처만 담당하고, sender 선정/무선 가드/
+    짝짓기는 하지 않는다. `analyzer.core.wired_ping.build_ground_truth` 가 시간/IP
+    필터가 적용된 부분집합에서 sender 를 다시 고르기 위해(전체 pcap 최다 요청자가
+    아니라 필터 구간의 최다 요청자를 sender 로 써야 한다) 이 레이어를 직접
+    재사용한다 — `extract_exchanges` 를 거치면 sender 가 전체 pcap 기준으로
+    이미 확정돼 버린다.
 
     tshark 출력을 한 줄씩 걸러 담는다 — 프레임이 수백만인 캡처에서 출력 전체를
     메모리에 올리지 않기 위해서다. `check=True` 를 쓰지 않는 이유는
@@ -501,6 +506,26 @@ def extract_exchanges(
             "손실률이 실제보다 낮게 나올 수 있으니 캡처 무결성을 확인하라.",
             file=sys.stderr,
         )
+    return frames
+
+
+def extract_exchanges(
+    pcap: str | Path,
+    tshark: str = "tshark",
+    sender: str | None = None,
+    timeout: float = DEFAULT_REPLY_TIMEOUT,
+    child_timeout: float | None = CHILD_TIMEOUT,
+    allow_wireless: bool = False,
+) -> tuple[list[Exchange], str]:
+    """pcap 을 읽어 (교환 목록, 송신 호스트) 를 낸다.
+
+    프레임 추출(서브프로세스 실행·부분 실패 허용·자식 타임아웃)은
+    `extract_icmp_frames` 에 위임한다 — 이 함수는 그 위에 sender 선정(전체 pcap
+    최다 요청자)·무선 캡처 가드·요청↔응답 짝짓기만 얹는다. 공개 시그니처·예외
+    종류·stderr 메시지·CLI 동작은 리팩토링 전과 동일하다(tests/test_exping.py 전체
+    그린으로 검증).
+    """
+    frames = extract_icmp_frames(pcap, tshark, child_timeout)
     src = sender or pick_sender(frames)
 
     total, wireless = count_wireless_requests(frames, src)
