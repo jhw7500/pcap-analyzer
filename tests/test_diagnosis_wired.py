@@ -1,6 +1,6 @@
 """유선 확정 손실 구간 ↔ 무선 이벤트 대조 이슈."""
 from analyzer.web.structured import _ground_truth_issue_candidates
-from tests.conftest import make_frame, STA1, STA2
+from tests.conftest import make_frame, AP1, STA1, STA2
 
 #: gt['sender'] — STA1 자신이 ping 발신자인 배치를 가정(_sender_sta_macs 매핑용).
 SENDER_IP = "10.0.0.9"
@@ -244,6 +244,64 @@ def test_ip_mapping_failure_falls_back_to_network_wide_medium():
     assert "로밍/해제 1건" in c["issue"]["msg"]
     assert "매핑 불가" in c["issue"]["msg"] and "전체 무선 기준" in c["issue"]["msg"]
     assert c["refs"] == [1]
+
+
+def test_upstream_sender_scopes_to_sta_not_ap():
+    """상류 토폴로지(유선 EXPING PC가 AP 너머의 STA를 ping)에서 sender IP가 걸린
+    프레임의 무선 상대는 AP다 — 다운링크 요청은 ta=AP, 업링크 응답은 ra=AP.
+    AP를 STA로 매핑하면 그 AP를 경유하는 **모든** 무선 트래픽이 스코프에 들어와
+    스코프가 무력화된다(무관 STA2의 로밍/재전송 폭주가 다시 high로 둔갑).
+    detected roles의 AP를 배제해 반대편 비-AP MAC을 골라야 한다 (PR #22 6라운드)."""
+    frames = [
+        # 다운링크 요청: AP가 sender의 echo request를 STA1로 내려보낸다(ta=AP)
+        make_frame(number=1, epoch=1005.0, subtype="40", ta=AP1, ra=STA1,
+                   ip_src=SENDER_IP, ip_dst="10.0.0.2"),
+        # 업링크 응답: STA1이 sender로 돌려보낸다(ra=AP)
+        make_frame(number=2, epoch=1005.05, subtype="40", ta=STA1, ra=AP1,
+                   ip_src="10.0.0.2", ip_dst=SENDER_IP),
+        # 무관한 STA2의 로밍 + 재전송 폭주 — 전부 같은 AP를 경유한다
+        make_frame(number=3, epoch=1005.1, subtype="11", ta=STA2, ra=AP1),
+        make_frame(number=4, epoch=1005.2, subtype="40", retry=True, ta=STA2, ra=AP1),
+        make_frame(number=5, epoch=1005.3, subtype="40", retry=True, ta=STA2, ra=AP1),
+        make_frame(number=6, epoch=1005.4, subtype="40", retry=True, ta=STA2, ra=AP1),
+    ]
+    cands = _ground_truth_issue_candidates(GT, frames, ap_macs={AP1})
+    assert len(cands) == 1
+    c = cands[0]
+    assert c["issue"]["severity"] == "medium"
+    assert "이상 징후 없음" in c["issue"]["msg"]
+    assert c["refs"] == [1, 2]           # STA2 프레임은 스코프 밖
+    assert STA1 in c["issue"]["msg"] and AP1 not in c["issue"]["msg"]
+
+
+def test_upstream_sender_own_sta_roaming_stays_high():
+    """상류 토폴로지에서도 대상 STA 자신의 로밍은 high로 잡힌다(과소 차단 방지)."""
+    frames = [
+        make_frame(number=1, epoch=1005.0, subtype="40", ta=AP1, ra=STA1,
+                   ip_src=SENDER_IP, ip_dst="10.0.0.2"),
+        make_frame(number=2, epoch=1005.1, subtype="11", ta=STA1, ra=AP1),  # STA1 로밍
+        make_frame(number=3, epoch=1005.2, subtype="40", ta=STA2, ra=AP1),  # 무관 STA2
+    ]
+    cands = _ground_truth_issue_candidates(GT, frames, ap_macs={AP1})
+    assert len(cands) == 1
+    c = cands[0]
+    assert c["issue"]["severity"] == "high"
+    assert "로밍/해제 1건" in c["issue"]["msg"]
+    assert c["refs"] == [2]  # 이상 징후가 있으면 refs는 그 근거(로밍) 프레임뿐
+
+
+def test_sta_sender_topology_unchanged_by_ap_macs():
+    """sender가 STA 자신인 기존 토폴로지는 ap_macs를 줘도 결과가 같고, 인자를
+    생략한 기본 경로(구 호출부)도 동일하다 — 하위 호환."""
+    frames = [
+        make_frame(number=1, epoch=1005.0, subtype="11", ip_src=SENDER_IP),  # STA1 로밍
+        make_frame(number=2, epoch=1005.1, subtype="40", ta=STA2),           # 무관 STA2
+    ]
+    without_ap = _ground_truth_issue_candidates(GT, frames)
+    with_ap = _ground_truth_issue_candidates(GT, frames, ap_macs={AP1})
+    assert without_ap == with_ap
+    assert with_ap[0]["issue"]["severity"] == "high"
+    assert with_ap[0]["refs"] == [1]
 
 
 def test_missing_sender_key_treated_as_mapping_failure():

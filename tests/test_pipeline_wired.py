@@ -4,7 +4,7 @@ import threading
 
 import config
 import analyzer.pipeline as pipeline
-from tests.conftest import make_frame, STA1, AP1
+from tests.conftest import make_frame, STA1, STA2, AP1
 
 GT_OK = {
     "total": 100, "ok": 97, "ng": 3, "loss_pct": 3.0, "sender": "10.0.0.1",
@@ -97,6 +97,52 @@ def test_wired_filters_forwarded_to_build_ground_truth(monkeypatch):
     assert captured["time_start"] == "2026-01-01 10:00:00"
     assert captured["time_end"] == "2026-01-01 11:00:00"
     assert captured["ip_filter"] == "10.0.0.2"
+
+
+def test_upstream_topology_scopes_to_target_sta(monkeypatch):
+    """상류 sender(유선 PC가 AP 너머의 STA를 ping) 캡처에서 무관 STA2의 로밍/재전송이
+    유선 손실을 high로 둔갑시키지 않는다 — _structured_diagnosis가 signal["aps"]로
+    ap_macs를 실제로 넘기는지까지 관통 검증한다(단위 테스트는 ap_macs를 직접 준다)."""
+    def _upstream_frames():
+        # detect_roles가 AP를 인식하려면 beacon이, STA로 세려면 그 MAC이 5프레임
+        # 이상 등장해야 한다 — ap_macs 배선을 진짜로 태우려면 픽스처가 실제 role
+        # 감지를 통과해야 하므로 그 조건을 갖춘다.
+        return [
+            make_frame(number=1, epoch=999.0, ta=AP1, ra="ff:ff:ff:ff:ff:ff",
+                       subtype="8"),  # beacon → AP1이 AP로 감지된다
+            # 다운링크 요청(AP→STA1): ip.src가 sender인데 송신자는 AP다
+            make_frame(number=2, epoch=1000.0, ta=AP1, ra=STA1, subtype="40",
+                       ip_src="10.0.0.1", ip_dst="10.0.0.2", icmp_type="8",
+                       icmp_seq="1", seq="100"),
+            # 업링크 응답(STA1→AP): ip.dst가 sender인데 수신자는 AP다
+            make_frame(number=3, epoch=1000.005, ta=STA1, ra=AP1, subtype="40",
+                       ip_src="10.0.0.2", ip_dst="10.0.0.1", icmp_type="0",
+                       icmp_seq="1", seq="200"),
+            make_frame(number=4, epoch=1001.0, ta=STA1, ra=AP1, subtype="40"),
+            make_frame(number=5, epoch=1002.0, ta=AP1, ra=STA1, subtype="40"),
+            # 무관한 STA2의 로밍 + 재전송 폭주 — 손실 창 안, 전부 같은 AP 경유
+            make_frame(number=6, epoch=1005.0, ta=STA2, ra=AP1, subtype="11"),
+            make_frame(number=7, epoch=1005.1, ta=STA2, ra=AP1, subtype="40", retry=True),
+            make_frame(number=8, epoch=1005.2, ta=STA1, ra=AP1, subtype="40"),  # 대상 STA 정상
+            make_frame(number=9, epoch=1005.3, ta=STA2, ra=AP1, subtype="40", retry=True),
+            make_frame(number=10, epoch=1005.4, ta=STA2, ra=AP1, subtype="40", retry=True),
+            make_frame(number=11, epoch=1005.45, ta=STA2, ra=AP1, subtype="40", retry=True),
+            make_frame(number=12, epoch=1009.0, ta=STA1, ra=AP1, subtype="40"),
+        ]
+
+    monkeypatch.setattr(pipeline, "extract_frames", lambda *a, **kw: _upstream_frames())
+    monkeypatch.setattr(pipeline, "detect_tshark_version",
+                        lambda *a, **kw: {"version": "test", "path": "tshark"})
+    monkeypatch.setattr(config, "detect_tshark", lambda: "tshark")
+    monkeypatch.setattr(pipeline, "build_ground_truth", lambda *a, **kw: dict(GT_OK))
+    monkeypatch.setattr(os.path, "getsize", lambda *a, **kw: 1000)
+
+    result = pipeline.run_analysis("wireless.pcapng", wired_path="wired.pcapng")
+    issues = result["structured"]["diagnosis"]["issues"]
+    wired = [i for i in issues if i.get("signal_type") == "wired_loss"]
+    assert len(wired) == 1
+    assert wired[0]["severity"] == "medium"          # STA2의 로밍/폭주는 대상 밖
+    assert wired[0]["frame_refs"] == [8]             # 대상 STA1의 창 안 프레임만
 
 
 def test_wired_cancel_reaches_run_analysis_result(monkeypatch):
