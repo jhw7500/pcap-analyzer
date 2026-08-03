@@ -781,17 +781,18 @@
             wirelessLossLabel = '무선 관측 손실(동일 송신원)';
             const senderItems = fullList.filter(p => p.src === gt.sender &&
                 (p.status === 'matched' || p.status === 'loss' || p.status === 'loss_gap'));
-            // sender가 보낸 echo request 중 짝을 못 지은 관측이 하나라도 있으면
+            // sender가 걸린 짝 없는 관측이 **방향과 무관하게** 하나라도 있으면
             // 모집단이 어긋난다 — 그 흐름의 정상 관측이 분모에서 통째로 빠져
-            // 손실률이 과대 표시된다. sender의 한 target은 양방향이고 다른
-            // target은 요청-only인 혼합 캡처에서는 matched가 존재하므로,
-            // "matched가 하나도 없을 때"라는 단방향 조건만으로는 걸러지지 않는다.
-            // observations entry(ping_matching._observation_entry)는 direction
-            // ('request'/'reply')과 icmp_type('8'=request)을 함께 싣는다 —
-            // 구버전 직렬화 result 호환을 위해 둘 다 본다.
-            const unpairedSenderReq = (ping.observations || []).some(o =>
-                o.src === gt.sender && (o.direction === 'request' || o.icmp_type === '8'));
-            if (unpairedSenderReq) {
+            // 손실률이 과대 표시된다. observations(ping_matching의
+            // _observation_entry)는 애초에 "관측됐지만 RTT 측정 불가"만 담으므로
+            // 존재 자체가 모집단 불완전의 증거다. 방향을 가리지 않는 이유:
+            //   - 요청-only: sender가 보낸 request가 관측(src === sender)
+            //   - 응답-only: 모니터가 sender로 오는 reply만 관측(dst === sender)
+            //   - 혼합: 한 target은 양방향이라 matched가 존재 → "matched 0건"
+            //     같은 단방향 조건이나 요청 방향만 보는 조건으로는 못 걸러진다.
+            const unpairedSenderObs = (ping.observations || []).some(o =>
+                o.src === gt.sender || o.dst === gt.sender);
+            if (unpairedSenderObs) {
                 wirelessLoss = '— (단방향/혼합 캡처 — 비교 불가)';
             } else if (senderItems.length) {
                 const lossN = senderItems.filter(p => p.status === 'loss' || p.status === 'loss_gap').length;

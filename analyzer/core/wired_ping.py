@@ -125,8 +125,15 @@ def _cohort_requests(
     return cohort, ""
 
 
-def _detect_capture_end(pcap_path: str, tshark_path: str) -> Optional[float]:
+def _detect_capture_end(
+    pcap_path: str, tshark_path: str, cancel_event: Optional[Any] = None
+) -> Optional[float]:
     """capinfos로 실제 캡처의 마지막 패킷 시각(epoch)을 구한다. 실패/부재 시 None.
+
+    cancel_event가 이미 set이면 capinfos를 **띄우지 않고** None을 반환한다 — 취소를
+    보고한 뒤 자식 프로세스가 하나 더 생기지 않게. 실행 중에 들어온 취소는 잡지
+    못한다(최대 30초 timeout까지 대기) — capinfos는 헤더만 읽어 짧고, 스트리밍이
+    아니라 중간에 끊을 지점이 없어 감시 스레드를 붙일 실익이 없다. 알려진 한계다.
 
     ICMP 전용 필터(extract_icmp_frames)만으로는 캡처가 진짜 언제 끝났는지 알 수
     없다 — ping이 멈춘 뒤에도 non-ICMP 트래픽으로 캡처가 계속 이어질 수 있다.
@@ -141,6 +148,8 @@ def _detect_capture_end(pcap_path: str, tshark_path: str) -> Optional[float]:
     "1700000001.703000"). 라벨도 버전별로 다를 수 있어 "Latest packet time"과
     "End time" 둘 다 허용한다(실측 4.4.9는 전자).
     """
+    if cancel_event is not None and cancel_event.is_set():
+        return None
     candidates = []
     if tshark_path:
         candidates.append(str(Path(tshark_path).parent / "capinfos"))
@@ -241,11 +250,17 @@ def build_ground_truth(
     cancel_event(threading.Event)를 주면 추출 중 취소가 자식 tshark까지 전파되고
     (exping.extract_icmp_frames), 그때는 error가 아니라 {"cancelled": True}를
     반환한다 — 호출부(pipeline)가 전체 분석 취소와 같은 방식으로 처리하도록.
+    추출이 끝난 뒤 들어온 취소는 capinfos(_detect_capture_end)를 띄우기 직전에
+    확인해 같은 값을 반환한다.
     """
     warnings: List[str] = []
     try:
+        # warnings_out: tshark가 일부 행만 내고 비정상 종료한 경우의 경고를 gt
+        # warnings로 올린다 — stderr만으로는 웹 경로가 알 수 없어 잘린 pcap이
+        # 경고 없는 "성공한 GT"로 게시된다(손실 과소 계상).
         frames = exping.extract_icmp_frames(
-            pcap_path, tshark=tshark_path, cancel_event=cancel_event
+            pcap_path, tshark=tshark_path, cancel_event=cancel_event,
+            warnings_out=warnings,
         )
     except InterruptedError:
         return {"cancelled": True}
@@ -297,7 +312,12 @@ def build_ground_truth(
     if not exchanges:
         return {"error": f"{sender} 가 보낸 echo request 가 없다", "warnings": warnings}
 
-    capture_end = _detect_capture_end(pcap_path, tshark_path)
+    # capinfos 자식을 띄우기 전 마지막 취소 확인 — 추출·짝짓기 도중 들어온 취소가
+    # 여기서 걸린다(취소를 보고해 놓고 자식이 또 하나 도는 일을 막는다).
+    if cancel_event is not None and cancel_event.is_set():
+        return {"cancelled": True}
+
+    capture_end = _detect_capture_end(pcap_path, tshark_path, cancel_event)
     if capture_end is None:
         # 검증된 물리적 끝이 없으면 **아무것도 지우지 않는다**. ICMP 마지막 프레임을
         # 프록시로 쓰면 임계값이 실제 캡처 끝보다 앞당겨져(뒤에 non-ICMP 트래픽이

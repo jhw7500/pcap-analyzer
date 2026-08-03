@@ -426,6 +426,7 @@ def extract_icmp_frames(
     tshark: str = "tshark",
     child_timeout: float | None = CHILD_TIMEOUT,
     cancel_event: "threading.Event | None" = None,
+    warnings_out: "list[str] | None" = None,
 ) -> list[IcmpFrame]:
     """pcap 에서 ICMP echo request/reply 프레임만 스트리밍 추출한다.
 
@@ -456,6 +457,12 @@ def extract_icmp_frames(
     이유: 취소 시점까지 읽은 것만으로 집계하면 손실률이 조용히 틀린다. 예외를
     새로 쓰는 이유: 기존 `ValueError`/`TimeoutError` 계약을 건드리지 않기 위함.
     미전달(기본 `None`)이면 감시 스레드를 아예 만들지 않아 동작이 불변이다.
+
+    `warnings_out` 리스트를 주면 부분 실패(비정상 종료했지만 프레임은 건진 경우)
+    경고를 stderr 와 **같은 내용**으로 거기에도 담는다. stderr 만으로는 웹 경로가
+    그 사실을 알 길이 없어, 잘린/손상 pcap 이 아무 경고 없이 "성공한 ground
+    truth" 로 게시된다(손실률이 실제보다 낮게 나온다). stderr 출력은 그대로
+    유지되므로 CLI 동작은 불변이다.
     """
     if cancel_event is not None and cancel_event.is_set():
         # 이미 취소된 뒤라면 자식을 띄우지도 않는다.
@@ -551,15 +558,17 @@ def extract_icmp_frames(
             raise ValueError(f"tshark 가 실패했다 (exit {returncode}): {last}")
         # 프레임을 건졌어도 비정상 종료면 캡처가 중간에 끊겼을 수 있다. 조용히 넘기면
         # 못 읽은 요청만큼 손실률이 실제보다 **낮게** 나오는데 사용자는 알 길이 없다.
-        print(
-            f"[!] tshark 가 exit {returncode} 로 끝났다 — 결과가 일부일 수 있다: {last}",
-            file=sys.stderr,
-        )
-        print(
-            f"[!] 읽은 ICMP 프레임 {len(frames):,}개로 계속한다. "
+        # 문구를 한 번만 만들어 stderr(CLI)와 warnings_out(웹) 양쪽에 같은 내용을
+        # 흘린다 — 두 경로가 갈라져 한쪽만 갱신되는 일을 막는다.
+        partial_msgs = [
+            f"tshark 가 exit {returncode} 로 끝났다 — 결과가 일부일 수 있다: {last}",
+            f"읽은 ICMP 프레임 {len(frames):,}개로 계속한다. "
             "손실률이 실제보다 낮게 나올 수 있으니 캡처 무결성을 확인하라.",
-            file=sys.stderr,
-        )
+        ]
+        for msg in partial_msgs:
+            print(f"[!] {msg}", file=sys.stderr)
+        if warnings_out is not None:
+            warnings_out.extend(partial_msgs)
     return frames
 
 

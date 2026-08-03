@@ -373,6 +373,61 @@ def test_capture_end_unknown_without_tail_has_no_warning(tmp_path):
     assert not any("캡처 끝 시각 미확인" in w for w in gt["warnings"])
 
 
+def test_partial_extraction_warning_reaches_ground_truth(tmp_path, capsys):
+    """tshark가 일부 행만 내고 비정상 종료하면(잘린/손상 pcap) 그 경고가 gt warnings로
+    올라와야 한다 (PR #22 5라운드). stderr에만 찍으면 웹 업로드 경로는 아무 경고 없이
+    '성공한 GT'를 게시해 손실을 조용히 과소 계상한다."""
+    body = (
+        "printf '100.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        "printf '100.002\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+        "echo 'tshark: The file appears to be damaged' >&2\n"
+        "exit 2\n"
+    )
+    gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=_fake_tshark(tmp_path, body))
+    assert "error" not in gt
+    assert gt["total"] == 1
+    assert any("일부" in w for w in gt["warnings"])
+    assert any("damaged" in w for w in gt["warnings"])
+    assert any("낮게 나올 수 있으니" in w for w in gt["warnings"])
+    # stderr 출력은 CLI 계약이라 그대로 유지된다(경고가 옮겨간 게 아니라 더해진 것).
+    assert "exit 2" in capsys.readouterr().err
+
+
+def test_detect_capture_end_skips_capinfos_when_cancelled(monkeypatch):
+    """취소된 상태면 capinfos를 띄우지 않는다 — 자식 프로세스가 또 하나 늘면 안 된다."""
+    calls = []
+    monkeypatch.setattr(wired_ping.subprocess, "run",
+                        lambda *a, **kw: calls.append(a))
+    cancel = threading.Event()
+    cancel.set()
+    assert wired_ping._detect_capture_end(str(FIXTURE), "tshark", cancel) is None
+    assert calls == []
+
+
+def test_cancel_after_extraction_returns_cancelled_before_capinfos(tmp_path, monkeypatch):
+    """추출이 끝난 뒤 취소가 들어오면 capinfos를 호출하기 전에 취소로 끝낸다."""
+    calls = []
+    monkeypatch.setattr(
+        wired_ping, "_detect_capture_end",
+        lambda *a, **kw: (calls.append(a), 100.5)[1],
+    )
+    cancel = threading.Event()
+
+    def _fake_extract(pcap, **kwargs):
+        cancel.set()  # 추출 도중 사용자가 취소한 상황
+        return [
+            (100.0, "10.0.0.1", "10.0.0.2", "8", "7", "1", ""),
+            (100.002, "10.0.0.2", "10.0.0.1", "0", "7", "1", ""),
+        ]
+
+    monkeypatch.setattr(wired_ping.exping, "extract_icmp_frames", _fake_extract)
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path="tshark", cancel_event=cancel
+    )
+    assert gt == {"cancelled": True}
+    assert calls == []
+
+
 def test_detect_capture_end_real_capinfos():
     """실제 capinfos 서브프로세스로 성공 경로를 검증한다(PR #22 재리뷰 — 몽키패치로
     가려졌던 라벨("Latest packet time")·플래그(-S 필요) 버그 회귀 방지). capinfos가
