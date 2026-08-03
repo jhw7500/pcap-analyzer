@@ -2,7 +2,8 @@
 {% block title %}{{ result.pcap_name }} - 분석 결과{% endblock %}
 
 {% block content %}
-{% set src_list = result.structured.get('sources') or [] %}
+{% set _structured = result.get('structured') or {} %}
+{% set src_list = _structured.get('sources') or [] %}
 {% set src_warnings = [] %}
 {% for s in src_list %}{% for w in s.get('warnings', []) %}{% set _ = src_warnings.append(s.get('name', '?') ~ ': ' ~ w) %}{% endfor %}{% endfor %}
 {% if src_warnings %}

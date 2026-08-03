@@ -45,3 +45,13 @@ def test_old_result_without_sources_renders(tmp_path, monkeypatch):
     data["structured"].pop("sources")
     p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     assert client.get("/analysis/warn1").status_code == 200
+
+
+def test_result_without_structured_key_renders(tmp_path, monkeypatch):
+    """structured 키 자체가 없는 (더 오래된) 결과도 배너 렌더링에서 500을 내지 않는다."""
+    _store(tmp_path, monkeypatch, [])
+    p = tmp_path / "warn1.json"
+    data = json.loads(p.read_text(encoding="utf-8"))
+    data.pop("structured")
+    p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    assert client.get("/analysis/warn1").status_code == 200
