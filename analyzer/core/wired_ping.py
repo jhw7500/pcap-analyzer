@@ -134,8 +134,12 @@ def _detect_capture_end(pcap_path: str, tshark_path: str) -> Optional[float]:
     없었다"를 증명하려면 ICMP 프레임이 아니라 pcap 자체의 끝을 알아야 한다.
 
     tshark와 같은 배포에 있는 capinfos를 우선 시도한다(버전 불일치 방지) —
-    없으면 PATH에서 찾는다. `-e`(end time) `-M`(machine-readable, epoch 초 단위)
-    조합으로 사람이 읽는 포맷팅을 피한다.
+    없으면 PATH에서 찾는다. `-e`(end time) `-M`(machine-readable) 만으로는 값이
+    여전히 사람이 읽는 날짜 포맷("2023-11-15 07:13:21.703000")이다 — epoch
+    초 단위로 받으려면 `-S`(seconds since epoch)를 함께 줘야 한다(실측:
+    capinfos 4.4.9, `-e -M` → "2023-11-15 07:13:21.703000", `-e -S -M` →
+    "1700000001.703000"). 라벨도 버전별로 다를 수 있어 "Latest packet time"과
+    "End time" 둘 다 허용한다(실측 4.4.9는 전자).
     """
     candidates = []
     if tshark_path:
@@ -148,7 +152,7 @@ def _detect_capture_end(pcap_path: str, tshark_path: str) -> Optional[float]:
         return None
     try:
         result = subprocess.run(
-            [capinfos_path, "-e", "-M", str(pcap_path)],
+            [capinfos_path, "-e", "-S", "-M", str(pcap_path)],
             capture_output=True, text=True, timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired, ValueError):
@@ -156,11 +160,13 @@ def _detect_capture_end(pcap_path: str, tshark_path: str) -> Optional[float]:
     if result.returncode != 0:
         return None
     for line in (result.stdout or "").splitlines():
-        if line.strip().lower().startswith("end time"):
-            parts = line.split()
-            if parts:
+        stripped = line.strip().lower()
+        if stripped.startswith("latest packet time") or stripped.startswith("end time"):
+            _, _, value = line.partition(":")
+            value = value.strip()
+            if value:
                 try:
-                    return float(parts[-1])
+                    return float(value.split()[-1])
                 except ValueError:
                     return None
     return None
@@ -276,7 +282,10 @@ def build_ground_truth(
         # 있을 수 있음) 꼬리 판정이 다소 보수적으로(더 많이 남기는 쪽으로) 치우칠
         # 수 있다는 한계를 warnings로 알린다.
         capture_end = max(f[0] for f in frames)
-        warnings.append("capinfos 없음 — 캡처 끝을 ICMP 마지막 프레임으로 근사")
+        warnings.append(
+            "캡처 끝 시각을 확인하지 못해 ICMP 마지막 프레임으로 근사 "
+            "(capinfos 부재 또는 파싱 실패)"
+        )
 
     exchanges, dropped = _drop_unreachable_tail(exchanges, capture_end, reply_timeout)
     if dropped:

@@ -1,9 +1,16 @@
 """wired_ping.build_ground_truth — 유선 pcap ping ground truth 빌더."""
 import datetime as dt
+import shutil
+from pathlib import Path
 
 import pytest
 
 from analyzer.core import wired_ping
+
+#: 실경로(real capinfos subprocess) 테스트용 — scapy로 합성된 deterministic pcap.
+#: 생성 스크립트(tests/fixtures/generate_sample_basic.py)의 BASE_EPOCH=1700000000.0
+#: 기준, 실제 마지막 패킷 epoch은 capinfos 실측으로 확인(1700000001.703).
+FIXTURE = Path(__file__).parent / "fixtures" / "sample_basic.pcap"
 
 
 def _fake_tshark(tmp_path, body: str) -> str:
@@ -335,6 +342,16 @@ def test_capinfos_absent_falls_back_to_icmp_max_epoch_with_warning(tmp_path):
     gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=_fake_tshark(tmp_path, body))
     assert "error" not in gt
     assert any("capinfos" in w for w in gt["warnings"])
+
+
+def test_detect_capture_end_real_capinfos():
+    """실제 capinfos 서브프로세스로 성공 경로를 검증한다(PR #22 재리뷰 — 몽키패치로
+    가려졌던 라벨("Latest packet time")·플래그(-S 필요) 버그 회귀 방지). capinfos가
+    없는 환경(CI 등)에서는 런타임 skip — 스위트 전체 그린은 유지된다."""
+    if shutil.which("capinfos") is None:
+        pytest.skip("capinfos not installed")
+    end = wired_ping._detect_capture_end(str(FIXTURE), shutil.which("tshark") or "tshark")
+    assert end == pytest.approx(1700000001.703, abs=0.01)
 
 
 # --------------------------------------------------------------------------
