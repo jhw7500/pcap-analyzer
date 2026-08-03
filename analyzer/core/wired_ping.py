@@ -87,10 +87,14 @@ def _cohort_requests(
     잘못 선택된다 — 필터가 있어도 무시된 채 전체 pcap 기준으로 sender가 확정되기
     때문이다.
 
-    ip_filter는 여기서 "요청의 src가 목록에 있는가"만 본다(exping.pair_exchanges
-    결과에 붙는 exchange 수준 ip_filter — 이미 sender/target을 아는 상태에서 대칭
-    매칭하는 `_filter_exchanges`와는 다른 층위. 이 단계는 아직 sender 자체를
-    모르므로 대칭 개념이 성립하지 않는다).
+    ip_filter는 여기서도 무선 쪽과 같은 tshark `ip.addr == X`대칭(src/dst 어느
+    쪽이든 매칭)을 쓴다 — sender 자신의 IP를 몰라도, "이 IP가 요청의 src거나
+    dst다"라는 조건은 성립한다. src만 보면 target IP만 준 ip_filter(예:
+    "이 target에 ping하는 sender를 찾아라")가 코호트를 비워 에러를 내는데, 그건
+    무선 필터 의미와도 어긋난다. dst까지 보면 그 경우도 "이 target에 ping한
+    요청들"이 코호트가 되고 pick_sender가 그 요청들의 최다 송신자를 sender로
+    고른다 — 이후 exchange 수준 `_filter_exchanges`(sender가 필터에 있으면 전체
+    유지, 아니면 target 좁히기)가 최종 표시 범위를 정리한다.
 
     파싱 실패 시 (None, 에러메시지). 필터 결과가 빈 리스트일 수도 있다(빈 리스트
     자체가 유효한 반환값 — 호출부가 "필터 구간에 요청 없음"으로 처리).
@@ -108,14 +112,14 @@ def _cohort_requests(
 
     cohort = []
     for f in frames:
-        epoch, src, _dst, typ = f[0], f[1], f[2], f[3]
+        epoch, src, dst, typ = f[0], f[1], f[2], f[3]
         if typ != exping.ICMP_ECHO_REQUEST:
             continue
         if start_epoch is not None and epoch < start_epoch:
             continue
         if end_epoch is not None and epoch >= end_epoch:
             continue
-        if ips is not None and src not in ips:
+        if ips is not None and src not in ips and dst not in ips:
             continue
         cohort.append(f)
     return cohort, ""

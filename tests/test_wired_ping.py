@@ -163,12 +163,9 @@ def test_time_filter_end_excludes_requests_after_window(tmp_path):
 
 
 def test_ip_filter_narrows_targets_when_sender_also_listed(tmp_path):
-    """ip_filter에 sender와 target을 함께 주면(코호트가 sender를 찾고, exchange
-    단계는 'sender 포함 → 필터링 없음' 규칙이라) 전체가 유지된다 — PR #22
-    3라운드: ip_filter는 이제 sender 선정 코호트에도 적용되므로(src만 봄),
-    target IP 하나만으로는 sender를 못 찾아 예전처럼 그 target만 남기는
-    동작은 더 이상 성립하지 않는다(의도적 트레이드오프,
-    test_ip_filter_selects_cohort_sender_among_multiple_hosts 참조)."""
+    """ip_filter에 sender와 target을 함께 주면, exchange 단계의 'sender가
+    필터에 있으면 전체 유지' 규칙이 적용돼 target만으로 좁혀지지 않고 전체가
+    유지된다(무선 ip.addr==의 대칭 규칙 그대로 — sender in ips일 때의 동작)."""
     t0 = _local_epoch("2026-01-01 10:00:00")
     body = (
         f"printf '{t0}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
@@ -182,6 +179,28 @@ def test_ip_filter_narrows_targets_when_sender_also_listed(tmp_path):
     )
     assert "error" not in gt
     assert gt["total"] == 2
+
+
+def test_ip_filter_target_only_selects_matching_sender_and_narrows(tmp_path):
+    """ip_filter에 target IP만 줘도(무선 ip.addr==와 대칭으로 dst도 봄) 그
+    target에 ping하는 호스트가 sender로 선정되고, 이후 exchange 단계에서
+    그 target 흐름만 남는다 — round-1 의미 복원(3라운드에서 src만 보도록
+    바꿔 한때 깨졌던 부분 정정, team-lead 지시)."""
+    t0 = _local_epoch("2026-01-01 10:00:00")
+    body = (
+        f"printf '{t0}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        f"printf '{t0 + 0.002}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+        f"printf '{t0 + 1}\\t10.0.0.1\\t10.0.0.3\\t8\\t7\\t2\\t\\n'\n"
+        f"printf '{t0 + 1.002}\\t10.0.0.3\\t10.0.0.1\\t0\\t7\\t2\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
+        ip_filter="10.0.0.3",
+    )
+    assert "error" not in gt
+    assert gt["sender"] == "10.0.0.1"
+    assert gt["total"] == 1
+    assert gt["targets"] == {"10.0.0.3": {"total": 1, "ng": 0}}
 
 
 def test_ip_filter_keeps_all_when_sender_listed(tmp_path):
