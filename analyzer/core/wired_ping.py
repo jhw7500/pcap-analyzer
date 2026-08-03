@@ -80,6 +80,9 @@ def build_ground_truth(
     time_start/time_end/ip_filter는 무선 extract_frames()가 받는 동일 인자와
     같은 구간을 가리키도록 대칭으로 구현했다 — 서로 다른 구간을 비교하지 않기
     위함(무선 필터만 적용되고 유선은 전체 구간을 쓰면 손실률이 왜곡된다).
+    적용 순서는 "꼬리 무응답 제거(전체 캡처 기준) → 시간/IP 필터"다. 반대로 하면
+    필터가 창 끝을 자를 때 창 안 마지막 자리의 진짜 손실이 "물리적 꼬리"로
+    오인되어 조용히 사라질 수 있다(trailing_dropped는 항상 물리적 꼬리 기준).
 
     취소 이벤트는 지원하지 않는다 — exping.extract_exchanges에 취소 훅이 없고
     child_timeout(기본 3600초) 상한만 있다. ICMP 디스플레이 필터라 대체로 빠르다.
@@ -98,14 +101,13 @@ def build_ground_truth(
     if not exchanges:
         return {"error": f"{sender} 가 보낸 echo request 가 없다", "warnings": warnings}
 
-    if time_start or time_end or ip_filter:
-        filtered, err = _filter_exchanges(exchanges, sender, time_start, time_end, ip_filter)
-        if filtered is None:
-            return {"error": err, "warnings": warnings}
-        exchanges = filtered
-        if not exchanges:
-            return {"error": "필터 구간에 echo request 가 없다", "warnings": warnings}
-
+    # 꼬리 무응답 제거는 필터 적용 "전" 전체 캡처 기준으로 한다. pairing(위
+    # extract_exchanges)이 전체 캡처 기준으로 이미 끝났으므로, 창 끝 근처 요청의
+    # 응답이 창 밖(그러나 캡처 안)에 있어도 이미 매칭되어 있다 — 즉 시간 필터의
+    # 끝은 "캡처가 응답보다 먼저 끊긴" 물리적 꼬리가 아니다. 필터를 먼저 적용해
+    # 잘라낸 뒤 꼬리를 제거하면, 창 안 마지막 자리에 우연히 놓인 **진짜 손실**이
+    # "꼬리라 판정 불가"로 오인되어 조용히 사라진다. 그래서 물리적 꼬리(전체
+    # 캡처의 맨 끝)만 걸러내도록 필터보다 먼저 수행한다.
     exchanges, dropped = exping.drop_trailing_unanswered(exchanges)
     if dropped:
         warnings.append(
@@ -118,6 +120,14 @@ def build_ground_truth(
             "error": f"응답 있는 요청이 하나도 없다 — 요청 {dropped}건 전부 무응답 (100% 손실이거나 미러 구성이 응답 방향을 놓친 캡처)",
             "warnings": warnings
         }
+
+    if time_start or time_end or ip_filter:
+        filtered, err = _filter_exchanges(exchanges, sender, time_start, time_end, ip_filter)
+        if filtered is None:
+            return {"error": err, "warnings": warnings}
+        exchanges = filtered
+        if not exchanges:
+            return {"error": "필터 구간에 echo request 가 없다", "warnings": warnings}
 
     ng = [x for x in exchanges if not x.answered]
     targets: Dict[str, Dict[str, int]] = {}

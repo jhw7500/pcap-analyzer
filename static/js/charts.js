@@ -770,9 +770,26 @@
     const gt = ping.ground_truth || null;
     const gtDiv = document.getElementById('ping-ground-truth');
     if (gt && gtDiv && typeof gt.ng === 'number' && typeof gt.total === 'number') {
-        const s = pingStatsData;
-        const wirelessLoss = (s.loss_count != null && s.loss_pct != null)
-            ? `${s.loss_count.toLocaleString()}건 (${s.loss_pct}%)` : '—';
+        // GT는 gt.sender 1개 호스트의 ping만 집계한다(pick_sender). 카드의
+        // "무선 관측 손실"에 pingStatsData(전체 ICMP 흐름 집계)를 그대로 쓰면
+        // 배경 호스트의 ping까지 섞여 서로 다른 모집단을 비교하게 된다 — GT와
+        // 같은 송신원(src===gt.sender)의 request만 걸러 동일 모집단으로 맞춘다.
+        let wirelessLoss = '—';
+        let wirelessLossLabel = '무선 관측 손실(전체)';
+        if (gt.sender) {
+            wirelessLossLabel = '무선 관측 손실(동일 송신원)';
+            const senderItems = fullList.filter(p => p.src === gt.sender &&
+                (p.status === 'matched' || p.status === 'loss' || p.status === 'loss_gap'));
+            if (senderItems.length) {
+                const lossN = senderItems.filter(p => p.status === 'loss' || p.status === 'loss_gap').length;
+                const pct = (lossN * 100 / senderItems.length).toFixed(2);
+                wirelessLoss = `${lossN.toLocaleString()}건 (${pct}%)`;
+            }
+        } else {
+            const s = pingStatsData;
+            wirelessLoss = (s.loss_count != null && s.loss_pct != null)
+                ? `${s.loss_count.toLocaleString()}건 (${s.loss_pct}%)` : '—';
+        }
         gtDiv.classList.remove('hidden');
         gtDiv.innerHTML = `
           <div class="bg-gray-800 border border-emerald-700 rounded-lg p-4">
@@ -781,7 +798,7 @@
               <div><div class="text-gray-400">확정 손실</div>
                 <div class="${gt.ng > 0 ? 'text-red-400' : 'text-green-400'}">${gt.ng.toLocaleString()}건 (${gt.loss_pct}%)</div></div>
               <div><div class="text-gray-400">전체 요청</div><div>${gt.total.toLocaleString()}건</div></div>
-              <div><div class="text-gray-400">무선 관측 손실</div><div>${wirelessLoss}</div></div>
+              <div><div class="text-gray-400">${wirelessLossLabel}</div><div>${wirelessLoss}</div></div>
               <div><div class="text-gray-400">연속 손실 구간</div><div>${(gt.streaks || []).length}곳</div></div>
             </div>
             <p class="text-gray-500 text-xs mt-2">

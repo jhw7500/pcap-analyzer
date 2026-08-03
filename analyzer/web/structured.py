@@ -745,8 +745,39 @@ def _cliffs_overlapping_window(signal_cliffs, win):
     return out
 
 
+def _sender_sta_macs(frames, sender):
+    """gt['sender'](유선 캡처 기준 ping 발신 IP)에 대응하는 무선 STA MAC 집합.
+
+    이 기능이 다루는 배치는 STA 자신이 ping 발신자다(유선 포트미러는 그 STA의
+    트래픽이 스위치를 거치는지 보는 ground truth). 그래서 sender IP가 실린
+    무선 프레임에서 TA/RA를 역추적하면 STA MAC이 나온다: echo request는 STA가
+    직접 송신하므로 ip.src==sender인 프레임의 TA가 STA(업링크), 그 응답은
+    STA로 돌아오므로 ip.dst==sender인 프레임의 RA가 STA(다운링크). 브로드캐스트
+    /멀티캐스트는 제외(_is_unicast). sender가 비었거나 매칭이 0건이면 빈
+    집합 — 호출부가 "매핑 실패"로 처리해 전체-무선 대조로 폴백한다.
+    """
+    macs = set()
+    if not sender:
+        return macs
+    from ..core.detector import _is_unicast
+
+    for f in frames:
+        if f.ip_src == sender and _is_unicast(f.ta):
+            macs.add(f.ta)
+        if f.ip_dst == sender and _is_unicast(f.ra):
+            macs.add(f.ra)
+    return macs
+
+
 def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None):
     """유선 확정 손실 streak별 무선 대조 이슈 후보. 근거 프레임이 없으면 후보 제외.
+
+    로밍/재전송 판정은 gt['sender']로 매핑된 STA로 스코프를 좁힌다 — 그러지
+    않으면 다중 STA 캡처에서 무관한 STA의 로밍/재전송이 다른 STA의 유선 손실을
+    이상 징후로 둔갑시킨다. 매핑 실패(암호화 미해제 캡처 등 IP 매칭 0건) 시
+    전체-무선 대조로 폴백하되 귀속이 불확실하므로 severity를 high→medium으로
+    낮추고 msg에 명시한다. signal_cliff 대조는 (리뷰 지시대로) STA로 좁히지
+    않고 기존처럼 전체 STA를 본다 — cliff 스키마엔 아직 STA→MAC 역참조가 없다.
 
     이상 징후 = 로밍/해제 프레임 ≥1 또는 재전송 폭주(_WIRED_LOSS_RETRY_MIN건 이상 &&
     _WIRED_LOSS_RETRY_PCT% 이상) 또는 창과 겹치는 signal_cliff ≥1 (스펙 §4).
@@ -757,6 +788,13 @@ def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None):
     없어 이슈를 만들지 않는다(근거 없는 결론 금지) — 알려진 한계.
     """
     signal_cliffs = signal_cliffs if isinstance(signal_cliffs, dict) else {}
+    sta_macs = _sender_sta_macs(frames, gt.get("sender") or "")
+    mapped = bool(sta_macs)
+    sta_label = (
+        f"STA {', '.join(sorted(sta_macs))}" if mapped
+        else "STA 매핑 불가 — 전체 무선 기준"
+    )
+
     out = []
     for streak in (gt.get("streaks") or [])[:_WIRED_LOSS_MAX_STREAKS]:
         start, end = streak.get("start_epoch"), streak.get("end_epoch")
@@ -767,10 +805,15 @@ def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None):
         in_win = [f for f in frames if win["start_epoch"] <= f.epoch <= win["end_epoch"]]
         if not in_win:
             continue
+        # 매핑 성공 시 대상 STA의 프레임만, 실패 시 기존처럼 창 안 전체.
+        scoped = (
+            [f for f in in_win if f.ta in sta_macs or f.ra in sta_macs]
+            if mapped else in_win
+        )
         # "10"(DisAssoc)만 실효 — "12"(DeAuth)는 is_roaming_related(ROAMING_SUBTYPES)가
         # 이미 포함, 가독성 위해 병기
-        roam = [f for f in in_win if f.is_roaming_related or f.subtype in ("10", "12")]
-        data_frames = [f for f in in_win if f.is_data]
+        roam = [f for f in scoped if f.is_roaming_related or f.subtype in ("10", "12")]
+        data_frames = [f for f in scoped if f.is_data]
         retry_frames = [f for f in data_frames if f.retry]
         retry_pct = (len(retry_frames) * 100.0 / len(data_frames)) if data_frames else 0.0
         retry_burst = (
@@ -792,27 +835,31 @@ def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None):
         head = (f"유선 확정 손실 {streak.get('count')}건 "
                 f"({streak.get('target', '?')}, {streak.get('duration_sec')}초)")
         if reasons:
+            # 매핑 실패 시 귀속이 불확실하므로 severity를 medium으로 낮춘다
+            # (근거·메시지는 그대로 보존 — 정보 자체는 여전히 유용하다).
+            severity = "high" if mapped else "medium"
             # refs: 실제로 창 안에 있는 로밍/retry 프레임(폭주 미달이라도)을 우선 근거로
             # 삼고, cliff 스키마에 frame 참조가 있으면(현재는 없음, 향후 확장 대비) 더한다.
-            # 셋 다 비면(cliff만 근거인데 창 안 로밍/retry가 0건) 창 안 전체로 폴백.
+            # 셋 다 비면(cliff만 근거인데 스코프 안 로밍/retry가 0건) 스코프 전체로 폴백.
             anomaly = {f.number for f in roam} | {f.number for f in retry_frames}
             for _sta_name, c in cliffs:
                 cliff_refs = c.get("frame_refs")
                 if isinstance(cliff_refs, list):
                     anomaly.update(n for n in cliff_refs if isinstance(n, int))
-            refs = sorted(anomaly) if anomaly else [f.number for f in in_win]
+            refs = sorted(anomaly) if anomaly else [f.number for f in scoped]
             issue = {
-                "severity": "high", "category": "유선 손실",
-                "msg": f"{head} — 구간 내 무선: {', '.join(reasons)}",
+                "severity": severity, "category": "유선 손실",
+                "msg": f"{head} — 구간 내 무선: {', '.join(reasons)} ({sta_label})",
                 "action": "통합 타임라인에서 해당 구간의 로밍·재전송·RSSI를 확인하세요.",
             }
         else:
             issue = {
                 "severity": "medium", "category": "유선 손실",
-                "msg": f"{head} — 구간 내 무선 이상 징후 없음 (트래픽 {len(in_win)}건 정상)",
+                "msg": (f"{head} — 구간 내 무선 이상 징후 없음 "
+                        f"(트래픽 {len(scoped)}건 정상, {sta_label})"),
                 "action": "무선 구간 외 원인(유선/AP 상위단)을 의심하세요.",
             }
-            refs = [f.number for f in in_win]
+            refs = [f.number for f in scoped]
         out.append({"issue": issue, "refs": refs, "window": win,
                     "signal_type": "wired_loss"})
     return out

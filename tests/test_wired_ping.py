@@ -218,3 +218,51 @@ def test_filter_leaves_no_exchanges_returns_specific_error(tmp_path):
     )
     assert "error" in gt
     assert "필터 구간" in gt["error"]
+
+
+# --------------------------------------------------------------------------
+# 꼬리 무응답 제거 순서 (PR #22 2라운드 리뷰 — 필터 이전에 전체 캡처 기준으로
+# 수행해야 창 안 마지막 자리의 진짜 손실을 "꼬리"로 오인하지 않는다)
+# --------------------------------------------------------------------------
+
+
+def test_time_filter_end_does_not_misclassify_real_loss_as_trailing(tmp_path):
+    """time_end로 창을 자를 때, 창 안 마지막 무응답은 물리적 꼬리가 아니라
+    진짜 손실이면 ng로 집계돼야 한다(캡처는 그 뒤로도 계속되고 응답이 있다)."""
+    t1 = _local_epoch("2026-01-01 10:00:00")   # A: 응답 있음
+    t2 = _local_epoch("2026-01-01 10:00:05")   # B: 응답 없음(진짜 손실) — 창 안 마지막
+    t3 = _local_epoch("2026-01-01 10:01:00")   # C: 응답 있음, 창 밖(필터로 제외)
+    body = (
+        f"printf '{t1}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        f"printf '{t1 + 0.002}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+        f"printf '{t2}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t2\\t\\n'\n"
+        f"printf '{t3}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t3\\t\\n'\n"
+        f"printf '{t3 + 0.002}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t3\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
+        time_end="2026-01-01 10:00:30",
+    )
+    assert "error" not in gt
+    assert gt["total"] == 2 and gt["ok"] == 1 and gt["ng"] == 1
+    assert gt["trailing_dropped"] == 0
+    assert not any("꼬리" in w for w in gt["warnings"])
+
+
+def test_physical_trailing_still_dropped_with_filter_active(tmp_path):
+    """필터가 활성이어도 캡처 전체의 진짜(물리적) 꼬리 무응답은 여전히 제외된다."""
+    t1 = _local_epoch("2026-01-01 10:00:00")   # A: 응답 있음
+    t2 = _local_epoch("2026-01-01 10:00:05")   # B: 캡처 맨 끝 — 물리적 꼬리
+    body = (
+        f"printf '{t1}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        f"printf '{t1 + 0.002}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+        f"printf '{t2}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t2\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
+        time_start="2026-01-01 09:59:00",  # 필터는 활성이지만 아무것도 걸러내지 않음
+    )
+    assert "error" not in gt
+    assert gt["total"] == 1 and gt["ng"] == 0
+    assert gt["trailing_dropped"] == 1
+    assert any("꼬리" in w for w in gt["warnings"])
