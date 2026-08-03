@@ -538,3 +538,61 @@ def test_mapping_helper_splits_by_target_and_drops_noise(topology, expected_b):
         _sweep_frames(topology), SENDER_IP, {AP1}, GT_SWEEP["targets"]
     )
     assert mapping == {TARGET_A: {STA1}, TARGET_B: {expected_b}}
+
+
+# --------------------------------------------------------------------------
+# BSSID 기반 AP 판정 (PR #22 9라운드 — detect_roles가 AP를 못 찾은 캡처)
+# --------------------------------------------------------------------------
+
+AP2 = "aa:bb:cc:00:00:05"
+
+
+def test_bssid_identifies_ap_when_roles_missed_it():
+    """beacon/ProbeResp/AssocResp가 없는 data-only 캡처는 detect_roles의 AP 집합이
+    비어, 상류 요청의 ta(실제 AP)가 target STA로 매핑된다 — AP는 모든 STA 트래픽에
+    끼므로 스코핑이 통째로 무력화된다. 인프라 모드에서 BSSID는 AP의 MAC이므로
+    프레임 단위로 AP를 판정할 수 있다 (PR #22 9라운드)."""
+    frames = [
+        # 상류 다운링크 요청: ta=AP(=BSSID), ra=STA1
+        make_frame(number=1, epoch=1005.0, subtype="40", ta=AP1, ra=STA1, bssid=AP1,
+                   ip_src=SENDER_IP, ip_dst=TARGET_IP, icmp_type="8"),
+        # 업링크 응답: ta=STA1, ra=AP(=BSSID)
+        make_frame(number=2, epoch=1005.05, subtype="40", ta=STA1, ra=AP1, bssid=AP1,
+                   ip_src=TARGET_IP, ip_dst=SENDER_IP, icmp_type="0"),
+        # 무관한 STA2의 로밍 + 재전송 폭주 — 전부 같은 AP를 경유한다
+        make_frame(number=3, epoch=1005.1, subtype="11", ta=STA2, ra=AP1, bssid=AP1),
+        make_frame(number=4, epoch=1005.2, subtype="40", ta=STA2, ra=AP1, bssid=AP1,
+                   retry=True),
+        make_frame(number=5, epoch=1005.3, subtype="40", ta=STA2, ra=AP1, bssid=AP1,
+                   retry=True),
+        make_frame(number=6, epoch=1005.4, subtype="40", ta=STA2, ra=AP1, bssid=AP1,
+                   retry=True),
+    ]
+    # ap_macs 미전달 = detect_roles가 AP를 하나도 못 찾은 상태
+    cands = _ground_truth_issue_candidates(GT, frames)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c["issue"]["severity"] == "medium"
+    assert "이상 징후 없음" in c["issue"]["msg"]
+    assert c["refs"] == [1, 2]                    # STA2 프레임은 스코프 밖
+    assert STA1 in c["issue"]["msg"] and AP1 not in c["issue"]["msg"]
+
+
+def test_frames_between_aps_contribute_no_anchor():
+    """고른 상대도 AP면(DS 간 전달 등) 그 프레임은 앵커가 되지 않는다 —
+    잘못된 매핑보다 무매핑이 낫다."""
+    frames = [
+        make_frame(number=1, epoch=1005.0, subtype="40", ta=AP1, ra=AP2, bssid=AP1,
+                   ip_src=SENDER_IP, ip_dst=TARGET_IP, icmp_type="8"),
+    ]
+    assert _sender_sta_macs_by_target(frames, SENDER_IP, {AP2}) == {}
+
+
+def test_empty_bssid_keeps_previous_rule():
+    """BSSID가 빈 프레임(판정 근거 없음)은 기존 방향 규칙 그대로 — sender가 STA
+    자신인 배치에서는 여전히 옳게 매핑된다."""
+    frames = [
+        make_frame(number=1, epoch=1005.0, subtype="40", ta=STA1, ra=AP1, bssid="",
+                   ip_src=SENDER_IP, ip_dst=TARGET_IP, icmp_type="8"),
+    ]
+    assert _sender_sta_macs_by_target(frames, SENDER_IP) == {TARGET_IP: {STA1}}

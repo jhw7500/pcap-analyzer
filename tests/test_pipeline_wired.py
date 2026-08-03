@@ -173,3 +173,83 @@ def test_cancel_event_forwarded_to_build_ground_truth(monkeypatch):
         "wireless.pcapng", wired_path="wired.pcapng", cancel_event=cancel
     )
     assert captured["cancel_event"] is cancel
+
+
+# --------------------------------------------------------------------------
+# mac_filter 모집단 대칭 (PR #22 9라운드)
+# --------------------------------------------------------------------------
+
+
+def _capture_gt_kwargs(monkeypatch, frames=None):
+    """build_ground_truth 호출 kwargs를 캡처하는 공통 셋업. 호출 안 되면 빈 dict."""
+    captured = {}
+
+    def _fake_build_ground_truth(pcap_path, **kwargs):
+        captured["called"] = True
+        captured.update(kwargs)
+        return dict(GT_OK)
+
+    monkeypatch.setattr(pipeline, "extract_frames",
+                        lambda *a, **kw: frames if frames is not None else _frames())
+    monkeypatch.setattr(pipeline, "detect_tshark_version",
+                        lambda *a, **kw: {"version": "test", "path": "tshark"})
+    monkeypatch.setattr(config, "detect_tshark", lambda: "tshark")
+    monkeypatch.setattr(pipeline, "build_ground_truth", _fake_build_ground_truth)
+    monkeypatch.setattr(os.path, "getsize", lambda *a, **kw: 1000)
+    return captured
+
+
+def test_mac_filter_derives_equivalent_ip_filter(monkeypatch):
+    """mac_filter로 무선이 특정 STA만 담으면 유선 GT도 같은 모집단을 봐야 한다 —
+    mac_filter는 유선(비-802.11)에 MAC 개념이 없어 그대로 못 넘기므로, 이미 필터가
+    적용된 무선 프레임의 IP로 동등한 ip_filter를 유도한다."""
+    captured = _capture_gt_kwargs(monkeypatch)
+    pipeline.run_analysis("wireless.pcapng", wired_path="wired.pcapng", mac_filter=STA1)
+    # 이 픽스처는 STA1 자신이 ping을 보내는 직접 토폴로지 — 자기 IP는 10.0.0.1이다.
+    assert captured["ip_filter"] == "10.0.0.1"
+
+
+def test_mac_filter_derivation_excludes_wired_sender_ip(monkeypatch):
+    """상류 토폴로지(유선 PC가 AP 너머 STA를 ping)에서 유도 목록에 sender IP까지
+    섞이면 wired_ping의 '_filter_exchanges: sender가 필터에 있으면 전체 유지'
+    경로를 타서 다른 target이 그대로 남는다 — 모집단이 다시 어긋난다. 대상 STA
+    자신의 IP만 넘겨야 그 STA와의 ping만 남는다."""
+    upstream = [
+        make_frame(number=1, epoch=1000.0, ta=AP1, ra=STA1, subtype="40",
+                   ip_src="10.0.0.1", ip_dst="10.0.0.2", icmp_type="8", icmp_seq="1"),
+        make_frame(number=2, epoch=1000.005, ta=STA1, ra=AP1, subtype="40",
+                   ip_src="10.0.0.2", ip_dst="10.0.0.1", icmp_type="0", icmp_seq="1"),
+    ]
+    captured = _capture_gt_kwargs(monkeypatch, frames=upstream)
+    pipeline.run_analysis("wireless.pcapng", wired_path="wired.pcapng", mac_filter=STA1)
+    assert captured["ip_filter"] == "10.0.0.2"  # sender(10.0.0.1)는 넣지 않는다
+
+
+def test_mac_filter_without_derivable_ips_skips_ground_truth(monkeypatch):
+    """무선 프레임에 IP가 없으면(미해독 캡처 등) 동등 필터를 유도할 수 없다 —
+    다른 모집단을 비교하느니 GT를 생략하고 경고한다."""
+    no_ip = [make_frame(number=i, epoch=1000.0 + i, subtype="40") for i in range(1, 6)]
+    captured = _capture_gt_kwargs(monkeypatch, frames=no_ip)
+    result = pipeline.run_analysis(
+        "wireless.pcapng", wired_path="wired.pcapng", mac_filter=STA1
+    )
+    assert not captured.get("called")  # 유선 분석 자체를 돌리지 않는다
+    assert "ground_truth" not in result["structured"]["ping"]
+    wired_src = result["structured"]["sources"][1]
+    assert wired_src["role"] == "wired"
+    assert any("유도할 수 없어" in w for w in wired_src["warnings"])
+
+
+def test_no_mac_filter_does_not_derive_ip_filter(monkeypatch):
+    """mac_filter가 없으면 기존 동작 그대로 — IP를 유도하지 않는다."""
+    captured = _capture_gt_kwargs(monkeypatch)
+    pipeline.run_analysis("wireless.pcapng", wired_path="wired.pcapng")
+    assert captured["ip_filter"] == ""
+
+
+def test_user_ip_filter_wins_over_mac_filter_derivation(monkeypatch):
+    """사용자가 ip_filter를 명시했으면 그 값이 우선 — 유도로 덮어쓰지 않는다."""
+    captured = _capture_gt_kwargs(monkeypatch)
+    pipeline.run_analysis("wireless.pcapng", wired_path="wired.pcapng",
+                          mac_filter=STA1, ip_filter="10.0.0.2")
+    assert captured["ip_filter"] == "10.0.0.2"

@@ -788,6 +788,23 @@ def _cliff_frame_refs(cliffs, signal_stas, frames, index):
     return refs
 
 
+def _frame_is_ap(mac, frame, ap_macs):
+    """이 프레임에서 그 MAC이 AP인가 — detected roles 또는 프레임의 BSSID로 판정.
+
+    인프라 모드에서 BSSID는 AP의 MAC이다: TA==BSSID면 AP가 송신한 프레임,
+    RA==BSSID면 AP가 수신한 프레임. beacon/ProbeResp/AssocResp가 없어
+    detect_roles가 AP를 못 찾은 data-only 캡처에서도 이 판정은 성립하므로,
+    ap_macs만 보는 것보다 훨씬 넓은 캡처에서 AP를 가려낼 수 있다.
+
+    BSSID가 비면(필드 없음/파싱 실패) 그 프레임에 대해서는 판정 근거가 없어
+    False — 호출부가 기존 방향 휴리스틱으로 떨어진다. IBSS/ad-hoc은 BSSID가 어느
+    단말의 MAC도 아니므로 자연히 False가 되어 영향이 없다.
+    """
+    if not mac:
+        return False
+    return mac in ap_macs or (bool(frame.bssid) and mac == frame.bssid)
+
+
 def _sender_sta_macs_by_target(frames, sender, ap_macs=None, targets=None):
     """ping **대상 IP별** 무선 상대 STA MAC 집합. {target_ip: {mac, ...}}.
 
@@ -812,11 +829,15 @@ def _sender_sta_macs_by_target(frames, sender, ap_macs=None, targets=None):
       이 도구의 주 용도): 다운링크 요청은 AP가 송신하므로 ip.src==sender 프레임의
       TA는 AP고 상대 STA는 RA, 업링크 응답은 ra=AP이므로 상대 STA는 TA다.
 
-    두 배치를 가르는 유일한 근거가 detected roles의 AP 집합이다 — 프레임의 한쪽이
-    AP면 반대편이 그 sender의 무선 상대다. AP를 STA로 잘못 매핑하면 그 AP를
-    경유하는 모든 무선 트래픽이 스코프에 들어와(AP는 모든 STA의 상대다) 스코프가
-    통째로 무력화된다. ap_macs가 비면(구 호출부 등) AP를 가릴 근거가 없으므로
-    기존 방향 휴리스틱대로 동작한다 — sender가 STA 자신인 배치에서만 맞는다.
+    두 배치를 가르는 근거는 "프레임의 한쪽이 AP인가"다 — AP면 반대편이 그 sender의
+    무선 상대다. AP를 STA로 잘못 매핑하면 그 AP를 경유하는 모든 무선 트래픽이
+    스코프에 들어와(AP는 모든 STA의 상대다) 스코프가 통째로 무력화된다. 판정은
+    `_frame_is_ap`가 detected roles(ap_macs)와 **프레임의 BSSID** 둘 다로 한다 —
+    beacon/ProbeResp/AssocResp가 없는 data-only 캡처는 detect_roles가 AP를 하나도
+    못 찾지만, 인프라 모드의 BSSID는 AP의 MAC이라 프레임만으로도 판정된다.
+    한계: ap_macs가 비고 BSSID도 없는 프레임은 판정 근거가 전무해 기존 방향
+    휴리스틱(요청의 TA / 응답의 RA)으로 떨어진다 — sender가 STA 자신인 배치에서만
+    맞고, 상류 배치라면 그 프레임에서는 AP가 매핑될 수 있다.
 
     브로드캐스트/멀티캐스트는 제외(_is_unicast). 어떤 target의 앵커도 못 찾으면 그
     키는 아예 없다 — 호출부가 그 streak만 "매핑 실패"로 처리해 전체-무선 대조로
@@ -835,16 +856,17 @@ def _sender_sta_macs_by_target(frames, sender, ap_macs=None, targets=None):
     for f in frames:
         if f.is_icmp_request and f.ip_src == sender:
             # echo request(sender → 대상). 송신자가 AP면 다운링크 — 상대는 RA.
-            target, peer = f.ip_dst, (f.ra if f.ta in ap_macs else f.ta)
+            target, peer = f.ip_dst, (f.ra if _frame_is_ap(f.ta, f, ap_macs) else f.ta)
         elif f.is_icmp_reply and f.ip_dst == sender:
             # echo reply(대상 → sender). 수신자가 AP면 업링크 — 상대는 TA.
-            target, peer = f.ip_src, (f.ta if f.ra in ap_macs else f.ra)
+            target, peer = f.ip_src, (f.ta if _frame_is_ap(f.ra, f, ap_macs) else f.ra)
         else:
             continue
         if target_ips and target not in target_ips:
             continue
-        # 양쪽이 다 AP인 프레임(DS 간 전달 등)이 섞여도 AP가 남지 않게 함께 배제.
-        if target and _is_unicast(peer) and peer not in ap_macs:
+        # 고른 상대까지 AP면(DS 간 전달 등) 그 프레임은 앵커 기여 없음 — 잘못된
+        # 매핑보다 무매핑이 낫다(호출부가 매핑 실패로 폴백한다).
+        if target and _is_unicast(peer) and not _frame_is_ap(peer, f, ap_macs):
             by_target[target].add(peer)
     return dict(by_target)
 

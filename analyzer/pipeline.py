@@ -52,6 +52,42 @@ def _make_id(pcap_path: str) -> str:
     return f"{ts}_{name}_{h}"
 
 
+def _derived_ip_filter(frames, mac_filter: str) -> str:
+    """mac_filter 대상 STA가 **자기 IP로 쓴 주소**들을 유선 GT용 ip_filter 문자열로.
+
+    mac_filter는 유선(비-802.11) 캡처에 MAC 개념이 없어 그대로 넘길 수 없다. 대신
+    필터 대상 STA의 IP를 유도해 넘기면 유선 GT도 같은 모집단을 본다 — 그러지 않으면
+    무선은 특정 STA만, 유선은 sender의 모든 target을 집계해 GT 카드가 서로 다른
+    모집단을 비교하고 필터 밖 target의 streak가 전체 기준 진단으로 폴백한다.
+
+    "프레임에 보이는 모든 IP"가 아니라 **대상 STA 자신의 IP**만 모으는 이유: 유선
+    GT의 sender(ping을 보낸 호스트) IP까지 목록에 들어가면 wired_ping의
+    `_filter_exchanges`가 "sender가 필터에 있으면 전체 유지"(무선 `ip.addr ==`
+    대칭 규칙) 경로를 타서 다른 target들이 그대로 남는다 — 모집단이 다시 어긋난다.
+    대상 STA의 IP만 넘기면 그 STA와의 ping만 남는다. sender가 곧 그 STA인 직접
+    토폴로지에서는 그 IP가 sender라 전체 유지가 되는데, 그 경우엔 그게 정확한
+    모집단이다(그 STA가 보낸 모든 ping).
+
+    자기 IP 판정은 `_structured_overview`의 dev_ip 수집과 같은 규칙 — 그 STA가
+    송신(ta)한 프레임의 ip.src, 수신(ra)한 프레임의 ip.dst. tshark는 같은 필드의
+    multi-value를 콤마로 join해 주므로 콤마로 분해한다. 유도된 IP가 하나도 없으면
+    빈 문자열 — 호출부가 "동등 필터 유도 불가"로 처리한다.
+    """
+    macs = {m.strip().lower() for m in mac_filter.split(",") if m.strip()}
+    if not macs:
+        return ""
+    ips = set()
+    for f in frames:
+        for mac, raw in ((f.ta, f.ip_src), (f.ra, f.ip_dst)):
+            if (mac or "").lower() not in macs:
+                continue
+            for ip in (raw or "").split(","):
+                ip = ip.strip()
+                if ip and ip not in ("0.0.0.0", "255.255.255.255", "::"):
+                    ips.add(ip)
+    return ",".join(sorted(ips))
+
+
 def run_analysis(
     pcap_path: str,
     ssid: str = "",
@@ -172,26 +208,45 @@ def run_analysis(
         _progress("유선 ground truth 분석 중...", 93)
         # time_start/end·ip_filter는 무선 extract_frames()와 동일 구간을 보도록
         # 대칭 전달 — 그래야 유선 GT와 무선 관측이 같은 구간을 비교한다.
-        # mac_filter는 유선(비-802.11) exchange에 MAC 개념이 없어 미전달.
-        gt = build_ground_truth(
-            wired_path,
-            tshark_path=_tshark_path or "tshark",
-            time_start=time_start,
-            time_end=time_end,
-            ip_filter=ip_filter,
-            cancel_event=cancel_event,
-        )
-        if gt.get("cancelled"):
-            return {"cancelled": True}
-        wired_src = {
-            "name": Path(wired_path).name, "role": "wired",
-            "frame_count": None, "warnings": list(gt.get("warnings", [])),
-        }
-        if "error" in gt:
-            wired_src["warnings"].append(gt["error"])
+        # mac_filter는 유선(비-802.11) exchange에 MAC 개념이 없어 그대로 못 넘기므로,
+        # 이미 필터가 적용된 무선 프레임의 IP로 동등한 ip_filter를 유도한다. 사용자가
+        # ip_filter를 명시했으면 그 값이 우선(유도로 덮어쓰지 않는다).
+        wired_ip_filter, skip_reason = ip_filter, ""
+        if mac_filter and not ip_filter:
+            derived = _derived_ip_filter(frames, mac_filter)
+            if derived:
+                wired_ip_filter = derived
+            else:
+                # 유도 실패(미해독 캡처 등) — 다른 모집단을 비교하느니 생략한다.
+                skip_reason = (
+                    "mac_filter와 동등한 유선 필터를 유도할 수 없어 ground truth 를 "
+                    "생략했다 (무선 프레임에서 대상 STA의 IP를 찾지 못함)"
+                )
+        if skip_reason:
+            sources.append({
+                "name": Path(wired_path).name, "role": "wired",
+                "frame_count": None, "warnings": [skip_reason],
+            })
         else:
-            structured.setdefault("ping", {})["ground_truth"] = gt
-        sources.append(wired_src)
+            gt = build_ground_truth(
+                wired_path,
+                tshark_path=_tshark_path or "tshark",
+                time_start=time_start,
+                time_end=time_end,
+                ip_filter=wired_ip_filter,
+                cancel_event=cancel_event,
+            )
+            if gt.get("cancelled"):
+                return {"cancelled": True}
+            wired_src = {
+                "name": Path(wired_path).name, "role": "wired",
+                "frame_count": None, "warnings": list(gt.get("warnings", [])),
+            }
+            if "error" in gt:
+                wired_src["warnings"].append(gt["error"])
+            else:
+                structured.setdefault("ping", {})["ground_truth"] = gt
+            sources.append(wired_src)
     structured["sources"] = sources
     if _cancelled():
         return {"cancelled": True}
