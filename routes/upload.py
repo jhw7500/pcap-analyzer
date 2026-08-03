@@ -183,7 +183,11 @@ async def upload_pcap(
     wired_name = ""
     # 브라우저는 미선택 file input도 빈 filename 파트로 보낸다 — filename으로 판별
     if wired_file is not None and (wired_file.filename or ""):
-        wired_tmp_name, werr = await _save_pcap_upload(wired_file)
+        try:
+            wired_tmp_name, werr = await _save_pcap_upload(wired_file)
+        except Exception:
+            Path(tmp_name).unlink(missing_ok=True)
+            raise
         if werr is not None:
             Path(tmp_name).unlink(missing_ok=True)
             return werr

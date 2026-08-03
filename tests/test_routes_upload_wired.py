@@ -1,9 +1,12 @@
 """POST /api/upload의 wired_file 처리."""
+from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app import app
+from routes import upload as upload_module
 
 client = TestClient(app)
 
@@ -59,3 +62,30 @@ def test_wired_file_invalid_magic_rejected(_tshark):
     })
     assert resp.status_code == 400
     assert resp.json()["code"] == "INVALID_MAGIC"
+
+
+@patch("routes.upload.config.detect_tshark", return_value="tshark")
+def test_wired_save_exception_cleans_up_primary_tmp(_tshark):
+    """유선 저장이 (제어된 에러가 아니라) 예외를 던지면 무선 임시파일도 정리돼야 한다."""
+    original_save = upload_module._save_pcap_upload
+    captured = {}
+    call_count = {"n": 0}
+
+    async def fake_save(file):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # 무선(첫 번째) 호출은 실제 헬퍼로 위임해 실제 tmp 경로를 확보
+            tmp_name, err = await original_save(file)
+            captured["primary_tmp"] = tmp_name
+            return tmp_name, err
+        raise RuntimeError("wired 저장 중 I/O 예외 시뮬레이션")
+
+    with patch("routes.upload._save_pcap_upload", side_effect=fake_save):
+        with pytest.raises(RuntimeError):
+            client.post("/api/upload", files={
+                "file": ("w.pcapng", PCAP_MAGIC, "application/octet-stream"),
+                "wired_file": ("cable.pcapng", PCAP_MAGIC, "application/octet-stream"),
+            })
+
+    assert captured.get("primary_tmp")
+    assert not Path(captured["primary_tmp"]).exists()
