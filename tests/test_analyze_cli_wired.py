@@ -27,3 +27,10 @@ def test_positional_contract_unchanged():
     """인자 2개면 여전히 usage 에러 (기존 계약)."""
     p = _run("a.pcap", "ssid")
     assert p.returncode == 2
+
+
+def test_duplicate_wired_exits_2():
+    """중복 --wired 지정은 에러로 거부."""
+    p = _run("a.pcap", "ssid", "pw", "--wired", "w1.pcap", "--wired", "w2.pcap")
+    assert p.returncode == 2
+    assert "한 번만" in p.stderr

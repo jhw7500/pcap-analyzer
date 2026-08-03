@@ -11,6 +11,9 @@ from analyzer.pipeline import run_analysis  # noqa: E402
 def main():
     argv = sys.argv[1:]
     wired = ""
+    if argv.count("--wired") > 1:
+        print("ERROR: --wired 는 한 번만 지정할 수 있다", file=sys.stderr)
+        sys.exit(2)
     if "--wired" in argv:
         i = argv.index("--wired")
         if i + 1 >= len(argv):
