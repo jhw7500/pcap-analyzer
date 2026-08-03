@@ -9,6 +9,7 @@ from .core.extractor import extract_frames, detect_tshark_version
 from .core.channels import ap_channel_map
 from .core.detector import detect_roles
 from .core.indexer import FrameIndex
+from .core.wired_ping import build_ground_truth
 from .core.modules import (
     overview, retry_mcs, retry_burst, roaming, ping_rtt,
     control_traffic, signal_quality, per_second,
@@ -59,6 +60,7 @@ def run_analysis(
     time_end: str = "",
     mac_filter: str = "",
     ip_filter: str = "",
+    wired_path: str = "",
     progress_cb: Optional[Callable[[str, int], None]] = None,
     cancel_event: Optional[Any] = None,
 ) -> Dict[str, Any]:
@@ -158,6 +160,27 @@ def run_analysis(
 
     _progress("시각화: Ping 데이터 생성 중...", 93)
     structured["ping"] = _structured_ping(frames, roles)
+    if _cancelled():
+        return {"cancelled": True}
+
+    # 입력 파일 메타 — 유선 ground truth가 있으면 ping에 부착 (스펙 §4·§6)
+    sources = [{
+        "name": Path(pcap_path).name, "role": "wireless",
+        "frame_count": len(frames), "warnings": [],
+    }]
+    if wired_path:
+        _progress("유선 ground truth 분석 중...", 93)
+        gt = build_ground_truth(wired_path, tshark_path=_tshark_path or "tshark")
+        wired_src = {
+            "name": Path(wired_path).name, "role": "wired",
+            "frame_count": None, "warnings": list(gt.get("warnings", [])),
+        }
+        if "error" in gt:
+            wired_src["warnings"].append(gt["error"])
+        else:
+            structured["ping"]["ground_truth"] = gt
+        sources.append(wired_src)
+    structured["sources"] = sources
     if _cancelled():
         return {"cancelled": True}
 
