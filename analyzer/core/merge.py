@@ -354,6 +354,16 @@ class _MatchIndex:
     안전하다. 각 키의 후보 수는 MERGE_MAX_LIVE_GROUPS로 bound한다 — same-source
     밀집 버스트처럼 서로 매치 불가한 프레임이 쌓이면 무한정 늘어나 매 프레임 스캔이
     O(n)이 되는 걸 막는다.
+
+    각 group은 `creation_epoch`(최초 프레임의 epoch, **불변**)와 `epoch`(현재
+    대표의 epoch, 대표 교체마다 갱신)를 함께 갖는다 — 퇴거·매칭 거리 판정은
+    항상 `creation_epoch` 기준이다. `epoch`(대표 epoch)를 앵커로 쓰면 3+
+    소스에서 대표가 여러 번 교체될 때마다 앵커가 밀려 실효 창이 팽창한다:
+    w1@0이 group을 만들고 w2@30ms가 매칭·대표 교체(앵커가 30ms로 이동)하면,
+    w3@60ms는 w1과는 60ms(창 50ms 밖)이지만 새 앵커(30ms)와는 30ms(창 안)라
+    잘못 병합된다 — N소스 체인이면 실효 창이 최대 (N-1)×50ms까지 늘어날 수
+    있다(PR #23 리뷰 7라운드 Finding A). creation_epoch를 고정하면 매 매칭이
+    항상 "최초 관측 시각"과의 거리로 판정돼 창 정의가 항상 성립한다.
     """
 
     def __init__(self) -> None:
@@ -368,17 +378,22 @@ class _MatchIndex:
         """프레임을 기존 group에 병합하거나 새 group을 만든다. 중복이면 True."""
         key = _dedup_key(f)
         dq = self._windows.setdefault(key, deque())
-        while dq and f.epoch - dq[0]["epoch"] > MERGE_DEDUP_WINDOW_SEC:
-            dq.popleft()  # 창을 벗어난 group은 더 이상 매칭 후보가 아니다.
+        while dq and f.epoch - dq[0]["creation_epoch"] > MERGE_DEDUP_WINDOW_SEC:
+            dq.popleft()  # 창(생성 시점 앵커 기준)을 벗어난 group은 더 이상 매칭 후보가 아니다.
 
         candidates = [
             g for g in dq
-            if f.source not in g["sources"] and abs(f.epoch - g["epoch"]) <= MERGE_DEDUP_WINDOW_SEC
+            if f.source not in g["sources"]
+            and abs(f.epoch - g["creation_epoch"]) <= MERGE_DEDUP_WINDOW_SEC
         ]
         if candidates:
-            # 창 안 후보 중 가장 가까운 것과 매칭 — 삽입순 첫 매치가 아니다.
-            # 동률(diff 같음)이면 이른 epoch의 group을 우선.
-            match = min(candidates, key=lambda g: (abs(f.epoch - g["epoch"]), g["epoch"]))
+            # 창 안 후보 중 가장 가까운 것과 매칭(앵커=creation_epoch 기준) —
+            # 삽입순 첫 매치가 아니다. 동률(diff 같음)이면 이른 anchor의
+            # group을 우선.
+            match = min(
+                candidates,
+                key=lambda g: (abs(f.epoch - g["creation_epoch"]), g["creation_epoch"]),
+            )
             match["sources"].add(f.source)
             if _prefer_new_representative(match["rep"], f):
                 # 교체 전에 새 대표(f)가 구 대표(match["rep"])의 결손 복호화
@@ -388,7 +403,7 @@ class _MatchIndex:
                 _merge_decoded_fields(f, match["rep"])
                 _merge_protocol_field(f, match["rep"])
                 match["rep"] = f
-                match["epoch"] = f.epoch  # group.epoch는 항상 대표의 epoch로 유지
+                match["epoch"] = f.epoch  # 대표 epoch(출력·정렬용) — creation_epoch(앵커)는 불변.
             else:
                 # 대표는 그대로지만, 방금 들어온 후보(f)가 대표의 결손 복호화
                 # 필드를 채울 수 있으면 채운다(Finding B, 5라운드 확장).
@@ -396,7 +411,7 @@ class _MatchIndex:
                 _merge_protocol_field(match["rep"], f)
             return True
 
-        group = {"rep": f, "sources": {f.source}, "epoch": f.epoch}
+        group = {"rep": f, "sources": {f.source}, "epoch": f.epoch, "creation_epoch": f.epoch}
         dq.append(group)
         self.all_groups.append(group)
         if len(dq) > MERGE_MAX_LIVE_GROUPS:

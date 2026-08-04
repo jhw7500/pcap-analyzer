@@ -167,7 +167,9 @@ def _cleanup_tmps(*paths: str) -> None:
     나머지 경로는 계속 정리한다 — try/except 없이 순회하면 첫 실패에서 예외가
     전파돼 그 뒤 경로들이 전부 누수된다(PR #23 리뷰 2라운드 Finding C).
     missing_ok=True는 "이미 없는 파일"만 안전하게 무시할 뿐 "존재하는데
-    잠긴 파일"의 OSError는 그대로 던지므로 별도로 흡수해야 한다.
+    잠긴 파일"의 OSError는 그대로 던지므로 이 함수가 자체 흡수한다 —
+    호출부가 다시 try/except로 감쌀 필요가 없다(감싸면 절대 실행되지
+    않는 except 블록만 남는다, PR #23 리뷰 7라운드 Finding B).
     """
     for p in paths:
         if not p:
@@ -281,14 +283,14 @@ async def upload_pcap(
         )
 
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, _run)
     finally:
-        try:
-            _cleanup_tmps(tmp_name, wired_tmp, *wireless_tmps)
-        except OSError:
-            # Windows: 백신/인덱서가 임시파일을 잠그면 삭제가 실패할 수 있음 — 분석 결과는 보존
-            pass
+        # _cleanup_tmps가 경로별 OSError를 내부에서 자체 흡수하므로(Windows
+        # 백신/인덱서 잠금 등) 여기서 다시 감쌀 필요가 없다 — 감싸면 절대
+        # 실행되지 않는 except 블록과 함께 "밖에서 흡수해야 한다"는 허위
+        # 인상을 준다(PR #23 리뷰 7라운드 Finding B).
+        _cleanup_tmps(tmp_name, wired_tmp, *wireless_tmps)
         _set_progress(job_id, "완료", 100, active=False)
 
     if "error" in result:

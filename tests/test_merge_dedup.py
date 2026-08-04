@@ -345,6 +345,24 @@ def test_control_frame_nearest_match_not_first_match():
     assert standalone.epoch == pytest.approx(1000.000)
 
 
+def test_three_source_dedup_does_not_inflate_window():
+    """3+ 소스에서 대표 교체가 group의 매칭 앵커를 흔들면 실효 창이 팽창한다 —
+    w1@0(대표, 정보 없음) 생성 후 w2@30ms가 정보가 더 많아 대표로 교체되면
+    (앵커가 group["epoch"]뿐이던 시절엔 이 30ms로 이동), w3@60ms는 새 대표
+    (w2)와는 30ms 이내라 매칭돼 버리지만 실제로는 그 group의 최초 관측
+    (w1)과 60ms 떨어져 있다(창 50ms 초과). group 생성 시점 epoch
+    (creation_epoch, 불변)를 앵커로 고정해 퇴거·매칭 거리 판정 모두 그
+    기준이어야 한다(PR #23 리뷰 7라운드 Finding A)."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, seq="100"))                       # 대표(최초, 정보 없음)
+    b = _src("w2", make_frame(number=1, epoch=1000.030, seq="100", ip_src="10.0.0.1"))    # 정보 더 많음 — 대표 교체
+    c = _src("w3", make_frame(number=1, epoch=1000.060, seq="100"))                       # w1과 60ms(창 밖), w2와 30ms(창 안)
+    r = merge_captures(_pair([("w1", a), ("w2", b), ("w3", c)]))
+    assert len(r.frames) == 2          # {w1,w2} 병합 1개 + {w3} 단독 1개
+    assert r.stats["duplicates"] == 1  # w2만 duplicate — w3는 새 group
+    assert r.stats["coverage"]["both"] == 1
+    assert r.stats["coverage"]["only"] == {"w3": 1}
+
+
 def test_same_source_burst_bucket_bounded():
     """같은 소스·같은 근사 키가 창 안에서 밀집(서로 dedup 불가)해도 매칭 후보
     버킷은 MERGE_MAX_LIVE_GROUPS를 넘지 않는다 — 무한 누적에 의한 선형 스캔(O(n²))
