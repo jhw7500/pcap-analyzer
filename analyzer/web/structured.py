@@ -943,6 +943,29 @@ def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None, signal_stas=N
             [f for f in in_win if f.ta in sta_macs or f.ra in sta_macs]
             if mapped else in_win
         )
+        if mapped:
+            # AP가 그 STA로 보내는 **브로드캐스트** Deauth/Disassoc(ta=AP,
+            # ra=브로드캐스트)는 위 STA-MAC 술어(ta/ra ∈ sta_macs)에 걸리지 않는다
+            # — ra가 브로드캐스트라 sta_macs 어디에도 없기 때문이다. 그 STA에 실제로
+            # 영향을 미치는 방송 해제인데도 스코프에서 빠지면 창 안에 다른 이벤트가
+            # 없을 때 "무선 이상 징후 없음"으로 오판된다(PR #22 12라운드 — Codex P1).
+            # sta_bssids: 이미 스코프된 프레임에서 이 STA가 관측된 BSSID — AP가 여럿인
+            # 캡처(로밍 등)에서 이 STA의 AP만 특정해 무관 AP의 방송 해제를 배제한다.
+            from ..core.detector import BROADCAST
+            sta_bssids = {g.bssid for g in in_win
+                          if (g.ta in sta_macs or g.ra in sta_macs) and g.bssid}
+            for f in in_win:
+                if f.subtype not in ("10", "12") or f.ra != BROADCAST:
+                    continue
+                if sta_bssids:
+                    is_this_sta_ap = f.ta in sta_bssids or f.bssid in sta_bssids
+                else:
+                    # 스코프 프레임에 bssid가 하나도 없는 희귀 경우 — 기존 AP 판정
+                    # (_frame_is_ap, ap_macs/BSSID 기반)으로 보수적으로 폴백한다.
+                    # 해제 프레임은 희귀·고신호라 포함 오류의 비용이 낮다.
+                    is_this_sta_ap = _frame_is_ap(f.ta, f, ap_macs or set())
+                if is_this_sta_ap and f not in scoped:
+                    scoped.append(f)
         # DeAuth(12)는 is_roaming_related(ROAMING_SUBTYPES)가 이미 포함하므로
         # 여기선 그것만으로 안 잡히는 DisAssoc(10)만 보강한다.
         roam = [f for f in scoped if f.is_roaming_related or f.subtype == "10"]

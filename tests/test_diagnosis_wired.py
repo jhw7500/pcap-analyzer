@@ -596,3 +596,58 @@ def test_empty_bssid_keeps_previous_rule():
                    ip_src=SENDER_IP, ip_dst=TARGET_IP, icmp_type="8"),
     ]
     assert _sender_sta_macs_by_target(frames, SENDER_IP) == {TARGET_IP: {STA1}}
+
+
+# --------------------------------------------------------------------------
+# 브로드캐스트 해제 프레임을 STA 스코프 증거에 포함 (PR #22 12라운드 — Codex P1)
+# --------------------------------------------------------------------------
+
+
+def test_broadcast_ap_deauth_counts_as_roaming_evidence_for_mapped_sta():
+    """AP가 매핑된 STA로 브로드캐스트 Deauth/Disassoc(ta=AP, ra=브로드캐스트)를
+    보내면 기존 STA-MAC 술어(ta/ra ∈ sta_macs)에 안 걸린다 — ra가 브로드캐스트라
+    sta_macs 어디에도 없기 때문이다. 그 STA에 실제로 영향을 미치는 방송 해제인데도
+    스코프에서 빠지면(창 안에 다른 이벤트가 없을 때) '무선 이상 징후 없음'으로
+    오판된다(수정 전 RED: medium)."""
+    frames = [
+        # sta_macs={STA1} 매핑 앵커 — bssid=AP1(make_frame 기본값)이 sta_bssids를 채운다.
+        _ping_anchor(number=1, epoch=1005.0),
+        # STA1의 AP(AP1)가 보낸 브로드캐스트 DeAuth.
+        make_frame(number=2, epoch=1005.3, ta=AP1, ra=BROADCAST, bssid=AP1, subtype="12"),
+    ]
+    cands = _ground_truth_issue_candidates(GT, frames)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c["issue"]["severity"] == "high"
+    assert "로밍/해제 1건" in c["issue"]["msg"]
+    assert c["refs"] == [2]
+
+
+def test_broadcast_deauth_from_unrelated_ap_is_excluded():
+    """이 STA와 무관한 다른 AP(다른 BSSID)의 브로드캐스트 Deauth는 sta_bssids에
+    없어 스코프에 포함되지 않는다 — 오귀속 방지가 유지됨을 확인."""
+    frames = [
+        _ping_anchor(number=1, epoch=1005.0),  # sta_bssids={AP1}
+        make_frame(number=2, epoch=1005.3, ta=AP2, ra=BROADCAST, bssid=AP2, subtype="12"),
+    ]
+    cands = _ground_truth_issue_candidates(GT, frames)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c["issue"]["severity"] == "medium"
+    assert "이상 징후 없음" in c["issue"]["msg"]
+    assert 2 not in c["refs"]
+
+
+def test_mapping_failure_path_unaffected_by_broadcast_deauth_scoping():
+    """매핑 실패(전체 무선 기준) 경로는 애초에 브로드캐스트 해제를 배제하지 않으므로
+    이번 수정과 무관 — 무수정 통과로 회귀 확인."""
+    frames = [
+        make_frame(number=1, epoch=1005.3, ta=AP1, ra=BROADCAST, bssid=AP1, subtype="12"),
+    ]
+    cands = _ground_truth_issue_candidates(GT_NO_MATCH, frames)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c["issue"]["severity"] == "medium"
+    assert "로밍/해제 1건" in c["issue"]["msg"]
+    assert "매핑 불가" in c["issue"]["msg"]
+    assert c["refs"] == [1]
