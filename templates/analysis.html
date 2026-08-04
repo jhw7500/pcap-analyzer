@@ -15,6 +15,20 @@
 </div>
 {% endif %}
 
+{% set _wsrc = [] %}
+{% for s in src_list %}{% if s.get('role') == 'wireless' %}{% set _ = _wsrc.append(s) %}{% endif %}{% endfor %}
+{% if _wsrc | length > 1 %}
+<div class="bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 mb-4 text-sm text-gray-300">
+    <span class="text-gray-400">무선 소스 {{ _wsrc | length }}개 병합:</span>
+    {% for s in _wsrc %}
+    <span class="ml-2">{{ s.get('name', '?') }}
+        {%- if s.get('applied_offset_ms') is not none %} ({{ '%+.1f' | format(s.get('applied_offset_ms', 0) / 1000) }}s{% if s.get('offset_method') %}, {{ s.get('offset_method') }}{% endif %}){%- endif %}</span>
+    {% endfor %}
+    {% set _merge = _structured.get('merge') %}
+    {% if _merge %}<span class="ml-2 text-gray-400">— 중복 제거 {{ '{:,}'.format(_merge.get('duplicates', 0)) }}건</span>{% endif %}
+</div>
+{% endif %}
+
 <div class="mb-4 flex items-center justify-between">
     <div>
         <h1 class="text-2xl font-bold">{{ result.pcap_name }}</h1>
