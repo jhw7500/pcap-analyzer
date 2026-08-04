@@ -102,6 +102,42 @@ def test_representative_prefers_tcp_len_field():
     assert kept.tcp_len == "0" and kept.source == "w2"
 
 
+def test_representative_merges_missing_decoded_fields_from_other_copy():
+    """_decoded_score가 보는 필드(ip_src, icmp_type)만 같아 동률 판정되면
+    "이른 epoch"인 부분 사본이 대표로 남는데, ip_dst/icmp_seq/icmp_ident는
+    점수에 없어 대표 선정만으로는 못 가려낸다 — 대표가 아닌 완전 사본에만
+    있는 그 필드들이 그대로 소실되면, build_ping_matches가 정확히 그
+    필드들로 흐름을 매칭하므로 RTT/loss가 왜곡될 수 있다(PR #23 리뷰
+    4라운드 Finding B). 대표 선정과 별개로 결손 필드는 병합돼야 한다."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, seq="100",
+                              ip_src="10.0.0.1", icmp_type="8"))                       # 이른 부분 사본(대표로 선정됨)
+    b = _src("w2", make_frame(number=1, epoch=1000.030, seq="100",
+                              ip_src="10.0.0.1", ip_dst="10.0.0.2", icmp_type="8",
+                              icmp_seq="5", icmp_ident="1234"))                        # 완전 사본(늦음, 점수 동률)
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+    kept = r.frames[0]
+    assert kept.source == "w1"  # 대표 정체성은 여전히 이른 사본(동률 + 이른 epoch)
+    assert kept.ip_dst == "10.0.0.2"
+    assert kept.icmp_seq == "5"
+    assert kept.icmp_ident == "1234"
+
+
+def test_representative_does_not_merge_observational_fields():
+    """rssi 등 관측 필드는 사본마다 본질적으로 다른 실측값이라 병합 대상이
+    아니다 — 대표가 아닌 사본의 rssi가 대표에 섞여 들어가면 그 사본이 실제로
+    관측한 값이라는 의미가 깨진다(PR #23 리뷰 4라운드 Finding B)."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, seq="100",
+                              ip_src="10.0.0.1", rssi=""))                # 대표(rssi 없음)
+    b = _src("w2", make_frame(number=1, epoch=1000.030, seq="100",
+                              ip_src="10.0.0.1", rssi="-55"))             # rssi 있음(점수엔 무관, 병합 금지 대상)
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+    kept = r.frames[0]
+    assert kept.source == "w1"
+    assert kept.rssi == ""  # 관측 필드는 병합되지 않음 — 대표 자신의 값 유지
+
+
 def test_representative_tie_earlier_epoch():
     a = _src("w1", make_frame(number=1, epoch=1000.000, seq="100", ip_src="10.0.0.1"))
     b = _src("w2", make_frame(number=1, epoch=1000.030, seq="100", ip_src="10.0.0.1"))

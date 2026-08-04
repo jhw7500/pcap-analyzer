@@ -65,6 +65,48 @@ def test_tsf_non_numeric_skipped():
     assert r.method == "tsf" and r.pairs == 11
 
 
+def test_ref_candidates_in_window_bound_by_window_not_total_count():
+    """seq 랩으로 같은 키가 대량(5,000개, 10초 간격)으로 등장해도, ±5초 창
+    밖 발생은 후보로 열거되면 안 된다 — 전 조합(len(ref)×len(other))을 만들면
+    밀집 키가 생기는 대량 캡처(예: 백만 프레임)에서 O(N²/4096)로 행업·메모리
+    고갈을 일으킨다(PR #23 리뷰 4라운드 Finding A). 월클록 대신 반환 개수를
+    구조적으로 검증한다: 창(5초) 안에는 10초 간격 데이터에서 최대 2개
+    (경계에 걸치는 케이스)만 있을 수 있다 — 5,000개 전체가 아니다."""
+    from analyzer.core.merge import _ref_candidates_in_window, FALLBACK_MATCH_WINDOW_SEC
+
+    n = 5000
+    ref_epochs = [i * 10.0 for i in range(n)]  # 10초 간격 — 대부분 창(±5초) 밖
+    sorted_ref = sorted(enumerate(ref_epochs), key=lambda p: p[1])
+    sorted_ref_epochs = [e for _, e in sorted_ref]
+
+    query_epoch = 2500.0  # ref_epochs[250] == 2500.0과 정확히 일치
+    candidates = _ref_candidates_in_window(sorted_ref, sorted_ref_epochs, query_epoch)
+
+    assert 1 <= len(candidates) <= 2  # 5,000개 중 창 안은 최대 2개(경계)뿐
+    assert all(abs(e - query_epoch) <= FALLBACK_MATCH_WINDOW_SEC for _, e in candidates)
+
+
+def test_seq_fallback_matches_unaffected_by_bisect_windowing():
+    """bisect 기반 창 열거로 바꿔도 매칭 결과(최근접·1:1)는 수학적으로 동일해야
+    한다 — 랩 모사 키가 여러 개 섞인 상황에서 최근접 매칭이 정확히 유지됨을
+    재확인한다(PR #23 리뷰 4라운드 Finding A 회귀 가드)."""
+    ref, other = [], []
+    for i in range(10):
+        base = 1000.0 + i * 100  # 키 사이 간격을 넉넉히 벌려 서로 간섭 없게
+        ta, seq = f"ta{i}", str(100 + i)
+        # 같은 키가 창 안에 두 번 등장(랩 모사) — 가까운 쪽만 매칭돼야 한다.
+        ref.append(make_frame(number=i * 2 + 1, epoch=base, subtype="40",
+                              ta=ta, seq=seq, source="w1"))
+        ref.append(make_frame(number=i * 2 + 2, epoch=base + 3.0, subtype="40",
+                              ta=ta, seq=seq, source="w1"))
+        other.append(make_frame(number=i + 1, epoch=base + 2.7, subtype="40",
+                                ta=ta, seq=seq, source="w2"))
+    r = estimate_offset(ref, other)
+    assert r.method == "seq-fallback"
+    assert r.pairs == 10
+    assert r.offset_sec == pytest.approx(0.3, abs=0.001)
+
+
 def test_seq_fallback_nearest_match_not_first_come():
     """같은 (ta, seq, subtype)가 창 안에 두 번 등장(seq 랩 모사) — 최선착이 아니라
     최근접으로 매칭돼야 한다. 최선착이면 먼 쪽(첫 등장)에 걸려 +0.3s 실제 오프셋이

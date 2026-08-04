@@ -9,6 +9,7 @@ IQR 3.4ms — 사전 timesync 보정 없이도 무선 간 정렬이 가능함을
 TSF 폴백((TA, seq, subtype) 매칭)은 ±5초 창을 쓰므로 사전 보정된 입력을
 전제한다(스펙 §3). 그것도 실패하면 오프셋 0 + 경고.
 """
+import bisect
 import datetime as dt
 import statistics
 from collections import OrderedDict, deque
@@ -67,6 +68,27 @@ def _median_iqr(diffs: List[float]) -> Tuple[float, float]:
     return statistics.median(s), (s[(3 * n) // 4] - s[n // 4] if n >= 4 else 0.0)
 
 
+def _ref_candidates_in_window(
+    sorted_ref: List[Tuple[int, float]], sorted_ref_epochs: List[float], query_epoch: float,
+) -> List[Tuple[int, float]]:
+    """query_epoch ± FALLBACK_MATCH_WINDOW_SEC 창 안의 (원본 인덱스, epoch) 쌍만
+    bisect로 열거한다.
+
+    sorted_ref는 epoch 기준 정렬된 (원본 리스트 인덱스, epoch) 쌍, sorted_ref_epochs는
+    그 epoch만 뽑은 병렬 리스트(bisect 검색용)다. 창 밖 ref 발생은 아예 순회하지
+    않으므로 반환 개수는 ref 전체 개수가 아니라 "그 창 안에 실제로 존재하는
+    개수"로 bound된다 — seq 랩(12비트, 4096마다 재사용)으로 같은 키가 대량
+    캡처에서 밀집 등장해도 후보 생성이 창 크기로 제한된다(PR #23 리뷰 4라운드
+    Finding A). 원본 인덱스를 함께 반환하는 이유: "그 ref 발생 자체"를 소비
+    추적해야 하기 때문 — 같은 epoch를 가진 서로 다른 ref 발생(이론상 가능)을
+    값(epoch)만으로 구분하면 서로 다른 발생을 하나로 오인해 재사용을 막지
+    못할 수 있다.
+    """
+    lo = bisect.bisect_left(sorted_ref_epochs, query_epoch - FALLBACK_MATCH_WINDOW_SEC)
+    hi = bisect.bisect_right(sorted_ref_epochs, query_epoch + FALLBACK_MATCH_WINDOW_SEC)
+    return sorted_ref[lo:hi]
+
+
 def estimate_offset(reference: List[Frame], other: List[Frame]) -> OffsetResult:
     """other의 epoch에 더하면 reference 타임라인이 되는 오프셋을 추정한다."""
     ref_t, oth_t = _tsf_table(reference), _tsf_table(other)
@@ -81,6 +103,9 @@ def estimate_offset(reference: List[Frame], other: List[Frame]) -> OffsetResult:
     # 오프셋이 몇 초 어긋난 값으로 붕괴할 수 있다. 키별로 (ref 발생, other
     # 프레임) 후보 쌍을 모아 |diff| 최근접 순으로 그리디 매칭하고, 매칭된 ref
     # 발생·other 프레임은 각각 한 번만 소비한다(1:1 — PR #23 리뷰 Finding C).
+    # 후보 열거는 bisect로 창 안만 순회한다 — 키별 전 조합(len(ref)×len(other))을
+    # 열거하면 밀집 키가 생기는 대량 캡처(예: 백만 프레임)에서 O(N²/4096)로
+    # 행업·메모리 고갈을 일으킨다(PR #23 리뷰 4라운드 Finding A).
     ref_keys: Dict[Tuple[str, str, str], List[float]] = {}
     for f in reference:
         if f.ta and f.seq:
@@ -95,12 +120,13 @@ def estimate_offset(reference: List[Frame], other: List[Frame]) -> OffsetResult:
         ref_epochs = ref_keys.get(key)
         if not ref_epochs:
             continue
+        sorted_ref = sorted(enumerate(ref_epochs), key=lambda p: p[1])
+        sorted_ref_epochs = [e for _, e in sorted_ref]
         candidates = []
-        for ri, ref_epoch in enumerate(ref_epochs):
-            for oi, of in enumerate(other_frames):
+        for oi, of in enumerate(other_frames):
+            for ri, ref_epoch in _ref_candidates_in_window(sorted_ref, sorted_ref_epochs, of.epoch):
                 d = ref_epoch - of.epoch
-                if abs(d) <= FALLBACK_MATCH_WINDOW_SEC:
-                    candidates.append((abs(d), ri, oi, d))
+                candidates.append((abs(d), ri, oi, d))
         candidates.sort(key=lambda c: c[0])
         used_ref: set = set()
         used_other: set = set()
@@ -170,11 +196,48 @@ def _prefer_new_representative(rep: Frame, candidate: Frame) -> bool:
 
     실측 근거: DFK 캡처는 완전 암호화(ICMP 0건)라 "먼저 잡힌 쪽"을 그대로 대표로
     쓰면 ping 분석에 쓸 IP 필드가 소실된다 — 복호화된 사본이 있으면 그쪽을 대표로.
+
+    이 함수는 대표 "정체성"만 정한다 — 개별 필드 채움은 `_merge_decoded_fields`가
+    별도로 맡는다(PR #23 리뷰 4라운드 Finding B). `_decoded_score`가 보는
+    필드(ip_src·arp_opcode·icmp_type·eapol_msgnr·tcp_flags·tcp_len)만 같으면
+    동률로 판정되는데, 그 목록에 없는 필드(ip_dst·icmp_seq·icmp_ident 등)는
+    한쪽에만 있어도 점수에 반영되지 않아 대표 선정만으로는 소실될 수 있다.
     """
     rep_score, cand_score = _decoded_score(rep), _decoded_score(candidate)
     if cand_score != rep_score:
         return cand_score > rep_score
     return candidate.epoch < rep.epoch
+
+
+#: 대표 선정 이후에도 결손분을 채워야 하는 복호화 유래 필드 — build_ping_matches
+#: (ip_src·ip_dst·icmp_type·icmp_seq·icmp_ident)·control_traffic(arp_opcode·
+#: tcp_len·tcp_flags)·eapol.build_handshakes(eapol_msgnr)가 실제로 소비하는
+#: 필드 전수다(PR #23 리뷰 4라운드 Finding B). rssi·mcs·tsf·timestamp·number·
+#: source 등 관측·식별 필드는 사본마다 본질적으로 달라야 하는 값이라 병합
+#: 대상에서 **제외** — 병합하면 "그 사본이 실제로 관측한 값"이라는 의미가
+#: 깨진다.
+_MERGEABLE_DECODED_FIELDS: Tuple[str, ...] = (
+    "ip_src", "ip_dst", "icmp_type", "icmp_seq", "icmp_ident",
+    "arp_opcode", "tcp_len", "tcp_flags", "eapol_msgnr",
+)
+
+
+def _merge_decoded_fields(rep: Frame, candidate: Frame) -> None:
+    """rep의 빈 복호화 필드를 candidate의 값으로 채운다(rep을 제자리에서 mutate).
+
+    대표 선정(_prefer_new_representative)은 "어느 사본을 대표로 세울지"만
+    정한다 — 대표가 ip_src+icmp_type만 있고 ip_dst/icmp_seq/icmp_ident가
+    없는 이른 부분 사본이고, 대표가 아닌 사본이 그 결손 필드를 채운 완전
+    사본이면(둘 다 _decoded_score 기준으로는 동률이라 대표 선정만으로는
+    가려지지 않는다), 결손 필드가 그대로 비어 남는다. build_ping_matches는
+    바로 그 필드들로 흐름을 그룹핑/매칭하므로 RTT/loss가 왜곡될 수 있다
+    (PR #23 리뷰 4라운드 Finding B). rep의 필드가 **비어 있고** candidate의
+    값이 **비어 있지 않을 때만** 채운다 — rep에 이미 값이 있으면 무조건
+    유지한다(대표 선정 우위를 존중, 값 충돌 시 덮어쓰지 않음).
+    """
+    for field_name in _MERGEABLE_DECODED_FIELDS:
+        if not getattr(rep, field_name) and getattr(candidate, field_name):
+            setattr(rep, field_name, getattr(candidate, field_name))
 
 
 class _MatchIndex:
@@ -213,8 +276,16 @@ class _MatchIndex:
             match = min(candidates, key=lambda g: (abs(f.epoch - g["epoch"]), g["epoch"]))
             match["sources"].add(f.source)
             if _prefer_new_representative(match["rep"], f):
+                # 교체 전에 새 대표(f)가 구 대표(match["rep"])의 결손 복호화
+                # 필드를 흡수한다 — 교체로 구 대표가 갖고 있던 정보가 사라지는
+                # 걸 막는다(PR #23 리뷰 4라운드 Finding B).
+                _merge_decoded_fields(f, match["rep"])
                 match["rep"] = f
                 match["epoch"] = f.epoch  # group.epoch는 항상 대표의 epoch로 유지
+            else:
+                # 대표는 그대로지만, 방금 들어온 후보(f)가 대표의 결손 복호화
+                # 필드를 채울 수 있으면 채운다(Finding B).
+                _merge_decoded_fields(match["rep"], f)
             return True
 
         group = {"rep": f, "sources": {f.source}, "epoch": f.epoch}
