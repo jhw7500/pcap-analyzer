@@ -107,9 +107,14 @@ def _filter_exchanges(
         threshold = end_epoch - reply_timeout
         kept = []
         for x in out:
-            near_boundary = x.time > threshold
+            near_boundary = x.time >= threshold
             # 응답이 실제로 경계 밖(또는 아예 없음)이어야 제외한다 — 응답이
             # time_end 이전에 왔다면 무선도 그 프레임을 보므로 배제하면 안 된다.
+            # >=(inclusive): x.time == threshold(정확히 reply_timeout만큼 앞선
+            # 요청)인 knife-edge에서 strict >였다면 이 게이트 자체를 건너뛰어
+            # 버려, 응답이 마침 end_epoch에 정확히 걸치는 경우(무선 필터
+            # `frame.time < time_end`는 그 프레임을 배제)까지 answered로 새어
+            # 나갔다 — 무선의 배타적 `<`와 정확히 같은 경계에서 일치시킨다.
             response_outside = x.rtt is None or (x.time + x.rtt) >= end_epoch
             if near_boundary and response_outside:
                 boundary_excluded += 1
