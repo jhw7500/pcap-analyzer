@@ -83,6 +83,16 @@ def _ref_candidates_in_window(
     추적해야 하기 때문 — 같은 epoch를 가진 서로 다른 ref 발생(이론상 가능)을
     값(epoch)만으로 구분하면 서로 다른 발생을 하나로 오인해 재사용을 막지
     못할 수 있다.
+
+    기존 `abs(d) <= FALLBACK_MATCH_WINDOW_SEC` 필터와 **정확히 동치는 아니다** —
+    부동소수 경계(정확히 ±5.0s)에서는 기존 필터의 안전 방향 superset이다(후보가
+    더 포함될 수는 있어도 누락되지는 않는다: `lo`/`hi`는 각각
+    `query_epoch - window`/`query_epoch + window`를 한 번 계산해 비교하는 반면
+    기존 코드는 `ref_epoch - of.epoch`를 계산해 비교해, 두 계산 순서가 부동소수
+    반올림에서 완전히 같은 결과를 보장하지 않는다 — 경계에 걸친 극소수 사례에서
+    이쪽이 아주 살짝 더 포함시킬 수는 있어도 절대 빠뜨리지는 않는다). 랜덤
+    epoch·창 경계 근접값으로 2만회 퍼징해 "필터 후보 집합 ⊆ bisect 후보 집합"
+    불변식을 확인했다(리뷰 재검증 완료 — PR #23 리뷰 4라운드 재리뷰).
     """
     lo = bisect.bisect_left(sorted_ref_epochs, query_epoch - FALLBACK_MATCH_WINDOW_SEC)
     hi = bisect.bisect_right(sorted_ref_epochs, query_epoch + FALLBACK_MATCH_WINDOW_SEC)
@@ -106,6 +116,12 @@ def estimate_offset(reference: List[Frame], other: List[Frame]) -> OffsetResult:
     # 후보 열거는 bisect로 창 안만 순회한다 — 키별 전 조합(len(ref)×len(other))을
     # 열거하면 밀집 키가 생기는 대량 캡처(예: 백만 프레임)에서 O(N²/4096)로
     # 행업·메모리 고갈을 일으킨다(PR #23 리뷰 4라운드 Finding A).
+    # abs_d가 완전히 동률이고 그 순간 두 후보가 서로 다른 (ri, oi)를 두고
+    # 자원 충돌(같은 ref 또는 같은 other를 두고 경쟁)하면, list.sort()가
+    # 안정 정렬이라 삽입 순서(딕셔너리·리스트 순회 순서)에 따라 최종 선택이
+    # 달라질 수 있다 — 다만 실제 tshark epoch는 µs 정밀도(frame.time_epoch가
+    # 마이크로초 단위 소수)라 서로 다른 두 프레임이 같은 ref까지의 거리를
+    # 소수점 이하까지 완전히 동일하게 갖는 경우는 사실상 도달 불가하다.
     ref_keys: Dict[Tuple[str, str, str], List[float]] = {}
     for f in reference:
         if f.ta and f.seq:
@@ -150,7 +166,15 @@ def estimate_offset(reference: List[Frame], other: List[Frame]) -> OffsetResult:
 @dataclass
 class MergeResult:
     frames: List[Frame]                 # 통합·정렬·재번호된 리스트 (기존 파이프라인 입력)
-    per_source: Dict[str, List[Frame]]  # 소스별 원본(epoch 보정됨) — 3단계용
+    # 소스별 원본(epoch 보정됨) — 3단계용. 주의(잠재 지뢰, PR #23 리뷰 4라운드
+    # 재리뷰): 여기 담긴 Frame 객체는 `frames`(대표로 뽑힌 그룹)와 **동일
+    # 인스턴스를 공유**한다 — `_merge_decoded_fields`가 대표 프레임을 제자리
+    # mutate하므로, 어떤 소스의 프레임이 dedup 그룹의 대표가 되면 그 소스가
+    # 실제로 복호화하지 못한 필드값을 **다른 소스에서 빌려와** 채운 채로
+    # per_source에도 남는다. 즉 per_source를 "그 소스가 직접 관측·복호화한
+    # 원본"으로 소비하려면(예: 소스별 복호화율 집계) 병합 전 스냅샷이 필요하다
+    # — 현재는 그런 소비자가 없어 문제로 드러나지 않았을 뿐이다.
+    per_source: Dict[str, List[Frame]]
     offsets: Dict[str, OffsetResult]    # 소스 태그 → 추정 결과 (기준 w1 제외)
     stats: Dict[str, Any]
     warnings: List[str]
@@ -234,6 +258,13 @@ def _merge_decoded_fields(rep: Frame, candidate: Frame) -> None:
     (PR #23 리뷰 4라운드 Finding B). rep의 필드가 **비어 있고** candidate의
     값이 **비어 있지 않을 때만** 채운다 — rep에 이미 값이 있으면 무조건
     유지한다(대표 선정 우위를 존중, 값 충돌 시 덮어쓰지 않음).
+
+    경고(잠재 지뢰, PR #23 리뷰 4라운드 재리뷰): rep은 **공유 객체를 제자리
+    mutate**한다 — rep으로 넘어오는 Frame은 여전히 자신의 원본 소스 리스트
+    (`sources[tag]`, 즉 `MergeResult.per_source`)에도 같은 인스턴스로 들어
+    있다. 따라서 이 병합이 끝나면 그 소스의 "원본" 프레임이 실제로는 다른
+    소스에서 빌려온 필드값을 담고 있게 된다 — per_source를 "소스별 순수
+    원본"으로 소비하는 코드가 생기면(현재는 없음) 이 사실을 알아야 한다.
     """
     for field_name in _MERGEABLE_DECODED_FIELDS:
         if not getattr(rep, field_name) and getattr(candidate, field_name):
