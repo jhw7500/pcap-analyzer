@@ -2,13 +2,15 @@
 import hashlib
 import os
 import time
+from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .core.extractor import extract_frames, detect_tshark_version
 from .core.channels import ap_channel_map
 from .core.detector import detect_roles
 from .core.indexer import FrameIndex
+from .core.merge import merge_captures
 from .core.wired_ping import build_ground_truth
 from .core.modules import (
     overview, retry_mcs, retry_burst, roaming, ping_rtt,
@@ -100,6 +102,7 @@ def run_analysis(
     time_end: str = "",
     mac_filter: str = "",
     ip_filter: str = "",
+    wireless_paths: Optional[List[str]] = None,
     wired_path: str = "",
     progress_cb: Optional[Callable[[str, int], None]] = None,
     cancel_event: Optional[Any] = None,
@@ -130,23 +133,87 @@ def run_analysis(
         pct = 10 + int(18 * (1 - 1 / (1 + elapsed / 30)))
         _progress(f"tshark 추출... {count:,}프레임 처리됨", min(pct, 28))
 
-    frames = extract_frames(
-        pcap_path,
-        wpa_passphrase=passphrase,
-        ssid=ssid,
-        time_start=time_start,
-        time_end=time_end,
-        mac_filter=mac_filter,
-        ip_filter=ip_filter,
-        tshark_path=_tshark_path,
-        cancel_event=cancel_event,
-        progress_cb=_frame_progress,
-    )
-    if not frames:
+    # pcap_path가 기준(w1), wireless_paths는 추가 무선(w2, w3, …) — 파일별로
+    # extract_frames를 동일 필터 인자로 호출한다(필터 대칭 자동으로 확보됨).
+    paths = [pcap_path] + list(wireless_paths or [])
+    tags = [f"w{i + 1}" for i in range(len(paths))]
+    per_source: "OrderedDict[str, list]" = OrderedDict()
+    wireless_sources: List[Dict[str, Any]] = []
+    for i, (path, tag) in enumerate(zip(paths, tags)):
+        if _cancelled():
+            return {"cancelled": True}
+        if len(paths) > 1:
+            _progress(f"tshark로 프레임 추출 중... ({i + 1}/{len(paths)})",
+                      10 + int(18 * i / len(paths)))
+        file_frames = extract_frames(
+            path,
+            wpa_passphrase=passphrase,
+            ssid=ssid,
+            time_start=time_start,
+            time_end=time_end,
+            mac_filter=mac_filter,
+            ip_filter=ip_filter,
+            tshark_path=_tshark_path,
+            cancel_event=cancel_event,
+            progress_cb=_frame_progress,
+        )
+        for f in file_frames:
+            f.source = tag
+        src_entry = {
+            "name": Path(path).name, "role": "wireless",
+            "frame_count": len(file_frames), "warnings": [],
+        }
+        if file_frames:
+            per_source[tag] = file_frames
+        else:
+            src_entry["warnings"].append(
+                f"{Path(path).name}: 802.11 프레임이 0건이라 병합에서 제외됨"
+            )
+        wireless_sources.append(src_entry)
+
+    if not per_source:
         return {"error": "프레임을 추출하지 못했습니다. tshark 경로 또는 pcap 파일을 확인하세요."}
 
     if _cancelled():
         return {"cancelled": True}
+
+    # 다중 소스면 시계 정렬 후 dedup·재번호해 단일 타임라인으로 병합한다. 단일
+    # 소스(원래 1개 경로만 준 경우든, 나머지가 0건이라 걸러진 경우든)는 merge를
+    # 아예 호출하지 않아 기존 파이프라인과 완전히 동일한 결과를 낸다(하위 호환).
+    merge_summary: Optional[Dict[str, Any]] = None
+    if len(per_source) > 1:
+        mr = merge_captures(per_source)
+        frames = mr.frames
+        reference_tag = next(iter(per_source))
+        remaining_warnings = list(mr.warnings)
+        for tag, src_entry in zip(tags, wireless_sources):
+            if tag not in per_source:
+                continue
+            if tag == reference_tag:
+                src_entry["applied_offset_ms"] = 0.0
+                src_entry["offset_method"] = "reference"
+                continue
+            off = mr.offsets[tag]
+            src_entry["applied_offset_ms"] = round(off.offset_sec * 1000, 3)
+            src_entry["offset_method"] = off.method
+            tag_warnings = list(off.warnings)
+            if off.method == "none":
+                tag_warnings.append(f"{tag}: 오프셋 추정 실패 — 원시 시계 그대로 병합됨")
+            for w in tag_warnings:
+                if w in remaining_warnings:
+                    remaining_warnings.remove(w)
+            src_entry["warnings"] = src_entry["warnings"] + tag_warnings
+        # 소스별로 귀속되지 않은 나머지 경고(향후 일반 경고 확장 대비)는 기준(w1)에 붙인다.
+        if remaining_warnings:
+            wireless_sources[0]["warnings"] = wireless_sources[0]["warnings"] + remaining_warnings
+        merge_summary = {
+            "window_ms": mr.stats["window_ms"],
+            "duplicates": mr.stats["duplicates"],
+            "kept": mr.stats["kept"],
+            "coverage": mr.stats["coverage"],
+        }
+    else:
+        (frames,) = per_source.values()
 
     _progress(f"{len(frames):,}프레임 추출 완료. 역할 감지 중...", 30)
     roles = detect_roles(frames)
@@ -183,6 +250,8 @@ def run_analysis(
     # 구조화된 데이터 (웹 시각화용) — 90→99% 단계별 진행
     overview_section = text_sections[0]
     structured: Dict[str, Any] = {}
+    if merge_summary is not None:
+        structured["merge"] = merge_summary
 
     _progress("시각화: 개요 데이터 생성 중...", 90)
     # AP 채널 맵은 프레임 전수 조사(O(N)) — overview/roaming이 재사용하도록 1회만 계산
@@ -204,10 +273,7 @@ def run_analysis(
         return {"cancelled": True}
 
     # 입력 파일 메타 — 유선 ground truth가 있으면 ping에 부착 (스펙 §4·§6)
-    sources = [{
-        "name": Path(pcap_path).name, "role": "wireless",
-        "frame_count": len(frames), "warnings": [],
-    }]
+    sources = list(wireless_sources)
     if wired_path:
         _progress("유선 ground truth 분석 중...", 93)
         # time_start/end·ip_filter는 무선 extract_frames()와 동일 구간을 보도록
