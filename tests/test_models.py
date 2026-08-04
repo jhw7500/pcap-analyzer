@@ -75,3 +75,10 @@ class TestAnalysisSection:
         assert s.title == "Test"
         assert s.summary == ""
         assert len(s.lines) == 1
+
+
+class TestFrameNewFields:
+    def test_frame_source_and_tsf_defaults(self):
+        """신규 필드는 기본값이 있어 기존 생성 코드 무영향."""
+        f = _make_frame()
+        assert f.source == "" and f.tsf == ""

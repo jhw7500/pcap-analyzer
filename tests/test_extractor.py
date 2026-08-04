@@ -154,3 +154,22 @@ class TestParseTsvLine:
         assert frame.rssi == "-55"
         assert frame.reason_code == "7"
         assert frame.seq == "1234"
+
+    def test_parse_tsv_line_tsf_column(self):
+        """cols[30] = wlan.fixed.timestamp → Frame.tsf. 없으면 빈 문자열."""
+        cols = ["7", "1000.5", "2026-01-01 00:00:00", "0", "8", "802.11", "100"] + [""] * 23 + ["9893376059"]
+        frame = parse_tsv_line("\t".join(cols))
+        assert frame is not None
+        assert frame.tsf == "9893376059"
+
+    def test_parse_tsv_line_tsf_absent_backward_compat(self):
+        """cols[30] 없어도 backward compatible — frame.tsf는 빈 문자열."""
+        cols = ["7", "1000.5", "2026-01-01 00:00:00", "0", "8", "802.11", "100"] + [""] * 23
+        frame = parse_tsv_line("\t".join(cols))
+        assert frame is not None
+        assert frame.tsf == ""
+
+    def test_tshark_fields_contains_tsf_last(self):
+        """TSHARK_FIELDS 마지막 필드가 wlan.fixed.timestamp."""
+        from analyzer.core.extractor import TSHARK_FIELDS
+        assert TSHARK_FIELDS[30] == "wlan.fixed.timestamp"

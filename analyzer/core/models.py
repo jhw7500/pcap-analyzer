@@ -48,6 +48,8 @@ class Frame:
     current_ap: str = ""  # wlan.fixed.current_ap — Reassoc Request의 직전 AP (로밍 전 AP)
     channel_freq: str = ""  # radiotap.channel.freq — 채널 주파수 MHz (채널/밴드 판별용)
     eapol_msgnr: str = ""  # wlan_rsna_eapol.keydes.msgnr — EAPOL 4-way 메시지 번호 1~4
+    tsf: str = ""  # wlan.fixed.timestamp — 비콘의 AP TSF(µs). 캡처 간 오프셋 추정용 (merge.py)
+    source: str = ""  # 캡처 출처 태그 (w1/w2/… — 다중 무선 병합 시 pipeline이 채움)
 
     @property
     def subtype_name(self) -> str:

@@ -53,6 +53,7 @@ TSHARK_FIELDS = [
     "wlan.fixed.current_ap",      # cols[27] — Reassoc Request의 직전 연결 AP (로밍 전 AP)
     "radiotap.channel.freq",      # cols[28] — 채널 주파수 MHz (채널/밴드 판별용)
     "wlan_rsna_eapol.keydes.msgnr",  # cols[29] — EAPOL 4-way 메시지 번호 1~4
+    "wlan.fixed.timestamp",       # cols[30] — 비콘 TSF(µs). 캡처 간 시계 오프셋 추정 (merge.py)
 ]
 
 
@@ -271,6 +272,7 @@ def parse_tsv_line(line: str) -> Optional[FrameType]:
             current_ap=cols[27] if len(cols) > 27 else "",
             channel_freq=cols[28] if len(cols) > 28 else "",
             eapol_msgnr=cols[29] if len(cols) > 29 else "",
+            tsf=cols[30] if len(cols) > 30 else "",
         )
     except (ValueError, IndexError):
         return None
