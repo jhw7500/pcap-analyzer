@@ -196,6 +196,7 @@ def run_analysis(
             off = mr.offsets[tag]
             src_entry["applied_offset_ms"] = round(off.offset_sec * 1000, 3)
             src_entry["offset_method"] = off.method
+            src_entry["offset_pairs"] = off.pairs  # 프론트 신뢰도 표기용(비콘 TSF 매칭 쌍 수)
             tag_warnings = list(off.warnings)
             if off.method == "none":
                 tag_warnings.append(f"{tag}: 오프셋 추정 실패 — 원시 시계 그대로 병합됨")

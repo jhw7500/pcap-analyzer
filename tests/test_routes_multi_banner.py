@@ -20,25 +20,49 @@ def _store(tmp_path, monkeypatch, structured):
         json.dumps(result, ensure_ascii=False), encoding="utf-8")
 
 
-def test_multi_wireless_meta_line_shows_offset_and_merge(tmp_path, monkeypatch):
+def test_multi_wireless_meta_line_shows_offset_direction_and_merge(tmp_path, monkeypatch):
+    """양수 applied_offset_ms는 "이 소스 시계가 기준보다 느렸다(더해서 보정)"는 뜻이다 —
+    bare 부호("+183.5s")는 방향이 정반대로 오독되기 쉬우므로 "느림/빠름" 문구로 표기한다."""
     _store(tmp_path, monkeypatch, {
         "sources": [
             {"name": "w1.pcapng", "role": "wireless", "frame_count": 100,
              "applied_offset_ms": 0.0, "offset_method": "reference", "warnings": []},
             {"name": "w2.pcapng", "role": "wireless", "frame_count": 98,
-             "applied_offset_ms": 183510.0, "offset_method": "tsf", "warnings": []},
+             "applied_offset_ms": 183510.0, "offset_method": "tsf",
+             "offset_pairs": 12298, "warnings": []},
         ],
         "merge": {
-            "window_ms": 20, "duplicates": 12298, "kept": 186,
+            "window_ms": 20, "duplicates": 45231, "kept": 186,
             "coverage": {"both": 186, "only": {"w2": 12}},
         },
     })
     html = client.get("/analysis/multi1").text
     assert "무선 소스 2개 병합" in html
-    assert "+183.5s" in html
+    assert "183.5" in html
+    assert "느림" in html  # 양수 오프셋 → w2 시계가 기준보다 느렸다는 의미
+    assert "+183.5s" not in html  # 방향 오독을 유발하는 bare 부호 표기는 제거됨
     assert "tsf" in html
+    assert "12,298쌍" in html  # TSF 매칭 쌍 수(신뢰도 지표)
     assert "중복 제거" in html
-    assert "12,298" in html
+    assert "45,231" in html
+
+
+def test_multi_wireless_meta_line_negative_offset_shows_fast(tmp_path, monkeypatch):
+    """음수 applied_offset_ms는 반대 방향 — 해당 소스 시계가 기준보다 빨랐다는 뜻이라
+    "빠름"으로 표기해야 한다."""
+    _store(tmp_path, monkeypatch, {
+        "sources": [
+            {"name": "w1.pcapng", "role": "wireless", "frame_count": 100,
+             "applied_offset_ms": 0.0, "offset_method": "reference", "warnings": []},
+            {"name": "w2.pcapng", "role": "wireless", "frame_count": 98,
+             "applied_offset_ms": -2500.0, "offset_method": "tsf",
+             "offset_pairs": 40, "warnings": []},
+        ],
+    })
+    html = client.get("/analysis/multi1").text
+    assert "빠름" in html
+    assert "2.5" in html
+    assert "40쌍" in html
 
 
 def test_single_wireless_no_meta_line(tmp_path, monkeypatch):

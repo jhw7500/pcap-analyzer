@@ -21,8 +21,9 @@
 <div class="bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 mb-4 text-sm text-gray-300">
     <span class="text-gray-400">무선 소스 {{ _wsrc | length }}개 병합:</span>
     {% for s in _wsrc %}
-    <span class="ml-2">{{ s.get('name', '?') }}
-        {%- if s.get('applied_offset_ms') is not none %} ({{ '%+.1f' | format(s.get('applied_offset_ms', 0) / 1000) }}s{% if s.get('offset_method') %}, {{ s.get('offset_method') }}{% endif %}){%- endif %}</span>
+    {% set _method = s.get('offset_method') %}
+    {% set _off_sec = (s.get('applied_offset_ms', 0) / 1000) if s.get('applied_offset_ms') is not none else none %}
+    <span class="ml-2">{{ s.get('name', '?') }}{% if _off_sec is not none %} ({{ '기준' if _method == 'reference' else (('시계 %.1fs 느림 → 보정' | format(_off_sec)) if _off_sec > 0 else (('시계 %.1fs 빠름 → 보정' | format(-_off_sec)) if _off_sec < 0 else '보정 없음')) }}{% if _method and _method != 'reference' %}, {{ _method }}{% endif %}{% if s.get('offset_pairs') %}, {{ '{:,}'.format(s.get('offset_pairs')) }}쌍{% endif %}){% endif %}</span>
     {% endfor %}
     {% set _merge = _structured.get('merge') %}
     {% if _merge %}<span class="ml-2 text-gray-400">— 중복 제거 {{ '{:,}'.format(_merge.get('duplicates', 0)) }}건</span>{% endif %}

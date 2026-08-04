@@ -63,6 +63,8 @@ def test_two_wireless_files_merged(monkeypatch):
     assert len(wireless) == 2
     assert wireless[0]["applied_offset_ms"] == 0.0
     assert wireless[1]["applied_offset_ms"] == pytest.approx(2000.0, abs=1.0)
+    assert "offset_pairs" not in wireless[0]  # 기준 소스는 매칭 대상이 없어 pairs 없음
+    assert wireless[1]["offset_pairs"] == 12  # 비콘 12개 전량 TSF 매칭
     assert wireless[0]["frame_count"] == 13   # w1 원본(dedup 전) 프레임 수
     assert wireless[1]["frame_count"] == 14   # w2 원본(dedup 전) 프레임 수
     assert result["structured"]["merge"]["duplicates"] == 13
