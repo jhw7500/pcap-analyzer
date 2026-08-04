@@ -625,3 +625,74 @@ def test_unverified_warning_skips_unanswered_closed_inside_capture(tmp_path):
     assert "error" not in gt
     assert gt["ng"] == 1
     assert not any("캡처 끝 시각 미확인" in w for w in gt["warnings"])
+
+
+# --------------------------------------------------------------------------
+# 이중 필터 AND·capinfos 취소 전파 (PR #22 11라운드)
+# --------------------------------------------------------------------------
+
+
+def test_ip_filter_and_derived_filter_combine_as_and_direct_topology(tmp_path):
+    """직접 토폴로지(mac_filter 대상 STA == sender)에서 derived_ip_filter는 sender
+    자신의 IP다 — 이를 사용자 ip_filter(target1 지정)와 '대체'가 아니라 '병행(AND)'로
+    적용해야 사용자가 명시한 target 좁히기가 살아남는다 (PR #22 11라운드 — Finding A
+    ①). 10라운드 방식(대체)이었다면 유도값이 sender 자신의 IP라 '_filter_exchanges의
+    sender 포함 → 전체 유지' 경로를 타 narrowing이 사라져 total==2가 됐을 것이다."""
+    body = (
+        "printf '100.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        "printf '100.002\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+        "printf '101.0\\t10.0.0.1\\t10.0.0.3\\t8\\t7\\t2\\t\\n'\n"
+        "printf '101.002\\t10.0.0.3\\t10.0.0.1\\t0\\t7\\t2\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
+        ip_filter="10.0.0.2",       # 사용자: target1만
+        derived_ip_filter="10.0.0.1",  # mac_filter 유도값: sender 자신의 IP
+    )
+    assert "error" not in gt
+    assert gt["sender"] == "10.0.0.1"
+    assert gt["total"] == 1
+    assert set(gt["targets"]) == {"10.0.0.2"}
+
+
+def test_ip_filter_and_derived_filter_combine_as_and_upstream_topology(tmp_path):
+    """상류 토폴로지에서 사용자가 sender 자신의 IP를 ip_filter로 줘도(narrowing
+    의도가 아님), derived_ip_filter(mac_filter로 유도된 대상 STA IP)는 여전히
+    target을 좁혀야 한다 — 10라운드에서 확립한 동작이 병행(AND) 구조에서도 유지됨을
+    확인 (PR #22 11라운드 — Finding A ②)."""
+    body = (
+        "printf '100.0\\t10.0.0.9\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        "printf '100.002\\t10.0.0.2\\t10.0.0.9\\t0\\t7\\t1\\t\\n'\n"
+        "printf '101.0\\t10.0.0.9\\t10.0.0.3\\t8\\t7\\t2\\t\\n'\n"
+        "printf '101.002\\t10.0.0.3\\t10.0.0.9\\t0\\t7\\t2\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
+        ip_filter="10.0.0.9",        # 사용자: sender 자신 (narrowing 의도 아님)
+        derived_ip_filter="10.0.0.2",  # mac_filter 유도값: 대상 STA IP
+    )
+    assert "error" not in gt
+    assert gt["sender"] == "10.0.0.9"
+    assert set(gt["targets"]) == {"10.0.0.2"}
+
+
+def test_cancel_during_capinfos_returns_cancelled_not_unknown_capture_end(tmp_path):
+    """capinfos 실행 도중 취소되면 _detect_capture_end가 None을 반환하는데, 이를
+    다른 실패 사유와 구분 없이 '캡처 끝 미확인'으로 처리하면 취소를 무시한 채
+    (경고만 붙여) 부분 결과가 정상 GT로 게시된다 — 취소는 {"cancelled": True}로
+    보고해야 한다 (PR #22 11라운드 — Finding B)."""
+    body = (
+        "printf '100.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        "printf '100.002\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+    )
+    tshark = _fake_tshark(tmp_path, body)
+    _fake_capinfos(tmp_path, "capinfos", "exec sleep 5\n")
+    cancel = threading.Event()
+    timer = threading.Timer(0.2, cancel.set)
+    timer.daemon = True
+    timer.start()
+    t0 = time.monotonic()
+    gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=tshark, cancel_event=cancel)
+    timer.cancel()
+    assert gt == {"cancelled": True}
+    assert time.monotonic() - t0 < 3  # sleep 5초를 기다리지 않았다

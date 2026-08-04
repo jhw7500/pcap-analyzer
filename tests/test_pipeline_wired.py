@@ -202,11 +202,14 @@ def _capture_gt_kwargs(monkeypatch, frames=None):
 def test_mac_filter_derives_equivalent_ip_filter(monkeypatch):
     """mac_filter로 무선이 특정 STA만 담으면 유선 GT도 같은 모집단을 봐야 한다 —
     mac_filter는 유선(비-802.11)에 MAC 개념이 없어 그대로 못 넘기므로, 이미 필터가
-    적용된 무선 프레임의 IP로 동등한 ip_filter를 유도한다."""
+    적용된 무선 프레임의 IP로 동등한 ip_filter를 유도해 별도 인자(derived_ip_filter)로
+    전달한다 (PR #22 11라운드 — 10라운드의 'ip_filter 대체' 방식에서 '병행 AND'로
+    교체돼 사용자 ip_filter 자리는 항상 그대로 유지된다)."""
     captured = _capture_gt_kwargs(monkeypatch)
     pipeline.run_analysis("wireless.pcapng", wired_path="wired.pcapng", mac_filter=STA1)
     # 이 픽스처는 STA1 자신이 ping을 보내는 직접 토폴로지 — 자기 IP는 10.0.0.1이다.
-    assert captured["ip_filter"] == "10.0.0.1"
+    assert captured["ip_filter"] == ""
+    assert captured["derived_ip_filter"] == "10.0.0.1"
 
 
 def test_mac_filter_derivation_excludes_wired_sender_ip(monkeypatch):
@@ -222,7 +225,8 @@ def test_mac_filter_derivation_excludes_wired_sender_ip(monkeypatch):
     ]
     captured = _capture_gt_kwargs(monkeypatch, frames=upstream)
     pipeline.run_analysis("wireless.pcapng", wired_path="wired.pcapng", mac_filter=STA1)
-    assert captured["ip_filter"] == "10.0.0.2"  # sender(10.0.0.1)는 넣지 않는다
+    assert captured["ip_filter"] == ""
+    assert captured["derived_ip_filter"] == "10.0.0.2"  # sender(10.0.0.1)는 넣지 않는다
 
 
 def test_mac_filter_without_derivable_ips_skips_ground_truth(monkeypatch):
@@ -260,16 +264,20 @@ def test_user_ip_filter_used_as_is_without_mac_filter(monkeypatch):
 
 def test_mac_filter_and_ip_filter_combined_uses_derived(monkeypatch):
     """mac_filter와 ip_filter를 동시에 지정하면 무선은 두 필터의 AND(교집합)를
-    보는데, 유선에 사용자 ip_filter만 그대로 넘기면(구 코드) sender가 그 값에
-    걸려 `_filter_exchanges`의 '전체 유지' 경로를 타 모집단이 어긋난다 (PR #22
-    10라운드 — Finding A). frames는 이미 mac_filter AND ip_filter가 둘 다 적용된
-    추출 결과이므로, `_derived_ip_filter`가 그 교집합을 정확히 반영한다."""
+    본다 (PR #22 10라운드 — Finding A). **11라운드에서 기대값 조정**: 10라운드는
+    유도값이 사용자 ip_filter를 '대체'하도록 구현했으나, 이는 직접 토폴로지에서
+    사용자가 명시한 target 좁히기를 무력화하는 새 결함을 낳았다(11라운드 Finding A) —
+    유도값(sender 자신의 IP)이 사용자의 target-only 필터를 덮어써 '전체 유지'
+    경로를 타 버린다. 올바른 구조는 '대체'가 아니라 '병행(AND)': pipeline은 사용자
+    ip_filter를 항상 그대로 전달하고, mac_filter 유도값은 별도 인자
+    (derived_ip_filter)로 전달해 wired_ping이 두 필터를 독립적으로 순차 적용한다."""
     captured = _capture_gt_kwargs(monkeypatch)
     pipeline.run_analysis("wireless.pcapng", wired_path="wired.pcapng",
                           mac_filter=STA1, ip_filter="10.0.0.99")
-    # 사용자가 준 "10.0.0.99"가 아니라 STA1의 유도값(직접 토폴로지 _frames() 기준
-    # "10.0.0.1")이 유선에 전달돼야 한다.
-    assert captured["ip_filter"] == "10.0.0.1"
+    # 사용자가 준 "10.0.0.99"는 그대로 유지되고, STA1의 유도값(직접 토폴로지
+    # _frames() 기준 "10.0.0.1")은 별도 인자로 병행 전달된다.
+    assert captured["ip_filter"] == "10.0.0.99"
+    assert captured["derived_ip_filter"] == "10.0.0.1"
 
 
 # --------------------------------------------------------------------------

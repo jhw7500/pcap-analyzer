@@ -21,7 +21,7 @@ from .web.signal_cliff import analyze_signal_cliffs
 from .web.evidence import build_debug_block
 from .web.structured import (
     PING_MATCH_WINDOW_SEC,
-    _is_special_ip,
+    is_special_ip,
     _structured_overview,
     _structured_signal,
     _structured_ping,
@@ -72,7 +72,7 @@ def _derived_ip_filter(frames, mac_filter: str) -> str:
     자기 IP 판정은 `_structured_overview`의 dev_ip 수집과 같은 규칙 — 그 STA가
     송신(ta)한 프레임의 ip.src, 수신(ra)한 프레임의 ip.dst. tshark는 같은 필드의
     multi-value를 콤마로 join해 주므로 콤마로 분해한다. 멀티캐스트/링크로컬/루프백/
-    브로드캐스트/미지정 주소는 `structured._is_special_ip`(같은 규칙을 공유 —
+    브로드캐스트/미지정 주소는 `structured.is_special_ip`(같은 규칙을 공유 —
     `_structured_overview`의 자기 IP 후보 필터와 동일한 정의를 써야 두 경로가
     "특수 IP"를 다르게 취급하지 않는다)로 제외한다. 유도된 IP가 하나도 없으면
     빈 문자열 — 호출부가 "동등 필터 유도 불가"로 처리한다.
@@ -87,7 +87,7 @@ def _derived_ip_filter(frames, mac_filter: str) -> str:
                 continue
             for ip in (raw or "").split(","):
                 ip = ip.strip()
-                if ip and not _is_special_ip(ip):
+                if ip and not is_special_ip(ip):
                     ips.add(ip)
     return ",".join(sorted(ips))
 
@@ -213,18 +213,22 @@ def run_analysis(
         # time_start/end·ip_filter는 무선 extract_frames()와 동일 구간을 보도록
         # 대칭 전달 — 그래야 유선 GT와 무선 관측이 같은 구간을 비교한다.
         # mac_filter는 유선(비-802.11) exchange에 MAC 개념이 없어 그대로 못 넘기므로,
-        # 이미 필터가 적용된 무선 프레임의 IP로 동등한 ip_filter를 유도한다. mac_filter가
-        # 있으면 사용자 ip_filter 값과 무관하게 **항상** 유도값을 쓴다 — frames는 이미
-        # extract_frames에서 mac_filter AND 사용자 ip_filter가 둘 다 적용된 결과이므로
-        # 유도 결과가 두 필터의 교집합을 반영한다. 사용자 ip_filter만 유선에 넘기면
-        # (mac_filter 없을 때만 유도하던 구 규칙) 무선은 "mac_filter AND ip_filter"인데
-        # 유선은 sender가 그 ip_filter 값에 걸려 `_filter_exchanges`의 "sender가 필터에
-        # 있으면 전체 유지" 경로를 타 필터가 무력화되는 비대칭이 생긴다.
-        wired_ip_filter, skip_reason = ip_filter, ""
+        # 이미 필터가 적용된 무선 프레임의 IP로 동등한 ip_filter를 유도해 별도 인자
+        # (derived_ip_filter)로 전달한다. 사용자 ip_filter는 **항상 그대로** 전달하고
+        # (10라운드처럼 유도값으로 대체하지 않는다), build_ground_truth 내부에서 두
+        # 필터를 독립적으로 순차 적용해 AND로 결합한다 (PR #22 11라운드 — Finding A).
+        # 대체 방식(10라운드)의 결함: 직접 토폴로지(mac_filter 대상 STA == sender)에서
+        # 유도값은 sender 자신의 IP다 — 이 값이 사용자가 명시한 target-only ip_filter를
+        # 덮어쓰면, 유선 `_filter_exchanges`의 "sender가 필터에 있으면 전체 유지"
+        # 경로를 타 사용자가 원한 target 좁히기가 사라진다. 병행(AND) 방식에서는 사용자
+        # 필터가 narrowing을 맡고 derived 필터(sender 포함)는 무해한 no-op이 되어
+        # 두 토폴로지(직접/상류) 모두 옳다 — 자세한 근거는 wired_ping.build_ground_truth
+        # docstring 참조.
+        wired_derived_filter, skip_reason = "", ""
         if mac_filter:
             derived = _derived_ip_filter(frames, mac_filter)
             if derived:
-                wired_ip_filter = derived
+                wired_derived_filter = derived
             else:
                 # 유도 실패(미해독 캡처 등) — 다른 모집단을 비교하느니 생략한다.
                 skip_reason = (
@@ -242,7 +246,8 @@ def run_analysis(
                 tshark_path=_tshark_path or "tshark",
                 time_start=time_start,
                 time_end=time_end,
-                ip_filter=wired_ip_filter,
+                ip_filter=ip_filter,
+                derived_ip_filter=wired_derived_filter,
                 cancel_event=cancel_event,
             )
             if gt.get("cancelled"):

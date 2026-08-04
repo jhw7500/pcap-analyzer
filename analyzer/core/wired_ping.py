@@ -50,9 +50,19 @@ def _filter_exchanges(
     sender: str,
     time_start: str,
     time_end: str,
-    ip_filter: str,
+    ip_filters: List[str],
 ) -> Tuple[Optional[List["exping.Exchange"]], str]:
     """시간/IP 필터를 적용한다. 파싱 실패 시 (None, 에러메시지)를 반환.
+
+    ip_filters는 독립적인 필터 문자열들의 목록이다 — 사용자 ip_filter와
+    mac_filter에서 유도된 derived_ip_filter가 각각 하나씩 들어올 수 있다(PR #22
+    11라운드 — Finding A). 하나로 합쳐 교집합 IP 집합을 만드는 게 아니라, 각
+    필터를 **순차적으로** 적용한다(AND of narrowing) — 필터마다 독립적으로
+    "sender가 그 필터에 있으면 전체 유지, 아니면 target으로 좁히기" 판정을 하므로
+    두 필터를 합집합으로 합치면 의미가 달라진다(예: user=target1, derived=sender
+    자신의 IP인 직접 토폴로지 — 합치면 {target1, sender}가 되어 sender가 포함된
+    필터 하나로 뭉개져 narrowing이 사라진다. 순차 적용이면 user 필터가 narrowing을
+    맡고 derived 필터는 sender 포함이라 무해한 no-op이 된다).
 
     mac_filter는 유선(비-802.11) exchange에 MAC 개념이 없어 적용하지 않는다
     (호출부인 pipeline.py 주석 참조).
@@ -68,7 +78,9 @@ def _filter_exchanges(
         if end_epoch is None:
             return None, f"시간 필터를 해석할 수 없다: {time_end}"
         out = [x for x in out if x.time < end_epoch]
-    if ip_filter:
+    for ip_filter in ip_filters:
+        if not ip_filter:
+            continue
         ips = {ip.strip() for ip in ip_filter.split(",") if ip.strip()}
         # 무선 'ip.addr == X'는 src/dst 어느 쪽이든 매칭. sender는 이 캡처의
         # 모든 exchange에서 고정 src이므로, sender가 필터에 있으면 전부
@@ -82,9 +94,9 @@ def _cohort_requests(
     frames: List["exping.IcmpFrame"],
     time_start: str,
     time_end: str,
-    ip_filter: str,
+    ip_filters: List[str],
 ) -> Tuple[Optional[List["exping.IcmpFrame"]], str]:
-    """echo request(icmp.type==8) 부분집합 — 시간 창·ip_filter로 좁힌 sender 후보군.
+    """echo request(icmp.type==8) 부분집합 — 시간 창·ip_filters로 좁힌 sender 후보군.
 
     sender는 "최다 요청 호스트"(exping.pick_sender)로 고르되, **전체 pcap이 아니라
     이 부분집합에서** 고른다. 전체에서 고르면(기존 extract_exchanges 방식) 배경
@@ -92,14 +104,20 @@ def _cohort_requests(
     잘못 선택된다 — 필터가 있어도 무시된 채 전체 pcap 기준으로 sender가 확정되기
     때문이다.
 
-    ip_filter는 여기서도 무선 쪽과 같은 tshark `ip.addr == X`대칭(src/dst 어느
-    쪽이든 매칭)을 쓴다 — sender 자신의 IP를 몰라도, "이 IP가 요청의 src거나
-    dst다"라는 조건은 성립한다. src만 보면 target IP만 준 ip_filter(예:
-    "이 target에 ping하는 sender를 찾아라")가 코호트를 비워 에러를 내는데, 그건
-    무선 필터 의미와도 어긋난다. dst까지 보면 그 경우도 "이 target에 ping한
-    요청들"이 코호트가 되고 pick_sender가 그 요청들의 최다 송신자를 sender로
-    고른다 — 이후 exchange 수준 `_filter_exchanges`(sender가 필터에 있으면 전체
-    유지, 아니면 target 좁히기)가 최종 표시 범위를 정리한다.
+    ip_filters의 각 원소는 여기서도 무선 쪽과 같은 tshark `ip.addr == X`대칭(src/dst
+    어느 쪽이든 매칭)을 쓴다 — sender 자신의 IP를 몰라도, "이 IP가 요청의 src거나
+    dst다"라는 조건은 성립한다. src만 보면 target IP만 준 필터(예: "이 target에
+    ping하는 sender를 찾아라")가 코호트를 비워 에러를 내는데, 그건 무선 필터
+    의미와도 어긋난다. dst까지 보면 그 경우도 "이 target에 ping한 요청들"이
+    코호트가 되고 pick_sender가 그 요청들의 최다 송신자를 sender로 고른다 —
+    이후 exchange 수준 `_filter_exchanges`(sender가 필터에 있으면 전체 유지,
+    아니면 target 좁히기)가 최종 표시 범위를 정리한다.
+
+    ip_filters는 사용자 ip_filter와 mac_filter에서 유도된 derived_ip_filter가
+    각각 하나씩 들어올 수 있는 목록이다(PR #22 11라운드 — Finding A) — 각 필터를
+    독립적으로 "src 또는 dst가 이 필터 집합에 있어야 한다"고 요구하므로 결과는
+    필터들의 AND(교집합)다. `_filter_exchanges`와 같은 이유로 하나의 합집합
+    IP 집합으로 합치지 않는다(호출부 `build_ground_truth` 주석 참조).
 
     파싱 실패 시 (None, 에러메시지). 필터 결과가 빈 리스트일 수도 있다(빈 리스트
     자체가 유효한 반환값 — 호출부가 "필터 구간에 요청 없음"으로 처리).
@@ -113,18 +131,21 @@ def _cohort_requests(
         end_epoch = _parse_local_epoch(time_end)
         if end_epoch is None:
             return None, f"시간 필터를 해석할 수 없다: {time_end}"
-    ips = {ip.strip() for ip in ip_filter.split(",") if ip.strip()} if ip_filter else None
+    ip_sets = [
+        {ip.strip() for ip in f.split(",") if ip.strip()}
+        for f in ip_filters if f
+    ]
 
     cohort = []
     for f in frames:
-        epoch, src, dst, typ = f[0], f[1], f[2], f[3]
+        epoch, src, dst, typ, *_rest = f  # IcmpFrame은 tuple 별칭(namedtuple 아님)
         if typ != exping.ICMP_ECHO_REQUEST:
             continue
         if start_epoch is not None and epoch < start_epoch:
             continue
         if end_epoch is not None and epoch >= end_epoch:
             continue
-        if ips is not None and src not in ips and dst not in ips:
+        if any(src not in ips and dst not in ips for ips in ip_sets):
             continue
         cohort.append(f)
     return cohort, ""
@@ -177,8 +198,6 @@ def _detect_capture_end(
     except OSError:
         return None
     deadline = time.monotonic() + _CAPINFOS_TIMEOUT_SEC
-    stdout = None
-    returncode = None
     try:
         while True:
             if cancel_event is not None and cancel_event.is_set():
@@ -190,8 +209,12 @@ def _detect_capture_end(
                     proc.wait()
                 return None
             try:
-                stdout, _stderr = proc.communicate(timeout=_CAPINFOS_POLL_SEC)
-                returncode = proc.returncode
+                # communicate(timeout=)을 반복 호출하면 매 호출이 내부 버퍼 상태에
+                # 의존해 재읽기 우려가 있다 — wait()로만 폴링하고(파이프를 건드리지
+                # 않음), 프로세스가 끝난 뒤 communicate()를 단 한 번만 호출해 전체
+                # 출력을 한 번에 읽는다. capinfos 출력은 헤더 요약 몇 줄뿐이라 파이프
+                # 버퍼가 찰 위험은 없다.
+                proc.wait(timeout=_CAPINFOS_POLL_SEC)
                 break
             except subprocess.TimeoutExpired:
                 if time.monotonic() >= deadline:
@@ -199,11 +222,12 @@ def _detect_capture_end(
                     proc.wait()
                     return None
                 continue
+        stdout, _stderr = proc.communicate()
     except (OSError, ValueError):
         proc.kill()
         proc.wait()
         return None
-    if returncode != 0:
+    if proc.returncode != 0:
         return None
     for line in (stdout or "").splitlines():
         stripped = line.strip().lower()
@@ -270,7 +294,8 @@ def _unverified_unanswered_count(
     """
     if not frames:
         return 0
-    latest = max(f[0] for f in frames)
+    # IcmpFrame은 tuple 별칭(namedtuple 아님) — 첫 필드(epoch)만 필요하므로 언패킹.
+    latest = max(epoch for epoch, *_rest in frames)
     return sum(1 for x in exchanges if not x.answered and x.time + reply_timeout >= latest)
 
 
@@ -281,6 +306,7 @@ def build_ground_truth(
     time_start: str = "",
     time_end: str = "",
     ip_filter: str = "",
+    derived_ip_filter: str = "",
     cancel_event: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """유선 pcap → ping ground truth dict. 실패 시 {"error": str, "warnings": [...]}.
@@ -288,6 +314,19 @@ def build_ground_truth(
     time_start/time_end/ip_filter는 무선 extract_frames()가 받는 동일 인자와
     같은 구간을 가리키도록 대칭으로 구현했다 — 서로 다른 구간을 비교하지 않기
     위함(무선 필터만 적용되고 유선은 전체 구간을 쓰면 손실률이 왜곡된다).
+
+    ip_filter(사용자가 명시)와 derived_ip_filter(pipeline이 mac_filter에서 유도한
+    값)는 **독립적으로 순차 적용**돼 AND로 결합된다(PR #22 11라운드 — Finding A).
+    하나로 합쳐 버리면(예: 두 값을 합집합 IP 집합으로 만들어 한 번만 필터링) 직접
+    토폴로지 + 명시 target 필터에서 사용자의 narrowing이 사라진다 — mac_filter
+    대상 STA가 sender 자신인 직접 토폴로지에서는 derived_ip_filter가 sender
+    자신의 IP이므로, 합집합에 sender IP가 섞이는 순간 "sender가 필터에 있으면
+    전체 유지" 규칙이 발동해 사용자가 명시한 target 좁히기가 무력화된다. 반면
+    두 필터를 각각 독립적으로 적용하면: 사용자 필터가 narrowing을 맡고(그 필터
+    집합에 sender가 없으므로), derived 필터는 sender를 포함해 no-op이 되어 무해
+    하다 — 두 토폴로지(직접/상류) 모두에서 항상 옳다(자세한 근거는 `_cohort_requests`·
+    `_filter_exchanges` docstring 참조). ip_filter만 있고 derived_ip_filter가
+    없으면(mac_filter 미사용) 10라운드 이전과 동일하게 동작한다.
 
     처리 순서: ① 필터가 적용된 부분집합("코호트")에서 sender 선정(_cohort_requests)
     ② 무선 캡처 가드 ③ 전체 캡처 기준 요청↔응답 짝짓기(exping.pair_exchanges)
@@ -303,8 +342,9 @@ def build_ground_truth(
     cancel_event(threading.Event)를 주면 추출 중 취소가 자식 tshark까지 전파되고
     (exping.extract_icmp_frames), 그때는 error가 아니라 {"cancelled": True}를
     반환한다 — 호출부(pipeline)가 전체 분석 취소와 같은 방식으로 처리하도록.
-    추출이 끝난 뒤 들어온 취소는 capinfos(_detect_capture_end)를 띄우기 직전에
-    확인해 같은 값을 반환한다.
+    추출이 끝난 뒤 들어온 취소는 capinfos(_detect_capture_end)를 띄우기 직전과,
+    capinfos 실행이 끝난 직후(폴링 루프가 취소로 None을 반환했을 수 있어 "캡처 끝
+    미확인"과 구분하기 위해)에도 확인해 같은 값을 반환한다.
     """
     warnings: List[str] = []
     try:
@@ -322,11 +362,17 @@ def build_ground_truth(
     except (ValueError, TimeoutError) as exc:
         return {"error": str(exc), "warnings": warnings}
 
-    cohort, err = _cohort_requests(frames, time_start, time_end, ip_filter)
+    # ip_filter(사용자)와 derived_ip_filter(mac_filter 유도값)는 독립적인 필터로
+    # 순차 AND 적용된다 — 위 build_ground_truth docstring·_cohort_requests
+    # docstring 근거 참조.
+    ip_filters = [ip_filter, derived_ip_filter]
+    has_ip_filter = bool(ip_filter or derived_ip_filter)
+
+    cohort, err = _cohort_requests(frames, time_start, time_end, ip_filters)
     if cohort is None:
         return {"error": err, "warnings": warnings}
     if not cohort:
-        if time_start or time_end or ip_filter:
+        if time_start or time_end or has_ip_filter:
             return {"error": "필터 구간에 echo request 가 없다", "warnings": warnings}
         return {"error": "ICMP echo request 가 없다", "warnings": warnings}
 
@@ -371,6 +417,13 @@ def build_ground_truth(
         return {"cancelled": True}
 
     capture_end = _detect_capture_end(pcap_path, tshark_path, cancel_event)
+    # capinfos 실행 도중 취소되면 _detect_capture_end는 (여러 다른 실패 사유와
+    # 구분 없이) None을 반환한다 — 그 None을 "캡처 끝 미확인"으로 오인해 이후
+    # streak 구성까지 진행하면 취소를 무시한 채 부분 결과가 게시된다. 폴링 루프가
+    # 취소 때문에 None을 반환했다면 이 시점에 cancel_event가 set돼 있으므로 여기서
+    # 걸러낸다(PR #22 11라운드 — Finding B).
+    if cancel_event is not None and cancel_event.is_set():
+        return {"cancelled": True}
     if capture_end is None:
         # 검증된 물리적 끝이 없으면 **아무것도 지우지 않는다**. ICMP 마지막 프레임을
         # 프록시로 쓰면 임계값이 실제 캡처 끝보다 앞당겨져(뒤에 non-ICMP 트래픽이
@@ -399,8 +452,8 @@ def build_ground_truth(
             "warnings": warnings
         }
 
-    if time_start or time_end or ip_filter:
-        filtered, err = _filter_exchanges(exchanges, sender, time_start, time_end, ip_filter)
+    if time_start or time_end or has_ip_filter:
+        filtered, err = _filter_exchanges(exchanges, sender, time_start, time_end, ip_filters)
         if filtered is None:
             return {"error": err, "warnings": warnings}
         exchanges = filtered

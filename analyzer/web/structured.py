@@ -25,12 +25,13 @@ from ..core.thresholds import (
 )
 
 
-def _is_special_ip(ip: str) -> bool:
+def is_special_ip(ip: str) -> bool:
     """멀티캐스트·링크로컬·루프백·브로드캐스트·미지정 주소 판정.
 
     `_structured_overview`의 자기 IP 후보 필터와 `pipeline._derived_ip_filter`의
     mac_filter→ip_filter 유도가 이 규칙을 공유한다 — 한쪽만 넓히면 두 경로가 서로
     다른 "특수 IP" 정의를 쓰게 돼 유도 결과에 링크로컬/루프백 잔재가 섞일 수 있다.
+    모듈 밖(pipeline.py)에서도 import해 쓰므로 공개 이름을 쓴다.
     """
     if ip in ("", "0.0.0.0", "255.255.255.255", "::"):
         return True
@@ -48,6 +49,10 @@ def _is_special_ip(ip: str) -> bool:
     except (ValueError, IndexError):
         pass
     return False
+
+
+#: 하위 호환 별칭 — 10라운드까지 이 비공개 이름을 썼다.
+_is_special_ip = is_special_ip
 
 
 def _structured_overview(
@@ -70,12 +75,12 @@ def _structured_overview(
     # MAC ↔ IP 매핑 — 관찰된 IP 양측 추출:
     #   송신(TA=mac)의 ip.src + 수신(RA=mac)의 ip.dst
     # 단방향 캡처에서 한 쪽만 잡히는 케이스를 보완하기 위해 양쪽 모두 본다.
-    # broadcast/multicast/링크로컬/루프백/unspecified는 제외 (_is_special_ip)
+    # broadcast/multicast/링크로컬/루프백/unspecified는 제외 (is_special_ip)
     def _split_ips(raw: str):
         # tshark는 같은 필드의 multi-value를 콤마로 join해서 반환할 수 있음
         for ip in raw.split(","):
             ip = ip.strip()
-            if ip and not _is_special_ip(ip):
+            if ip and not is_special_ip(ip):
                 yield ip
 
     # 빈도 기반 IP 후보 수집:
