@@ -696,3 +696,72 @@ def test_cancel_during_capinfos_returns_cancelled_not_unknown_capture_end(tmp_pa
     timer.cancel()
     assert gt == {"cancelled": True}
     assert time.monotonic() - t0 < 3  # sleep 5초를 기다리지 않았다
+
+
+# --------------------------------------------------------------------------
+# time_end 경계 요청 일관 제외 (PR #22 13라운드 — Codex P2)
+# --------------------------------------------------------------------------
+
+
+def test_time_end_boundary_request_excluded_when_reply_window_crosses(tmp_path):
+    """time_end가 요청과 응답 사이에 떨어지면: 유선은 전체 캡처 pairing이라
+    answered로 잡히지만, 무선 extract_frames는 `frame.time < time_end`로 응답
+    프레임을 이미 제거해 그 요청을 관측하지 못한다 — GT가 이를 그대로 answered로
+    total에 포함시키면 무선과 다른 모집단을 비교하게 돼 인위적 초과 무선 손실이
+    '모니터 누락'으로 오귀속된다. _drop_unreachable_tail(capture_end 기준)과
+    같은 원리를 time_end 경계에도 적용해 응답 창이 경계를 넘는 요청은 일관되게
+    제외해야 한다(수정 전 RED: total에 포함됨)."""
+    end_epoch = _local_epoch("2026-01-01 10:00:10")
+    a_req = end_epoch - 0.5    # 응답 창(기본 ±1.0s)이 end_epoch를 넘는다 → 제외 대상
+    a_rep = end_epoch + 0.2    # 응답이 경계 뒤에 있음(무선은 못 봄)
+    b_req = end_epoch - 3.0    # 응답 창이 경계 안에서 완전히 닫힌다 → 정상 포함
+    b_rep = b_req + 0.002
+    body = (
+        f"printf '{a_req}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        f"printf '{a_rep}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+        f"printf '{b_req}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t2\\t\\n'\n"
+        f"printf '{b_rep}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t2\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
+        time_end="2026-01-01 10:00:10",
+    )
+    assert "error" not in gt
+    assert gt["total"] == 1 and gt["ng"] == 0    # A는 제외, B만 남는다
+    warn = [w for w in gt["warnings"] if "구간 끝 경계 요청" in w]
+    assert len(warn) == 1 and "1건" in warn[0]
+
+
+def test_time_end_boundary_keeps_requests_whose_reply_window_closes_inside(tmp_path):
+    """응답 창이 경계에서 충분히 멀어 안에서 완전히 닫히는 요청은 정상 포함된다 —
+    과잉 배제 방지."""
+    end_epoch = _local_epoch("2026-01-01 10:00:10")
+    req = end_epoch - 5.0
+    rep = req + 0.002
+    body = (
+        f"printf '{req}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        f"printf '{rep}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
+        time_end="2026-01-01 10:00:10",
+    )
+    assert "error" not in gt
+    assert gt["total"] == 1 and gt["ng"] == 0
+    assert not any("구간 끝 경계 요청" in w for w in gt["warnings"])
+
+
+def test_time_end_boundary_exclusion_inactive_without_time_end(tmp_path):
+    """time_end가 없으면 경계 배제 로직 자체가 발동하지 않는다 — 응답이
+    reply_timeout 안에서 아무리 늦게 와도 정상 answered로 집계된다."""
+    t0 = _local_epoch("2026-01-01 10:00:00")
+    req = t0
+    rep = t0 + 0.9  # 기본 reply_timeout(1.0s) 안이지만 여유가 적다
+    body = (
+        f"printf '{req}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        f"printf '{rep}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=_fake_tshark(tmp_path, body))
+    assert "error" not in gt
+    assert gt["total"] == 1 and gt["ng"] == 0
+    assert not any("구간 끝 경계 요청" in w for w in gt["warnings"])

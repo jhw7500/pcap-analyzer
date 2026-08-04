@@ -51,8 +51,9 @@ def _filter_exchanges(
     time_start: str,
     time_end: str,
     ip_filters: List[str],
-) -> Tuple[Optional[List["exping.Exchange"]], str]:
-    """시간/IP 필터를 적용한다. 파싱 실패 시 (None, 에러메시지)를 반환.
+    reply_timeout: float,
+) -> Tuple[Optional[List["exping.Exchange"]], str, int]:
+    """시간/IP 필터를 적용한다. 파싱 실패 시 (None, 에러메시지, 0)을 반환.
 
     ip_filters는 독립적인 필터 문자열들의 목록이다 — 사용자 ip_filter와
     mac_filter에서 유도된 derived_ip_filter가 각각 하나씩 들어올 수 있다(PR #22
@@ -66,18 +67,46 @@ def _filter_exchanges(
 
     mac_filter는 유선(비-802.11) exchange에 MAC 개념이 없어 적용하지 않는다
     (호출부인 pipeline.py 주석 참조).
+
+    time_end 경계 배제(반환값 세 번째 원소, boundary_excluded 건수, PR #22
+    13라운드 — Codex P2): time_end가 요청과 그 응답 사이에 떨어지면, 유선은 전체
+    캡처 기준 pairing이라 그 요청을 answered로 잡지만 무선 extract_frames는
+    `frame.time < time_end`로 응답 프레임을 이미 잘라낸다 — 그러면 GT가 "무선이
+    놓친 응답"을 인위적으로 만들어 손실률이 왜곡된다. `_drop_unreachable_tail`
+    (capture_end 기준 물리적 꼬리 배제)과 같은 원리를 time_end에도 적용한다:
+    요청 시각이 `end_epoch - reply_timeout` 이후면 그 응답 창이 time_end를
+    넘어갈 수 있어(실제 응답이 언제 왔든) 무선과 동일 조건으로 비교할 수 없으므로
+    제외한다. answered/미응답 여부와 무관하게 시각만으로 판정 — 응답이 실제로
+    왔는지는 유선만 아는 정보라 그것으로 판정하면 무선이 볼 수 없는 근거로
+    무선과 비교하는 모순이 생긴다.
+
+    time_start 쪽은 대칭 처리가 불필요하다: 요청이 start_epoch 이전이면 그
+    exchange 자체가 이미 필터에서 빠진다(`x.time >= start_epoch` 요구, 아래) —
+    무선도 그 요청 프레임을 아예 못 보므로(잘못된 요청 시각), 응답만 단독으로
+    보이는 경우는 기존 "reply-only 관측 → 비교 불가" 처리(charts.js, 4~5라운드)가
+    이미 정직하게 다룬다. 즉 이쪽은 두 필터가 "같은 요청을 아예 안 본다"는 점에서
+    이미 대칭이라 별도 배제가 필요 없다.
     """
     out = exchanges
+    boundary_excluded = 0
     if time_start:
         start_epoch = _parse_local_epoch(time_start)
         if start_epoch is None:
-            return None, f"시간 필터를 해석할 수 없다: {time_start}"
+            return None, f"시간 필터를 해석할 수 없다: {time_start}", 0
         out = [x for x in out if x.time >= start_epoch]
     if time_end:
         end_epoch = _parse_local_epoch(time_end)
         if end_epoch is None:
-            return None, f"시간 필터를 해석할 수 없다: {time_end}"
+            return None, f"시간 필터를 해석할 수 없다: {time_end}", 0
         out = [x for x in out if x.time < end_epoch]
+        threshold = end_epoch - reply_timeout
+        kept = []
+        for x in out:
+            if x.time > threshold:
+                boundary_excluded += 1
+                continue
+            kept.append(x)
+        out = kept
     for ip_filter in ip_filters:
         if not ip_filter:
             continue
@@ -87,7 +116,7 @@ def _filter_exchanges(
         # 매칭되는 것과 같다(=필터링 없음). 아니면 target(=dst)으로 좁힌다.
         if ips and sender not in ips:
             out = [x for x in out if x.target in ips]
-    return out, ""
+    return out, "", boundary_excluded
 
 
 def _cohort_requests(
@@ -331,13 +360,25 @@ def build_ground_truth(
     처리 순서: ① 필터가 적용된 부분집합("코호트")에서 sender 선정(_cohort_requests)
     ② 무선 캡처 가드 ③ 전체 캡처 기준 요청↔응답 짝짓기(exping.pair_exchanges)
     ④ 캡처 끝이 **capinfos로 확인된 경우에만** 물리적 꼬리 제거(_drop_unreachable_tail)
-    ⑤ 시간/IP 필터로 최종 표시 구간 좁히기(_filter_exchanges) ⑥ 집계. ③이 필터
-    이전(전체 캡처 기준)인 이유: 창 끝 근처 요청의 응답이 창 밖(그러나 캡처 안)에
-    있어도 매칭돼야 한다. ④가 ⑤보다 먼저인 이유: 필터로 창을 먼저 자르면 창 안
-    마지막 자리의 진짜 손실이 물리적 꼬리로 오인될 수 있다(trailing_dropped는 항상
-    물리적 꼬리 기준). 캡처 끝이 미확인이면 ④를 건너뛰고(drop 0건) 응답 기회를
-    검증하지 못한 무응답(_unverified_unanswered_count)을 손실로 집계한 뒤 과대
-    계상 가능성을 warnings로 알린다.
+    ⑤ 시간/IP 필터로 최종 표시 구간 좁히기 + **time_end 경계 요청 배제**
+    (_filter_exchanges) ⑥ 집계. ③이 필터 이전(전체 캡처 기준)인 이유: 창 끝
+    근처 요청의 응답이 창 밖(그러나 캡처 안)에 있어도 매칭돼야 한다. ④가 ⑤보다
+    먼저인 이유: 필터로 창을 먼저 자르면 창 안 마지막 자리의 진짜 손실이 물리적
+    꼬리로 오인될 수 있다(trailing_dropped는 항상 물리적 꼬리 기준). 캡처 끝이
+    미확인이면 ④를 건너뛰고(drop 0건) 응답 기회를 검증하지 못한 무응답
+    (_unverified_unanswered_count)을 손실로 집계한 뒤 과대 계상 가능성을
+    warnings로 알린다.
+
+    time_end 경계 배제(PR #22 13라운드): time_end가 요청↔응답 사이에 떨어지면
+    무선 extract_frames는 응답 프레임을 이미 잘라내는데(frame.time < time_end)
+    유선은 전체 캡처 pairing이라 그대로 answered로 잡는다 — 그러면 GT가 무선이
+    볼 수 없는 응답을 근거로 "무선 손실 없음"을 주장하게 돼 두 쪽이 다른
+    모집단을 비교한다. _filter_exchanges가 응답 창(reply_timeout)이 time_end를
+    넘는 요청을 일관되게 제외하고 boundary_excluded 건수를 warnings로 알린다
+    (④의 capinfos 기준 물리적 꼬리 배제와 같은 원리를 time_end에 적용한 것).
+    time_start 쪽은 대칭 배제가 불필요하다 — 그 경계의 요청은 애초에 필터에서
+    빠져(x.time >= start_epoch) 유선·무선 양쪽 다 "이 요청을 안 본다"는 점에서
+    이미 일치한다(자세한 근거는 _filter_exchanges docstring 참조).
 
     cancel_event(threading.Event)를 주면 추출 중 취소가 자식 tshark까지 전파되고
     (exping.extract_icmp_frames), 그때는 error가 아니라 {"cancelled": True}를
@@ -453,10 +494,17 @@ def build_ground_truth(
         }
 
     if time_start or time_end or has_ip_filter:
-        filtered, err = _filter_exchanges(exchanges, sender, time_start, time_end, ip_filters)
+        filtered, err, boundary_excluded = _filter_exchanges(
+            exchanges, sender, time_start, time_end, ip_filters, reply_timeout
+        )
         if filtered is None:
             return {"error": err, "warnings": warnings}
         exchanges = filtered
+        if boundary_excluded:
+            warnings.append(
+                f"구간 끝 경계 요청 {boundary_excluded}건 제외 — 응답 창"
+                f"(±{reply_timeout}s)이 time_end를 넘어 무선과 동일 조건 비교 불가"
+            )
         if not exchanges:
             return {"error": "필터 구간에 echo request 가 없다", "warnings": warnings}
 
