@@ -4,6 +4,8 @@ WLAN(802.11) pcap 파일을 업로드하면 `tshark`로 프레임을 추출하�
 
 유선(포트 미러) pcap을 함께 업로드하면 ping 손실의 ground truth를 계산해 무선 관측 손실과 병기하고, 확정 손실 구간을 무선 이벤트(로밍·재전송)와 자동 대조한다. 설계: `docs/superpowers/specs/2026-08-03-multi-pcap-analysis-design.md`
 
+동일 AP를 여러 위치에서 캡처한 무선 pcap을 최대 4개까지 함께 업로드하면(웹 폼 또는 CLI `--wireless` 반복 지정), 비콘 TSF 기반으로 캡처 간 시계 오프셋을 추정해 정렬한 뒤 중복 프레임을 제거하고 단일 타임라인으로 병합해 분석한다.
+
 ## 주요 기능
 
 - **자동 역할 감지**: Beacon/ProbeResp/BSSID 휴리스틱으로 AP와 STA 분리
