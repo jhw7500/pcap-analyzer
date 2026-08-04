@@ -790,9 +790,19 @@
                     // Finding B, 유선 술어의 정확한 미러). matched는 그대로
                     // 유지한다 — 무선이 matched라는 건 응답이 실제로 관측됐다는
                     // 뜻이라, 유선의 "응답이 구간 안이면 유지" 판정과 대응한다.
+                    // strict `<`(14라운드 마무리): 유선 near_boundary가
+                    // `x.time >= threshold`(제외 쪽)라 그 정확한 보수(complement,
+                    // 유지 쪽)는 `p.epoch < cutoff`다 — `<=`였다면 knife-edge
+                    // (p.epoch === cutoff)에서 유선은 배제하는데 무선은 유지해
+                    // 다시 어긋난다. loss_gap의 epoch는 실손실 프레임이 없어
+                    // 근접 anchor 프레임(ping_matching._record_phantom_loss)의
+                    // 시각을 빌린 근사값이다 — reply-only 흐름(gap_direction ===
+                    // 'reply')에서는 그 anchor가 request가 아니라 reply 프레임일
+                    // 수 있어, 유선 Exchange.time(항상 요청 시각)과 정확히
+                    // 같은 기준이 아닐 수 있다(근사 비교로 감수).
                     if (typeof gt.boundary_cutoff_epoch !== 'number') return true;
                     if (p.status === 'matched') return true;
-                    return p.epoch <= gt.boundary_cutoff_epoch;
+                    return p.epoch < gt.boundary_cutoff_epoch;
                 });
             // sender가 걸린 짝 없는 관측이 **방향과 무관하게** 하나라도 있으면
             // 모집단이 어긋난다 — 그 흐름의 정상 관측이 분모에서 통째로 빠져
