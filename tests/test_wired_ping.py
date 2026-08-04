@@ -790,3 +790,41 @@ def test_time_end_boundary_exclusion_inactive_without_time_end(tmp_path):
     assert "error" not in gt
     assert gt["total"] == 1 and gt["ng"] == 0
     assert not any("구간 끝 경계 요청" in w for w in gt["warnings"])
+
+
+# --------------------------------------------------------------------------
+# 경계 컷오프 무선 미러링 (PR #22 14라운드 — Finding B)
+# --------------------------------------------------------------------------
+
+
+def test_boundary_cutoff_epoch_exposed_when_time_end_active(tmp_path):
+    """time_end가 활성이면 gt에 boundary_cutoff_epoch(= end_epoch - reply_timeout)를
+    노출한다 — charts.js가 유선의 경계 배제 술어를 무선 비교(senderItems)에도
+    미러링할 수 있도록. 13라운드는 유선 GT만 배제해 무선 full_list에는 그
+    요청이 여전히 loss로 남는 비대칭이 있었다(수정 전 RED: 키 자체가 없음)."""
+    t0 = _local_epoch("2026-01-01 10:00:00")
+    body = (
+        f"printf '{t0}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        f"printf '{t0 + 0.002}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
+        time_end="2026-01-01 10:00:10",
+    )
+    assert "error" not in gt
+    end_epoch = _local_epoch("2026-01-01 10:00:10")
+    assert gt["boundary_cutoff_epoch"] == pytest.approx(end_epoch - 1.0)
+
+
+def test_boundary_cutoff_epoch_absent_without_time_end(tmp_path):
+    """time_end가 없으면 boundary_cutoff_epoch 키 자체를 만들지 않는다 —
+    charts.js가 `typeof gt.boundary_cutoff_epoch === 'number'`로 미러링 여부를
+    판정하므로, 키 부재가 곧 '미러링 비활성'이어야 한다."""
+    t0 = _local_epoch("2026-01-01 10:00:00")
+    body = (
+        f"printf '{t0}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        f"printf '{t0 + 0.002}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=_fake_tshark(tmp_path, body))
+    assert "error" not in gt
+    assert "boundary_cutoff_epoch" not in gt

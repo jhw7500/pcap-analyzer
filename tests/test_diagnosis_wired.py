@@ -651,3 +651,60 @@ def test_mapping_failure_path_unaffected_by_broadcast_deauth_scoping():
     assert "로밍/해제 1건" in c["issue"]["msg"]
     assert "매핑 불가" in c["issue"]["msg"]
     assert c["refs"] == [1]
+
+
+# --------------------------------------------------------------------------
+# 전역 BSSID 귀속 (PR #22 14라운드 — Codex P1)
+# --------------------------------------------------------------------------
+
+
+def test_broadcast_deauth_uses_global_bssid_when_window_has_no_sta_frame():
+    """창(±2s) 안에 매핑된 STA의 프레임이 없어도(사용자 활동이 뜸한 순간), 전체
+    캡처에서 그 STA가 관측된 BSSID로 방송 해제의 소속 AP를 특정할 수 있어야
+    한다 — sta_bssids를 창(in_win)이 아니라 전체 frames 기준으로 구해야 하는
+    이유(PR #22 14라운드 — Finding A)."""
+    frames = [
+        _ping_anchor(number=1, epoch=1020.0),  # 창(1003~1008) 밖 — STA1↔AP1 소속을 전역에서 밝힘
+        make_frame(number=2, epoch=1005.3, ta=AP1, ra=BROADCAST, bssid=AP1, subtype="12"),
+    ]
+    cands = _ground_truth_issue_candidates(GT, frames)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c["issue"]["severity"] == "high"
+    assert "로밍/해제 1건" in c["issue"]["msg"]
+    assert c["refs"] == [2]
+
+
+def test_broadcast_deauth_from_unrelated_ap_excluded_via_global_bssid():
+    """창 안에 STA1의 프레임이 없고 무관 AP2의 브로드캐스트 Deauth만 있으면,
+    전역 sta_bssids({AP1})로 그 방송이 무관 AP임을 정확히 가려 생략해야 한다.
+    12라운드의 폴백(_frame_is_ap)은 창 안 sta_bssids가 비면 '아무 AP'나 수용해
+    무관 AP2의 방송까지 high로 오귀속했다(수정 전 RED — 폴백이 여전히 있다면
+    high가 나온다)."""
+    frames = [
+        _ping_anchor(number=1, epoch=1020.0),  # 창 밖 — STA1의 진짜 AP=AP1을 전역에서 밝힘
+        make_frame(number=2, epoch=1005.3, ta=AP2, ra=BROADCAST, bssid=AP2, subtype="12"),
+    ]
+    cands = _ground_truth_issue_candidates(GT, frames)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c["issue"]["severity"] == "medium"
+    assert "이상 징후 없음" in c["issue"]["msg"]
+    assert 2 not in c["refs"]
+
+
+def test_broadcast_deauth_omitted_when_sta_has_no_bssid_anywhere():
+    """이 STA가 전체 캡처에서도 BSSID와 함께 한 번도 관측되지 않으면(예: BSSID
+    필드가 빈 캡처) 방송 해제의 소속 AP를 특정할 근거가 전무하다 — 폴백 없이
+    방송 증거를 생략한다(수정 전 RED: _frame_is_ap 폴백이 아무 AP나 수용해
+    high — '무매핑이 오매핑보다 낫다'는 9라운드 원칙과 일치시킨 것)."""
+    frames = [
+        _ping_anchor(number=1, epoch=1005.0, bssid=""),  # STA1 앵커, BSSID 정보 없음
+        make_frame(number=2, epoch=1005.3, ta=AP1, ra=BROADCAST, bssid=AP1, subtype="12"),
+    ]
+    cands = _ground_truth_issue_candidates(GT, frames)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c["issue"]["severity"] == "medium"
+    assert "이상 징후 없음" in c["issue"]["msg"]
+    assert 2 not in c["refs"]

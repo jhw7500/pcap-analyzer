@@ -549,7 +549,7 @@ def build_ground_truth(
         streaks = streaks[:MAX_STREAKS]
 
     total = len(exchanges)
-    return {
+    result: Dict[str, Any] = {
         "total": total,
         "ok": total - len(ng),
         "ng": len(ng),
@@ -561,3 +561,14 @@ def build_ground_truth(
         "trailing_dropped": dropped,
         "warnings": warnings,
     }
+    if time_end:
+        # 13라운드의 경계 배제(_filter_exchanges: 응답 창이 time_end를 넘어갈
+        # 여지가 있고 실제 응답도 경계 밖인 요청 제외)는 유선 GT에만 적용됐다 —
+        # 무선 full_list에는 그 요청이 그대로 loss로 남는다(요청은 창 안, 응답만
+        # tshark의 frame.time < time_end에 잘림). GT 카드(charts.js)가 같은
+        # 술어를 무선 비교에도 미러링할 수 있도록 컷오프 값을 노출한다(PR #22
+        # 14라운드 — Finding B). 이 지점에 도달했다는 건 time_end가 이미
+        # 성공적으로 파싱됐다는 뜻이다(파싱 실패는 위 _filter_exchanges 호출에서
+        # 먼저 에러로 반환된다).
+        result["boundary_cutoff_epoch"] = _parse_local_epoch(time_end) - reply_timeout
+    return result

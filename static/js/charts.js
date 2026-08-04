@@ -780,7 +780,20 @@
         if (gt.sender) {
             wirelessLossLabel = '무선 관측 손실(동일 송신원)';
             const senderItems = fullList.filter(p => p.src === gt.sender &&
-                (p.status === 'matched' || p.status === 'loss' || p.status === 'loss_gap'));
+                (p.status === 'matched' || p.status === 'loss' || p.status === 'loss_gap'))
+                .filter(p => {
+                    // 유선 GT의 time_end 경계 배제(13라운드: 응답 창이 time_end를
+                    // 넘어갈 여지가 있고 실제 응답도 경계 밖인 요청 제외)를 무선
+                    // 비교에도 미러링한다 — 그러지 않으면 그 요청이 무선
+                    // full_list에는 loss로 남아 GT 분모(제외됨)와 다른 모집단을
+                    // 비교해 인위적 초과 무선 손실이 생긴다(PR #22 14라운드 —
+                    // Finding B, 유선 술어의 정확한 미러). matched는 그대로
+                    // 유지한다 — 무선이 matched라는 건 응답이 실제로 관측됐다는
+                    // 뜻이라, 유선의 "응답이 구간 안이면 유지" 판정과 대응한다.
+                    if (typeof gt.boundary_cutoff_epoch !== 'number') return true;
+                    if (p.status === 'matched') return true;
+                    return p.epoch <= gt.boundary_cutoff_epoch;
+                });
             // sender가 걸린 짝 없는 관측이 **방향과 무관하게** 하나라도 있으면
             // 모집단이 어긋난다 — 그 흐름의 정상 관측이 분모에서 통째로 빠져
             // 손실률이 과대 표시된다. observations(ping_matching의

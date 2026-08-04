@@ -918,6 +918,19 @@ def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None, signal_stas=N
     mapping = _sender_sta_macs_by_target(
         frames, gt.get("sender") or "", ap_macs, gt.get("targets")
     )
+    # target별 sta_bssids(그 STA가 관측된 BSSID) — **전체 frames**에서 한 번씩만
+    # 계산해 재사용한다(PR #22 14라운드 — Codex P1). STA의 소속 AP는 손실 창과
+    # 무관한 전역 속성이라, in_win(그 streak의 창)으로 제한하면 창 안에 이 STA의
+    # 트래픽이 우연히 없을 때(사용자 활동이 뜸한 순간) sta_bssids가 비어 버린다
+    # — 전체 캡처에는 이 STA가 어느 AP에 붙어 있었는지 보여주는 프레임이 있을
+    # 수 있는데도 그 정보를 못 쓰게 된다. 같은 target이 여러 streak를 가질 수
+    # 있어(반복 손실 구간) target별로 한 번만 계산해 streak마다 전체 frames를
+    # 다시 스캔하지 않는다.
+    bssids_by_target = {
+        target: {g.bssid for g in frames
+                 if (g.ta in sta_macs or g.ra in sta_macs) and g.bssid}
+        for target, sta_macs in mapping.items()
+    }
 
     out = []
     for streak in (gt.get("streaks") or [])[:_WIRED_LOSS_MAX_STREAKS]:
@@ -949,23 +962,22 @@ def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None, signal_stas=N
             # — ra가 브로드캐스트라 sta_macs 어디에도 없기 때문이다. 그 STA에 실제로
             # 영향을 미치는 방송 해제인데도 스코프에서 빠지면 창 안에 다른 이벤트가
             # 없을 때 "무선 이상 징후 없음"으로 오판된다(PR #22 12라운드 — Codex P1).
-            # sta_bssids: 이미 스코프된 프레임에서 이 STA가 관측된 BSSID — AP가 여럿인
-            # 캡처(로밍 등)에서 이 STA의 AP만 특정해 무관 AP의 방송 해제를 배제한다.
+            # sta_bssids(전체 frames 기준, 위에서 target별로 사전 계산 — 14라운드)로
+            # AP가 여럿인 캡처(로밍 등)에서 이 STA의 AP만 특정해 무관 AP의 방송
+            # 해제를 배제한다. sta_bssids가 비면(이 STA가 전체 캡처에서도 BSSID와
+            # 함께 한 번도 관측되지 않음) 그 STA의 AP를 특정할 근거가 전무하다 —
+            # 12라운드의 _frame_is_ap 폴백(아무 AP나 수용)은 폐기했다. 근거 없이
+            # 아무 AP를 그 STA의 AP로 추정하면 다중 AP 캡처에서 무관 AP의 방송
+            # 해제가 이 STA의 손실 근거로 오귀속된다 — "무매핑이 오매핑보다
+            # 낫다"는 9라운드 원칙과 같다.
             from ..core.detector import BROADCAST
-            sta_bssids = {g.bssid for g in in_win
-                          if (g.ta in sta_macs or g.ra in sta_macs) and g.bssid}
-            for f in in_win:
-                if f.subtype not in ("10", "12") or f.ra != BROADCAST:
-                    continue
-                if sta_bssids:
-                    is_this_sta_ap = f.ta in sta_bssids or f.bssid in sta_bssids
-                else:
-                    # 스코프 프레임에 bssid가 하나도 없는 희귀 경우 — 기존 AP 판정
-                    # (_frame_is_ap, ap_macs/BSSID 기반)으로 보수적으로 폴백한다.
-                    # 해제 프레임은 희귀·고신호라 포함 오류의 비용이 낮다.
-                    is_this_sta_ap = _frame_is_ap(f.ta, f, ap_macs or set())
-                if is_this_sta_ap and f not in scoped:
-                    scoped.append(f)
+            sta_bssids = bssids_by_target.get(streak.get("target")) or set()
+            if sta_bssids:
+                for f in in_win:
+                    if f.subtype not in ("10", "12") or f.ra != BROADCAST:
+                        continue
+                    if (f.ta in sta_bssids or f.bssid in sta_bssids) and f not in scoped:
+                        scoped.append(f)
         # DeAuth(12)는 is_roaming_related(ROAMING_SUBTYPES)가 이미 포함하므로
         # 여기선 그것만으로 안 잡히는 DisAssoc(10)만 보강한다.
         roam = [f for f in scoped if f.is_roaming_related or f.subtype == "10"]
