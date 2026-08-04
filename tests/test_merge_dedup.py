@@ -115,3 +115,46 @@ def test_single_source_passthrough_numbers_untouched():
     r = merge_captures(_pair([("w1", a)]))
     assert [f.number for f in r.frames] == [7, 9]
     assert r.offsets == {} and r.stats["duplicates"] == 0
+
+
+def test_control_frame_nearest_match_not_first_match():
+    """근사 키(제어 프레임) dedup은 창 안 후보 중 '가장 가까운' 것과 매칭돼야 한다.
+
+    A1(t=1000.000)·A2(t=1000.030)는 같은 근사 키(w1, 같은 소스라 서로 dedup 안 됨).
+    B(t=1000.049)는 A2에 19ms 거리, A1에는 49ms 거리 — 둘 다 창(50ms) 안이지만
+    A2가 더 가깝다. 삽입순(=A1 먼저) 스캔으로 첫 매치를 취하면 B가 더 먼 A1과
+    잘못 병합된다 — '가장 가까운' 것을 선택해야 한다.
+    """
+    a1 = make_frame(number=1, epoch=1000.000, seq="", subtype="29", ta="", ra=STA1, ip_src="")
+    a2 = make_frame(number=2, epoch=1000.030, seq="", subtype="29", ta="", ra=STA1, ip_src="")
+    b1 = make_frame(number=1, epoch=1000.049, seq="", subtype="29", ta="", ra=STA1, ip_src="10.0.0.9")
+    a = _src("w1", a1, a2)
+    b = _src("w2", b1)
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 2
+    assert r.stats["duplicates"] == 1
+    # B는 ip_src가 있어 병합되면 항상 대표가 된다 — 병합 안 된(단독) 쪽의 epoch로
+    # 어느 A와 합쳐졌는지 판별: 올바른 최근접 매칭이면 A1(1000.000)이 단독으로 남는다.
+    standalone = next(f for f in r.frames if f.ip_src == "")
+    assert standalone.epoch == pytest.approx(1000.000)
+
+
+def test_same_source_burst_bucket_bounded():
+    """같은 소스·같은 근사 키가 창 안에서 밀집(서로 dedup 불가)해도 매칭 후보
+    버킷은 MERGE_MAX_LIVE_GROUPS를 넘지 않는다 — 무한 누적에 의한 선형 스캔(O(n²))
+    회귀 가드. 월클록 측정 대신 내부 버킷 길이를 구조적으로 검증한다.
+    """
+    from analyzer.core.merge import MERGE_MAX_LIVE_GROUPS, _MatchIndex, _dedup_key
+
+    frames = [make_frame(number=i + 1, epoch=1000.0 + i * 1e-5, seq="", subtype="29",
+                         ta="", ra=STA1) for i in range(500)]
+    for f in frames:
+        f.source = "w1"
+
+    index = _MatchIndex()
+    for f in frames:
+        index.process(f)
+
+    key = _dedup_key(frames[0])
+    assert index.bucket_len(key) <= MERGE_MAX_LIVE_GROUPS
+    assert len(index.all_groups) == 500  # 전부 같은 소스라 dedup 없이 새 group

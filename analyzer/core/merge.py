@@ -19,6 +19,9 @@ from .models import Frame
 MERGE_MIN_TSF_PAIRS = 10
 FALLBACK_MATCH_WINDOW_SEC = 5.0
 MERGE_DEDUP_WINDOW_SEC = 0.05  # Task 3에서 사용
+# 창 안 후보 초과 시 낡은 순으로 매칭 후보에서 제외 — 최근접 매칭 원칙과 정합(먼
+# 후보일수록 옳은 짝일 확률 낮음), same-source 밀집 버스트의 무한 누적을 막는다.
+MERGE_MAX_LIVE_GROUPS = 64
 
 
 @dataclass
@@ -114,6 +117,54 @@ def _prefer_new_representative(rep: Frame, candidate: Frame) -> bool:
     return candidate.epoch < rep.epoch
 
 
+class _MatchIndex:
+    """키별 슬라이딩 윈도우 dedup 매칭 인덱스.
+
+    all_groups는 최종 출력용 전체 group(창 밖으로 밀려나도 유지 — 절대 삭제 안 함).
+    _windows는 키별 "아직 매칭 후보인" group들의 슬라이딩 윈도우(deque)다. 프레임
+    전체 순회가 epoch 오름차순이라는 전제 하에 앞쪽(오래된) group부터 버려도
+    안전하다. 각 키의 후보 수는 MERGE_MAX_LIVE_GROUPS로 bound한다 — same-source
+    밀집 버스트처럼 서로 매치 불가한 프레임이 쌓이면 무한정 늘어나 매 프레임 스캔이
+    O(n)이 되는 걸 막는다.
+    """
+
+    def __init__(self) -> None:
+        self.all_groups: List[Dict[str, Any]] = []
+        self._windows: Dict[Tuple, "deque[Dict[str, Any]]"] = {}
+
+    def bucket_len(self, key: Tuple) -> int:
+        """키의 현재 매칭 후보 수 — 테스트에서 bound 불변식 검증용."""
+        return len(self._windows.get(key, ()))
+
+    def process(self, f: Frame) -> bool:
+        """프레임을 기존 group에 병합하거나 새 group을 만든다. 중복이면 True."""
+        key = _dedup_key(f)
+        dq = self._windows.setdefault(key, deque())
+        while dq and f.epoch - dq[0]["epoch"] > MERGE_DEDUP_WINDOW_SEC:
+            dq.popleft()  # 창을 벗어난 group은 더 이상 매칭 후보가 아니다.
+
+        candidates = [
+            g for g in dq
+            if f.source not in g["sources"] and abs(f.epoch - g["epoch"]) <= MERGE_DEDUP_WINDOW_SEC
+        ]
+        if candidates:
+            # 창 안 후보 중 가장 가까운 것과 매칭 — 삽입순 첫 매치가 아니다.
+            # 동률(diff 같음)이면 이른 epoch의 group을 우선.
+            match = min(candidates, key=lambda g: (abs(f.epoch - g["epoch"]), g["epoch"]))
+            match["sources"].add(f.source)
+            if _prefer_new_representative(match["rep"], f):
+                match["rep"] = f
+                match["epoch"] = f.epoch  # group.epoch는 항상 대표의 epoch로 유지
+            return True
+
+        group = {"rep": f, "sources": {f.source}, "epoch": f.epoch}
+        dq.append(group)
+        self.all_groups.append(group)
+        if len(dq) > MERGE_MAX_LIVE_GROUPS:
+            dq.popleft()  # 매칭 후보에서만 제외 — all_groups에는 남아 결과 불변.
+        return False
+
+
 def merge_captures(sources: "OrderedDict[str, List[Frame]]") -> MergeResult:
     """다중 캡처를 시계 정렬 후 dedup·재번호해 단일 타임라인으로 병합한다.
 
@@ -162,35 +213,9 @@ def merge_captures(sources: "OrderedDict[str, List[Frame]]") -> MergeResult:
         all_frames.extend(sources[tag])
     all_frames.sort(key=lambda f: (f.epoch, f.source, f.number))
 
-    # all_groups: 최종 출력용 전체 group(창 밖으로 밀려나도 유지).
-    # window_index: 키별 "아직 매칭 후보인" group들의 슬라이딩 윈도우(deque) —
-    # 전체 순회가 epoch 오름차순이라 앞쪽(오래된) group부터 버려도 안전하다.
-    all_groups: List[Dict[str, Any]] = []
-    window_index: Dict[Tuple, "deque[Dict[str, Any]]"] = {}
-    duplicates = 0
-
-    for f in all_frames:
-        key = _dedup_key(f)
-        dq = window_index.setdefault(key, deque())
-        while dq and f.epoch - dq[0]["epoch"] > MERGE_DEDUP_WINDOW_SEC:
-            dq.popleft()  # 창을 벗어난 group은 더 이상 매칭 후보가 아니다.
-
-        match = None
-        for group in dq:
-            if f.source not in group["sources"] and abs(f.epoch - group["epoch"]) <= MERGE_DEDUP_WINDOW_SEC:
-                match = group
-                break
-
-        if match is not None:
-            duplicates += 1
-            match["sources"].add(f.source)
-            if _prefer_new_representative(match["rep"], f):
-                match["rep"] = f
-                match["epoch"] = f.epoch  # group.epoch는 항상 대표의 epoch로 유지
-        else:
-            group = {"rep": f, "sources": {f.source}, "epoch": f.epoch}
-            dq.append(group)
-            all_groups.append(group)
+    index = _MatchIndex()
+    duplicates = sum(1 for f in all_frames if index.process(f))
+    all_groups = index.all_groups
 
     merged = [g["rep"] for g in all_groups]
     merged.sort(key=lambda f: f.epoch)
