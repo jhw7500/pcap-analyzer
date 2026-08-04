@@ -732,6 +732,31 @@ def test_time_end_boundary_request_excluded_when_reply_window_crosses(tmp_path):
     assert len(warn) == 1 and "1건" in warn[0]
 
 
+def test_time_end_boundary_request_kept_when_reply_arrives_before_boundary(tmp_path):
+    """응답 창(±reply_timeout)이 time_end 임계값에 걸리더라도, 실제 응답이 그보다
+    훨씬 일찍(time_end 이전에) 도착했다면 제외하면 안 된다 — Exchange는 응답
+    epoch을 별도로 저장하지 않지만 `x.time + x.rtt`가 곧 응답 epoch이라 정확한
+    판정이 가능하다(PR #22 13라운드 보강 — team-lead 정정). 무선도 그 응답
+    프레임을 보므로(frame.time < time_end) 양쪽 다 matched — 여기서 배제하면
+    무선(matched)과 GT(미포함) 사이에 반대 방향 불일치가 새로 생긴다(수정 전
+    RED: 응답 시각을 안 보고 요청 시각만으로 무조건 배제해 필터 구간이 비어
+    error가 남)."""
+    end_epoch = _local_epoch("2026-01-01 10:00:10")
+    req = end_epoch - 0.5   # 응답 창(±1.0s)이 임계값을 넘지만
+    rep = req + 0.1          # 응답은 훨씬 일찍(경계보다 한참 전) 도착
+    body = (
+        f"printf '{req}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        f"printf '{rep}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
+        time_end="2026-01-01 10:00:10",
+    )
+    assert "error" not in gt
+    assert gt["total"] == 1 and gt["ng"] == 0
+    assert not any("구간 끝 경계 요청" in w for w in gt["warnings"])
+
+
 def test_time_end_boundary_keeps_requests_whose_reply_window_closes_inside(tmp_path):
     """응답 창이 경계에서 충분히 멀어 안에서 완전히 닫히는 요청은 정상 포함된다 —
     과잉 배제 방지."""
