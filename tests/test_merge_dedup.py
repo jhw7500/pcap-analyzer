@@ -86,6 +86,22 @@ def test_representative_prefers_more_decoded_fields():
     assert kept.icmp_type == "8" and kept.source == "w2"
 
 
+def test_representative_prefers_tcp_len_field():
+    """tcp_len이 점수에 빠지면 ip_src+tcp_flags 동률에서 tcp_len까지 가진
+    완전판(is_pure_tcp_ack 판정에 tcp_len=="0" 필요)이 부분판에 "이른 epoch"
+    규칙으로 질 수 있다 — tcp_len도 지표에 포함돼야 한다(PR #23 리뷰 3라운드
+    Finding B). tcp_len="0"도 bool("0")이 True라 정상적으로 "채워짐"으로
+    계산된다."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, seq="100",
+                              ip_src="10.0.0.1", tcp_flags="0x10"))                  # tcp_len 없음(선행)
+    b = _src("w2", make_frame(number=1, epoch=1000.030, seq="100",
+                              ip_src="10.0.0.1", tcp_flags="0x10", tcp_len="0"))     # tcp_len까지 있는 완전판
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+    kept = r.frames[0]
+    assert kept.tcp_len == "0" and kept.source == "w2"
+
+
 def test_representative_tie_earlier_epoch():
     a = _src("w1", make_frame(number=1, epoch=1000.000, seq="100", ip_src="10.0.0.1"))
     b = _src("w2", make_frame(number=1, epoch=1000.030, seq="100", ip_src="10.0.0.1"))

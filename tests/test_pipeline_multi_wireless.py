@@ -326,6 +326,91 @@ def test_content_filter_alignment_pass_skipped_for_single_wireless(monkeypatch):
     assert align_calls == []
 
 
+def test_reference_dropped_by_content_filter_still_gets_offset_with_time_window(monkeypatch):
+    """내용 필터가 secondary(w2)에서만 매칭돼 기준(w1)이 0건으로 제외되고
+    w2만 생존 + 시간 창(w1의 정확한 시계 기준) 조합 — merge를 건너뛰면(수정
+    전) w2가 미보정(원시 스큐 남은) 시계 그대로 남아, 이미 보정된 epoch를
+    전제로 한 창이 그 미보정 프레임엔 하나도 안 걸려 NO_FRAMES로 붕괴한다.
+    정렬 증거(alignment_sources["w1"])로 w2에 먼저 오프셋을 적용한 뒤 창을
+    적용해야 한다(PR #23 리뷰 3라운드 Finding A)."""
+    full_w1 = _skew_beacons(1000.0)  # 기준 시계(정렬 증거만 존재, 본 프레임은 0건)
+    full_w2 = _skew_beacons(998.0)   # +2.0s 스큐
+
+    content_w1: list = []  # mac_filter가 w1에서는 매칭 안 됨 — 기준 소스가 0건
+    content_w2 = [
+        make_frame(number=1, epoch=999.0, seq="300", subtype="40", ta=STA1),
+        make_frame(number=2, epoch=999.5, seq="301", subtype="40", ta=STA1),
+    ]
+
+    def _extract_alignment(path, **kw):
+        return full_w1 if path == FILE_W1 else full_w2
+
+    def _extract(path, **kw):
+        return content_w1 if path == FILE_W1 else content_w2
+
+    monkeypatch.setattr(pipeline, "extract_alignment_beacons", _extract_alignment)
+    monkeypatch.setattr(pipeline, "extract_frames", _extract)
+    monkeypatch.setattr(pipeline, "detect_tshark_version",
+                        lambda *a, **kw: {"version": "test", "path": "tshark"})
+    monkeypatch.setattr(config, "detect_tshark", lambda: "tshark")
+    monkeypatch.setattr(os.path, "getsize", lambda *a, **kw: 1000)
+    # 보정 후(w1 기준) grid로 [1000.5, 1002.0) — content_w2 보정 결과(1001.0/1001.5)만 포함.
+    epoch_map = {"TS": 1000.5, "TE": 1002.0}
+    monkeypatch.setattr(pipeline, "parse_local_epoch", lambda v: epoch_map.get(v))
+
+    result = pipeline.run_analysis(
+        FILE_W1, wireless_paths=[FILE_W2], mac_filter=STA1,
+        time_start="TS", time_end="TE",
+    )
+
+    assert "error" not in result, result.get("error")
+    assert result["frame_count"] == 2
+
+    sources = result["structured"]["sources"]
+    wireless = [s for s in sources if s["role"] == "wireless"]
+    assert wireless[0]["frame_count"] == 0
+    assert wireless[0]["warnings"]  # 기준 소스는 여전히 0건 경고 유지
+    assert wireless[1]["offset_method"] == "tsf"
+    assert wireless[1]["offset_pairs"] == 12
+    assert wireless[1]["applied_offset_ms"] == pytest.approx(2000.0, abs=1.0)
+
+
+def test_reference_dropped_by_content_filter_still_gets_offset_without_time_window(monkeypatch):
+    """시간 창이 없어도, 내용 필터로 기준(w1)이 0건 제외되고 w2만 생존하면
+    정렬 증거 기준으로 w2에 오프셋이 적용돼야 한다(PR #23 리뷰 3라운드
+    Finding A) — 수정 전에는 생존 소스가 1개뿐이라 merge 자체가 생략돼
+    w2가 원시 시계 그대로 남는다."""
+    full_w1 = _skew_beacons(1000.0)
+    full_w2 = _skew_beacons(998.0)
+
+    content_w1: list = []
+    content_w2 = [make_frame(number=1, epoch=999.0, seq="300", subtype="40", ta=STA1)]
+
+    def _extract_alignment(path, **kw):
+        return full_w1 if path == FILE_W1 else full_w2
+
+    def _extract(path, **kw):
+        return content_w1 if path == FILE_W1 else content_w2
+
+    monkeypatch.setattr(pipeline, "extract_alignment_beacons", _extract_alignment)
+    monkeypatch.setattr(pipeline, "extract_frames", _extract)
+    monkeypatch.setattr(pipeline, "detect_tshark_version",
+                        lambda *a, **kw: {"version": "test", "path": "tshark"})
+    monkeypatch.setattr(config, "detect_tshark", lambda: "tshark")
+    monkeypatch.setattr(os.path, "getsize", lambda *a, **kw: 1000)
+
+    result = pipeline.run_analysis(FILE_W1, wireless_paths=[FILE_W2], mac_filter=STA1)
+
+    assert "error" not in result, result.get("error")
+    assert result["frame_count"] == 1
+    assert content_w2[0].epoch == pytest.approx(1001.0, abs=0.001)  # 999.0 + 2.0
+
+    sources = result["structured"]["sources"]
+    wireless = [s for s in sources if s["role"] == "wireless"]
+    assert wireless[1]["offset_method"] == "tsf"
+    assert wireless[1]["applied_offset_ms"] == pytest.approx(2000.0, abs=1.0)
+
+
 def test_wired_gt_composes_with_multi_wireless(monkeypatch):
     """유선 GT(1단계)와 다중 무선이 동시 동작 — sources = w1, w2, wired 3항목."""
     frames_by_path = {FILE_W1: _w1_frames(), FILE_W2: _w2_frames()}

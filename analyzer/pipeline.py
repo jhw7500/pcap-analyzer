@@ -242,10 +242,30 @@ def run_analysis(
     # 소스(원래 1개 경로만 준 경우든, 나머지가 0건이라 걸러진 경우든)는 merge를
     # 아예 호출하지 않아 기존 파이프라인과 완전히 동일한 결과를 낸다(하위 호환).
     merge_summary: Optional[Dict[str, Any]] = None
-    if len(per_source) > 1:
-        mr = merge_captures(per_source, alignment_sources=alignment_sources)
+    # 다중 경로 입력 + 내용 필터(alignment_sources가 존재 — need_alignment_pass)면,
+    # 생존 소스 수와 무관하게 항상 기준을 "w1"로 명시해 merge_captures를
+    # 호출한다. mac_filter/ip_filter가 secondary에서만 매칭되면 w1(기준)이
+    # 0건으로 제외돼 생존 소스가 1개("w2" 등)뿐일 수 있는데, 그 경우에도
+    # merge를 건너뛰면(구 동작) 그 소스는 원시(미보정) 시계 그대로 남는다 —
+    # 이미 연기해 둔 시간 창(사용자의 실제 벽시계 기준)이 그 미보정 epoch에
+    # 적용돼 스큐(문서화된 최대 183s)만큼 구간이 어긋나거나 NO_FRAMES로
+    # 붕괴할 수 있다(PR #23 리뷰 3라운드 Finding A). merge_captures가
+    # alignment_sources["w1"](내용 필터 없이 뽑은 비콘)를 기준으로 그 생존
+    # 소스의 오프셋을 추정·적용해준다 — 정렬 증거 자체도 없으면(극단적으로
+    # 드묾) estimate_offset이 자연히 "none"으로 떨어져 기존과 동일하게
+    # 원시 시계로 병합된다. alignment pass가 없으면(내용 필터 없음) 이
+    # 조건이 아예 성립하지 않고, 그 경우 w1이 0건이 되는 유일한 이유는
+    # 캡처 자체가 비었기 때문이므로(시간 필터는 다중 무선일 때 이미 연기돼
+    # pass-2도 전체 구간을 보므로) 기존 동작(생존 1개면 merge 생략)이 여전히
+    # 타당하다.
+    run_merge = len(per_source) > 1 or alignment_sources is not None
+    if run_merge:
+        merge_reference_tag = "w1" if alignment_sources is not None else None
+        mr = merge_captures(
+            per_source, alignment_sources=alignment_sources, reference_tag=merge_reference_tag,
+        )
         frames = mr.frames
-        reference_tag = next(iter(per_source))
+        reference_tag = merge_reference_tag or next(iter(per_source))
         # mr.warnings는 merge_captures가 tags[1:]를 같은 순서로 순회하며 소스별
         # (off.warnings + "none"이면 tag별 문구) 블록을 이어 붙인 것이다 — 아래
         # 루프도 정확히 같은 소스 순서·같은 구성으로 tag_warnings를 재구성하므로,

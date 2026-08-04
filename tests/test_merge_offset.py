@@ -148,6 +148,27 @@ def test_merge_captures_prefers_alignment_sources_for_offset():
     assert content_w2[0].epoch == pytest.approx(1001.005, abs=0.001)
 
 
+def test_merge_captures_reference_tag_dropped_from_sources_still_offsets_survivors():
+    """reference_tag가 sources에 없어도(내용 필터로 0건 제외됨) alignment_sources에
+    있으면, 생존한 소스 전부에 정렬 증거 기준 오프셋이 적용돼야 한다 —
+    기준이 사라졌다고 보정까지 포기하면 미보정 시계가 그대로 남는다
+    (PR #23 리뷰 3라운드 Finding A)."""
+    align_w1 = _beacons(1000.0, 100_000, 12, "w1")
+    align_w2 = _beacons(998.0, 100_000, 12, "w2")  # +2.0s
+
+    content_w2 = [make_frame(number=1, epoch=999.0, seq="300", subtype="40", source="w2")]
+
+    mr = merge_captures(
+        OrderedDict([("w2", content_w2)]),  # w1 자체가 sources에 없음(0건 제외)
+        alignment_sources=OrderedDict([("w1", align_w1), ("w2", align_w2)]),
+        reference_tag="w1",
+    )
+    assert mr.offsets["w2"].method == "tsf"
+    assert mr.offsets["w2"].pairs == 12
+    assert content_w2[0].epoch == pytest.approx(1001.0, abs=0.001)
+    assert mr.frames[0].epoch == pytest.approx(1001.0, abs=0.001)
+
+
 def test_merge_captures_falls_back_to_main_frames_when_alignment_insufficient():
     """정렬 증거로도 TSF 매칭이 부족하면(극단적으로 비콘 자체가 적은 캡처)
     본 sources 프레임 기준으로 2차 시도(seq 폴백 포함)한다."""

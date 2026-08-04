@@ -143,18 +143,24 @@ def _dedup_key(f: Frame) -> Tuple:
 
 
 def _decoded_score(f: Frame) -> int:
-    """프레임이 복호화됐다는 지표를 **개수**로 센다 — ip_src(IP 페이로드) ·
-    arp_opcode(ARP) · icmp_type(ICMP) · eapol_msgnr(EAPOL 4-way) · tcp_flags
-    (TCP) 중 채워진 필드 수.
+    """프레임이 복호화됐다는 지표를 **개수**로 센다 — 다운스트림 판정(is_icmp_*,
+    is_arp, is_pure_tcp_ack 등)에 실제로 쓰이는 복호화 필드 전수: ip_src(IP
+    페이로드) · arp_opcode(ARP) · icmp_type(ICMP) · eapol_msgnr(EAPOL 4-way) ·
+    tcp_flags(TCP) · tcp_len(TCP 페이로드 길이 — is_pure_tcp_ack가
+    `tcp_len=="0"`을 요구) 중 채워진 필드 수.
 
     bool로만 판정하면(1라운드 수정) 지표가 하나라도 있는 두 사본이 항상
     동률로 취급돼, 필드를 더 많이 보존한 완전한 사본(예: ip_src+icmp_type)이
     부분적으로만 복호화된 사본(예: ip_src만)에 "이른 epoch" 동률 규칙으로 질
     수 있다 — 더 많은 정보를 보존한 사본이 대표가 돼야 한다(PR #23 리뷰
-    2라운드 Finding D).
+    2라운드 Finding D). tcp_len 누락 시 ip_src+tcp_flags 동률에서 tcp_len까지
+    가진 완전판이 지는 동일한 문제가 재현된다(PR #23 리뷰 3라운드 Finding B).
+    tcp_len="0"도 `bool("0")`이 True이므로 정상적으로 "채워짐"으로 계산된다.
     """
     return sum(
-        bool(x) for x in (f.ip_src, f.arp_opcode, f.icmp_type, f.eapol_msgnr, f.tcp_flags)
+        bool(x) for x in (
+            f.ip_src, f.arp_opcode, f.icmp_type, f.eapol_msgnr, f.tcp_flags, f.tcp_len,
+        )
     )
 
 
@@ -234,11 +240,22 @@ def _format_corrected_timestamp(epoch: float) -> str:
 def merge_captures(
     sources: "OrderedDict[str, List[Frame]]",
     alignment_sources: Optional["OrderedDict[str, List[Frame]]"] = None,
+    reference_tag: Optional[str] = None,
 ) -> MergeResult:
     """다중 캡처를 시계 정렬 후 dedup·재번호해 단일 타임라인으로 병합한다.
 
-    sources: 태그 → 프레임 리스트(OrderedDict). 첫 항목이 기준(w1) — 나머지는
-    이 기준에 대해 estimate_offset으로 보정된다. 각 Frame.source는 이미 태깅됨.
+    sources: 태그 → 프레임 리스트(OrderedDict). 나머지 태그는 기준(reference_tag)에
+    대해 estimate_offset으로 보정된다. 각 Frame.source는 이미 태깅됨.
+
+    reference_tag: 정렬 기준 태그. 생략하면 sources의 첫 키(기존 동작 — 보통
+    "w1"). **reference_tag가 sources에 없어도**(내용 필터로 그 소스가 0건이라
+    호출부에서 제외한 경우) alignment_sources에 그 태그가 있으면, 그 비콘
+    집합을 기준으로 sources에 남은 **모든** 소스의 오프셋을 추정·적용한다 —
+    생존 소스가 1개뿐이어도 이 경로에서는 오프셋 보정이 수행된다(dedup은
+    자명하게 0). 기준 소스가 통째로 사라졌다고 오프셋 보정까지 포기하면,
+    호출부가 이미 연기해 둔 시간 창(사용자의 실제 벽시계 기준)이 미보정
+    (원시 스큐가 남은) epoch에 그대로 적용돼 구간이 어긋나거나 결과가 통째로
+    비어버릴 수 있다(PR #23 리뷰 3라운드 Finding A).
 
     alignment_sources: 주어지면(sources와 동일 태그 체계) 오프셋 추정을 이
     프레임 집합으로 **우선** 수행한다 — pipeline.py가 mac_filter/ip_filter
@@ -252,18 +269,30 @@ def merge_captures(
     None이면(기본) 기존처럼 sources로 직접 추정한다.
     """
     tags = list(sources.keys())
-    reference_tag = tags[0]
-    reference = sources[reference_tag]
+    if reference_tag is None:
+        reference_tag = tags[0]
+    reference_in_sources = reference_tag in sources
+    reference = sources.get(reference_tag, [])
     align_reference = alignment_sources.get(reference_tag) if alignment_sources else None
+
+    # 기준 태그가 sources에 있으면 기존처럼 그 외 나머지만 보정한다. 없으면
+    # (내용 필터로 기준 소스가 0건 제외된 경우) sources 쪽엔 비교할 "이미
+    # 정확한" 소스가 없다는 뜻이므로, 생존한 소스 **전부**가 정렬 증거
+    # (alignment_sources) 기준으로 보정 대상이다(Finding A).
+    tags_needing_offset = (
+        [t for t in tags if t != reference_tag] if reference_in_sources else list(tags)
+    )
 
     offsets: Dict[str, OffsetResult] = {}
     warnings: List[str] = []
-    for tag in tags[1:]:
+    for tag in tags_needing_offset:
         frames = sources[tag]
         align_frames = alignment_sources.get(tag) if alignment_sources else None
         if align_reference and align_frames:
             result = estimate_offset(align_reference, align_frames)
             if result.method != "tsf":
+                # reference가 sources에 없으면(빈 리스트) 이 2차 시도는
+                # estimate_offset이 자연히 "none"으로 떨어진다 — 별도 분기 불필요.
                 result = estimate_offset(reference, frames)
         else:
             result = estimate_offset(reference, frames)
@@ -285,19 +314,26 @@ def merge_captures(
     by_source_raw = {tag: len(sources[tag]) for tag in tags}
 
     if len(tags) == 1:
-        # 단일 소스는 dedup·재번호 없이 그대로 반환 — 기존 파이프라인 하위 호환.
-        frames = sorted(reference, key=lambda f: f.epoch)
+        # 생존 소스가 1개뿐 — dedup 대상이 없으니 재번호 없이 그대로
+        # 반환한다(기존 파이프라인 하위 호환). only_tag(=tags[0])는
+        # reference_tag와 다를 수 있다 — reference_tag가 sources에 없는
+        # 경우(위 Finding A 경로)엔 이 유일한 생존 소스도 tags_needing_offset에
+        # 포함돼 이미 오프셋이 적용됐을 수 있다. offsets는 그 결과를 그대로
+        # 반영한다(reference_tag가 곧 only_tag인 기본 케이스는 tags_needing_offset이
+        # 비어 있어 기존처럼 offsets={}가 된다).
+        only_tag = tags[0]
+        frames = sorted(sources[only_tag], key=lambda f: f.epoch)
         stats: Dict[str, Any] = {
             "window_ms": MERGE_DEDUP_WINDOW_SEC * 1000,
             "duplicates": 0,
             "kept": len(frames),
             "by_source_raw": by_source_raw,
-            "coverage": {"both": 0, "only": {reference_tag: len(frames)}},
+            "coverage": {"both": 0, "only": {only_tag: len(frames)}},
         }
         return MergeResult(
             frames=frames,
-            per_source={reference_tag: reference},
-            offsets={},
+            per_source={only_tag: sources[only_tag]},
+            offsets=offsets,
             stats=stats,
             warnings=warnings,
         )
