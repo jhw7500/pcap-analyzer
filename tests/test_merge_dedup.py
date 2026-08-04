@@ -138,6 +138,77 @@ def test_representative_does_not_merge_observational_fields():
     assert kept.rssi == ""  # 관측 필드는 병합되지 않음 — 대표 자신의 값 유지
 
 
+def test_representative_merges_current_ap_field():
+    """이른 ReassocReq 사본에 current_ap가 비어 있고 나중 사본에 있으면 —
+    둘 다 _decoded_score 동률(0점, current_ap는 점수 대상이 아님)이라 이른
+    사본이 대표로 남는데, current_ap가 병합 목록에 없으면 값이 소실된다.
+    _structured_roaming이 current_ap로 직전 AP·밴드 전환을 판정하므로
+    로밍 분석이 왜곡될 수 있다(PR #23 리뷰 5라운드)."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, subtype="2", seq="100",
+                              current_ap=""))                       # 이른 사본(대표로 선정됨, current_ap 없음)
+    b = _src("w2", make_frame(number=1, epoch=1000.030, subtype="2", seq="100",
+                              current_ap="aa:bb:cc:00:00:99"))      # 나중 사본(완전)
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+    kept = r.frames[0]
+    assert kept.source == "w1"  # 대표 정체성은 여전히 이른 사본(동률 + 이른 epoch)
+    assert kept.current_ap == "aa:bb:cc:00:00:99"
+
+
+def test_representative_merges_reason_code_field():
+    """DeAuth 사본 중 이른 쪽에 reason_code가 없고 늦은 쪽에 있으면(둘 다
+    _decoded_score 0점 동률) 이른 사본이 대표로 남는데, reason_code가
+    병합되지 않으면 프레임 표(web/frame_table.py)의 사유 코드가 소실된다
+    (PR #23 리뷰 5라운드)."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, subtype="12", seq="100",
+                              reason_code=""))
+    b = _src("w2", make_frame(number=1, epoch=1000.030, subtype="12", seq="100",
+                              reason_code="3"))
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+    kept = r.frames[0]
+    assert kept.source == "w1"
+    assert kept.reason_code == "3"
+
+
+def test_representative_adopts_specific_protocol_over_generic():
+    """암호화된 EAPOL 사본(subtype 40 — QoS Data와 동일)이 대표가 되면
+    protocol이 "802.11"(포괄값)로 남아 is_roaming_related(protocol=="EAPOL"
+    검사)가 그 프레임을 로밍 관련으로 못 잡을 수 있다 — protocol은 항상
+    뭔가를 보고해 절대 빈 문자열이 아니므로 "빈 값만 채움" 규칙으로는
+    못 잡는다. 포괄값("802.11"/빈 값)이면 사본의 구체 값을 채택해야 한다
+    (PR #23 리뷰 5라운드)."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, subtype="40", seq="100",
+                              protocol="802.11"))                  # 암호화 사본(대표로 선정됨, 포괄값)
+    b = _src("w2", make_frame(number=1, epoch=1000.030, subtype="40", seq="100",
+                              protocol="EAPOL"))                    # 복호화 사본(구체값)
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+    kept = r.frames[0]
+    assert kept.source == "w1"
+    assert kept.protocol == "EAPOL"
+    assert kept.is_roaming_related is True
+
+
+def test_representative_does_not_merge_receiver_specific_fields():
+    """rssi 외에도 mcs/mcs_phy/data_rate/channel_freq/tsf 등 수신기 고유
+    관측값은 병합 대상이 아니다 — Frame 필드 전수 스윕으로 재확인한다
+    (PR #23 리뷰 5라운드)."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, subtype="8", seq="",
+                              ta="aa:aa:aa:aa:aa:01", bssid="aa:aa:aa:aa:aa:01",
+                              tsf="", mcs="", mcs_phy="", data_rate="", channel_freq=""))
+    b = _src("w2", make_frame(number=1, epoch=1000.030, subtype="8", seq="",
+                              ta="aa:aa:aa:aa:aa:01", bssid="aa:aa:aa:aa:aa:01",
+                              tsf="123456", mcs="7", mcs_phy="HT", data_rate="54",
+                              channel_freq="2412"))
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+    kept = r.frames[0]
+    assert kept.source == "w1"
+    assert kept.tsf == "" and kept.mcs == "" and kept.mcs_phy == ""
+    assert kept.data_rate == "" and kept.channel_freq == ""
+
+
 def test_representative_tie_earlier_epoch():
     a = _src("w1", make_frame(number=1, epoch=1000.000, seq="100", ip_src="10.0.0.1"))
     b = _src("w2", make_frame(number=1, epoch=1000.030, seq="100", ip_src="10.0.0.1"))

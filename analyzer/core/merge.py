@@ -233,17 +233,79 @@ def _prefer_new_representative(rep: Frame, candidate: Frame) -> bool:
     return candidate.epoch < rep.epoch
 
 
-#: 대표 선정 이후에도 결손분을 채워야 하는 복호화 유래 필드 — build_ping_matches
-#: (ip_src·ip_dst·icmp_type·icmp_seq·icmp_ident)·control_traffic(arp_opcode·
-#: tcp_len·tcp_flags)·eapol.build_handshakes(eapol_msgnr)가 실제로 소비하는
-#: 필드 전수다(PR #23 리뷰 4라운드 Finding B). rssi·mcs·tsf·timestamp·number·
-#: source 등 관측·식별 필드는 사본마다 본질적으로 달라야 하는 값이라 병합
-#: 대상에서 **제외** — 병합하면 "그 사본이 실제로 관측한 값"이라는 의미가
-#: 깨진다.
+#: === Frame 필드 전수 분류(PR #23 리뷰 5라운드 — 재발 방지용 완결 스윕) ===
+#: 매 라운드 새 결손 필드가 나올 때마다 allowlist에 하나씩 추가하는 패턴을
+#: 끝내기 위해 Frame의 전체 필드를 3분류했다. (a)에 속하는데 아래
+#: _MERGEABLE_DECODED_FIELDS·_merge_protocol_field에 없는 필드가 새로
+#: 발견되면 이 표부터 갱신할 것 — fix report에도 동일 표를 남긴다.
+#:
+#: (a) 복호화 유래 + 다운스트림 소비 → 병합 대상.
+#:   ip_src/ip_dst          — ping_matching.build_ping_matches의 IP 흐름 매칭
+#:   icmp_type/icmp_seq/icmp_ident — build_ping_matches의 ICMP 요청/응답 짝짓기
+#:   arp_opcode             — Frame.is_arp, control_traffic.py·evidence.py ARP 판정
+#:   tcp_len/tcp_flags       — Frame.is_pure_tcp_ack(제어 트래픽 판정)
+#:   eapol_msgnr             — eapol.build_handshakes 4-way 메시지 번호
+#:   current_ap              — web/structured.py _structured_roaming의 직전 AP·
+#:                             밴드 전환 판정(PR #23 리뷰 5라운드 신규)
+#:   reason_code              — web/frame_table.py 디버그 프레임 표의 Deauth/
+#:                             Disassoc 사유 코드(PR #23 리뷰 5라운드 신규)
+#:   protocol                — **별도 규칙**(_merge_protocol_field, 아래) 필요:
+#:                             "빈 문자열"이 아니라 "802.11"(tshark가 802.11
+#:                             계층까지만 해석했다는 포괄값)이 결손 상태라
+#:                             단순 채움 규칙(빈 값만 채움)으로는 못 잡는다.
+#:                             Frame.is_roaming_related(protocol=="EAPOL" 검사
+#:                             — EAPOL 데이터 프레임은 subtype이 QoS Data와
+#:                             같은 "40"이라 subtype만으로는 못 가려낸다)·
+#:                             web/structured.py proto_counts·
+#:                             core/modules/overview.py proto_counts·
+#:                             core/modules/control_traffic.py 표시·
+#:                             web/evidence.py ARP 매칭(protocol=="ARP")이 소비.
+#:
+#: (b) 관측·수신기 고유(receiver-specific) → 병합 금지. 병합하면 "그 사본이
+#:     실제로 측정/디코드한 값"이라는 의미가 깨진다.
+#:   rssi         — radiotap.dbm_antsignal, 이 수신기가 관측한 신호 세기
+#:   mcs/mcs_phy  — radiotap MCS 필드, 이 수신기의 PHY 디코드 결과
+#:   data_rate    — wlan_radio.data_rate, 이 수신기의 legacy rate 디코드 결과
+#:   channel_freq — radiotap.channel.freq, 이 수신기가 튜닝 중이던 채널
+#:   tsf          — wlan.fixed.timestamp(비콘 전용). 암호화와 무관하게 항상
+#:                  평문이지만(결손이 생기지 않음), estimate_offset이 dedup
+#:                  **이전** 단계에서 이미 소비를 끝내므로 그룹 병합 시점엔
+#:                  채울 이유가 없다 — 오히려 비-비콘 대표에 다른 비콘의 TSF가
+#:                  섞이면 의미가 깨진다.
+#:
+#: (c) 식별/링크 계층 — 병합 자체가 무의미. 802.11 MAC 헤더 필드는 암호화
+#:     여부와 무관하게 항상 평문으로 관측되므로(=결손이 발생하지 않아 채울
+#:     필요가 없음), 그 외는 정의상 사본마다 달라야 하는 값이다.
+#:   number/epoch/timestamp/retry/subtype/seq — MAC 헤더·프레임 메타(항상 평문)
+#:   ta/ra/bssid  — MAC 주소(항상 평문)
+#:   length       — frame.len, 물리 프레임 길이(항상 관측됨, 결손 없음)
+#:   source       — 캡처 출처 태그 자체(그룹 정체성) — 병합 대상이면 안 됨
 _MERGEABLE_DECODED_FIELDS: Tuple[str, ...] = (
     "ip_src", "ip_dst", "icmp_type", "icmp_seq", "icmp_ident",
     "arp_opcode", "tcp_len", "tcp_flags", "eapol_msgnr",
+    "current_ap", "reason_code",
 )
+
+#: protocol이 이 값 중 하나면 "포괄값"(구체 프로토콜을 식별하지 못한 상태)으로
+#: 취급 — _merge_protocol_field가 이 값들을 결손 상태로 보고 채운다.
+_GENERIC_PROTOCOL_VALUES = ("", "802.11")
+
+
+def _merge_protocol_field(rep: Frame, candidate: Frame) -> None:
+    """rep.protocol이 포괄값("802.11"/빈 값)이고 candidate가 더 구체적인 값을
+    가지면 그 값을 채택한다(rep을 제자리에서 mutate).
+
+    tshark의 `_ws.col.Protocol`은 dissector 체인이 얼마나 깊이 해석했는지의
+    함수다 — 같은 프레임이라도 암호화된 사본은 "802.11"(802.11 계층까지만
+    해석됨)을, 복호화된 사본은 "EAPOL"/"ICMP"/"ARP" 등 구체 프로토콜을
+    보고한다. `_MERGEABLE_DECODED_FIELDS`의 "빈 문자열만 채움" 규칙으로는
+    이 필드를 잡을 수 없다 — protocol은 tshark가 항상 뭔가를 채워 넣어
+    절대 빈 문자열이 되지 않기 때문이다. rep이 이미 구체값이면(다른 구체값과
+    충돌하더라도) 덮어쓰지 않는다 — `_merge_decoded_fields`와 같은 "기존
+    값 우선" 원칙(PR #23 리뷰 5라운드).
+    """
+    if rep.protocol in _GENERIC_PROTOCOL_VALUES and candidate.protocol not in _GENERIC_PROTOCOL_VALUES:
+        rep.protocol = candidate.protocol
 
 
 def _merge_decoded_fields(rep: Frame, candidate: Frame) -> None:
@@ -309,14 +371,17 @@ class _MatchIndex:
             if _prefer_new_representative(match["rep"], f):
                 # 교체 전에 새 대표(f)가 구 대표(match["rep"])의 결손 복호화
                 # 필드를 흡수한다 — 교체로 구 대표가 갖고 있던 정보가 사라지는
-                # 걸 막는다(PR #23 리뷰 4라운드 Finding B).
+                # 걸 막는다(PR #23 리뷰 4라운드 Finding B, 5라운드에서 current_ap·
+                # reason_code·protocol 포괄값 규칙까지 확장).
                 _merge_decoded_fields(f, match["rep"])
+                _merge_protocol_field(f, match["rep"])
                 match["rep"] = f
                 match["epoch"] = f.epoch  # group.epoch는 항상 대표의 epoch로 유지
             else:
                 # 대표는 그대로지만, 방금 들어온 후보(f)가 대표의 결손 복호화
-                # 필드를 채울 수 있으면 채운다(Finding B).
+                # 필드를 채울 수 있으면 채운다(Finding B, 5라운드 확장).
                 _merge_decoded_fields(match["rep"], f)
+                _merge_protocol_field(match["rep"], f)
             return True
 
         group = {"rep": f, "sources": {f.source}, "epoch": f.epoch}
