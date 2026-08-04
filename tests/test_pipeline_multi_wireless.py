@@ -6,7 +6,7 @@ import pytest
 
 import config
 import analyzer.pipeline as pipeline
-from tests.conftest import make_frame, AP1
+from tests.conftest import make_frame, AP1, STA1
 
 FILE_W1 = "w1.pcapng"
 FILE_W2 = "w2.pcapng"
@@ -233,6 +233,97 @@ def test_time_filter_parse_failure_returns_explicit_error(monkeypatch):
 
     assert result == {"error": "시간 필터를 해석할 수 없다: not-a-date"}
     assert calls == []  # 파싱 실패는 추출 전에 걸러야 한다 — 불필요한 tshark 실행 방지.
+
+
+def test_content_filter_does_not_strip_alignment_beacons(monkeypatch):
+    """다중 무선 + mac_filter: 본 추출(pass-2)에 STA mac_filter가 걸리면 비콘엔
+    STA 주소가 없어 비콘이 통째로 사라진다 — pass-1(extract_alignment_beacons)
+    로 무필터 비콘을 따로 뽑아 오프셋 추정에 써야 한다(PR #23 리뷰 2라운드
+    Finding A). extract_alignment_beacons가 없으면(현재 코드) 본 프레임에
+    비콘·충분한 seq 쌍이 전혀 없어 오프셋 추정이 "none"으로 붕괴한다(RED)."""
+    full_w1 = _skew_beacons(1000.0)
+    full_w2 = _skew_beacons(998.0)  # +2.0s
+
+    # pass-2(본 추출, mac_filter 적용) 결과 — STA mac_filter라 비콘이 사라지고
+    # 매칭 가능한 데이터 프레임도 1개뿐이라 seq 폴백(>=10쌍 필요)도 불가능하다.
+    content_w1 = [make_frame(number=1, epoch=1001.0, seq="200", subtype="40", ta=STA1)]
+    content_w2 = [make_frame(number=1, epoch=999.005, seq="200", subtype="40", ta=STA1)]
+
+    align_calls = []
+
+    def _extract_alignment(path, **kw):
+        align_calls.append(path)
+        return full_w1 if path == FILE_W1 else full_w2
+
+    def _extract(path, **kw):
+        return content_w1 if path == FILE_W1 else content_w2
+
+    monkeypatch.setattr(pipeline, "extract_alignment_beacons", _extract_alignment)
+    monkeypatch.setattr(pipeline, "extract_frames", _extract)
+    monkeypatch.setattr(pipeline, "detect_tshark_version",
+                        lambda *a, **kw: {"version": "test", "path": "tshark"})
+    monkeypatch.setattr(config, "detect_tshark", lambda: "tshark")
+    monkeypatch.setattr(os.path, "getsize", lambda *a, **kw: 1000)
+
+    result = pipeline.run_analysis(
+        FILE_W1, wireless_paths=[FILE_W2], mac_filter=STA1,
+    )
+
+    assert align_calls == [FILE_W1, FILE_W2]  # pass-1이 두 무선 파일 모두에 대해 실행됨
+    assert "error" not in result
+    sources = result["structured"]["sources"]
+    wireless = [s for s in sources if s["role"] == "wireless"]
+    assert wireless[1]["offset_method"] == "tsf"
+    assert wireless[1]["offset_pairs"] == 12
+    assert wireless[1]["applied_offset_ms"] == pytest.approx(2000.0, abs=1.0)
+
+
+def test_content_filter_alignment_pass_skipped_without_filter(monkeypatch):
+    """필터 없는 다중 무선은 pass-1(정렬 증거 추출)을 실행하지 않는다."""
+    align_calls = []
+
+    def _extract_alignment(path, **kw):
+        align_calls.append(path)
+        return []
+
+    frames_by_path = {FILE_W1: _w1_frames(), FILE_W2: _w2_frames()}
+
+    def _extract(path, **kw):
+        return frames_by_path[path]
+
+    monkeypatch.setattr(pipeline, "extract_alignment_beacons", _extract_alignment)
+    monkeypatch.setattr(pipeline, "extract_frames", _extract)
+    monkeypatch.setattr(pipeline, "detect_tshark_version",
+                        lambda *a, **kw: {"version": "test", "path": "tshark"})
+    monkeypatch.setattr(config, "detect_tshark", lambda: "tshark")
+    monkeypatch.setattr(os.path, "getsize", lambda *a, **kw: 1000)
+
+    pipeline.run_analysis(FILE_W1, wireless_paths=[FILE_W2])
+
+    assert align_calls == []
+
+
+def test_content_filter_alignment_pass_skipped_for_single_wireless(monkeypatch):
+    """단일 무선은 내용 필터가 있어도 pass-1을 실행하지 않는다(비교 대상 스큐 없음)."""
+    align_calls = []
+
+    def _extract_alignment(path, **kw):
+        align_calls.append(path)
+        return []
+
+    def _extract(path, **kw):
+        return _w1_frames()
+
+    monkeypatch.setattr(pipeline, "extract_alignment_beacons", _extract_alignment)
+    monkeypatch.setattr(pipeline, "extract_frames", _extract)
+    monkeypatch.setattr(pipeline, "detect_tshark_version",
+                        lambda *a, **kw: {"version": "test", "path": "tshark"})
+    monkeypatch.setattr(config, "detect_tshark", lambda: "tshark")
+    monkeypatch.setattr(os.path, "getsize", lambda *a, **kw: 1000)
+
+    pipeline.run_analysis(FILE_W1, mac_filter=STA1)
+
+    assert align_calls == []
 
 
 def test_wired_gt_composes_with_multi_wireless(monkeypatch):

@@ -1,6 +1,7 @@
 """routes/upload.py 보강 커버리지 — 진행률, 취소, 업로드 분기, prune 동작."""
 import threading
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -32,6 +33,33 @@ def _make_job(active: bool = True, msg: str = "분석 중", pct: int = 10, creat
         "cancel": threading.Event(),
         "tmp": "",
     }
+
+
+class TestCleanupTmps:
+    def test_continues_after_individual_unlink_failure(self, tmp_path, monkeypatch):
+        """한 경로의 unlink가 raise(예: Windows 파일 잠금)해도 나머지 경로는
+        계속 정리돼야 한다 — 감싸지 않으면 첫 실패에서 예외가 전파돼 그 뒤
+        경로 전부가 누수된다(PR #23 리뷰 2라운드 Finding C)."""
+        p1 = tmp_path / "a.pcap"
+        p2 = tmp_path / "b.pcap"
+        p3 = tmp_path / "c.pcap"
+        for p in (p1, p2, p3):
+            p.write_bytes(b"x")
+
+        original_unlink = Path.unlink
+
+        def _flaky_unlink(self, missing_ok=False):
+            if self == p1:
+                raise OSError("simulated lock")
+            return original_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", _flaky_unlink)
+
+        upload_module._cleanup_tmps(str(p1), str(p2), str(p3))
+
+        assert p1.exists()      # 잠금 실패 — 그대로 남음(예외는 흡수)
+        assert not p2.exists()  # 첫 실패 이후에도 계속 정리됨
+        assert not p3.exists()
 
 
 class TestIndexCorruptJson:

@@ -71,6 +71,21 @@ def test_representative_prefers_decoded_arp_without_ip():
     assert kept.arp_opcode == "2" and kept.source == "w2"
 
 
+def test_representative_prefers_more_decoded_fields():
+    """복호화 지표를 bool 동률로만 판정하면(1라운드 수정) 부분적으로만 복호화된
+    사본(ip_src만)이 더 많은 필드를 보존한 완전한 사본(ip_src+icmp_type)을
+    "이른 epoch" 동률 규칙으로 이길 수 있다 — 개수가 많은 쪽이 이겨야 한다
+    (PR #23 리뷰 2라운드 Finding D)."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, seq="100",
+                              ip_src="10.0.0.1"))                                  # 부분 복호화(선행, 이른 epoch)
+    b = _src("w2", make_frame(number=1, epoch=1000.030, seq="100",
+                              ip_src="10.0.0.1", ip_dst="10.0.0.2", icmp_type="8"))  # 완전 복호화(더 늦음)
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+    kept = r.frames[0]
+    assert kept.icmp_type == "8" and kept.source == "w2"
+
+
 def test_representative_tie_earlier_epoch():
     a = _src("w1", make_frame(number=1, epoch=1000.000, seq="100", ip_src="10.0.0.1"))
     b = _src("w2", make_frame(number=1, epoch=1000.030, seq="100", ip_src="10.0.0.1"))
@@ -94,6 +109,35 @@ def test_offset_applied_before_dedup():
     # 비콘 12쌍 + 데이터 1쌍 전부 dedup → 13
     assert r.stats["duplicates"] == 13
     assert len(r.frames) == 13
+
+
+def test_offset_applied_regenerates_non_reference_timestamp():
+    """오프셋이 적용된 비-기준 소스는 timestamp 문자열도 보정 epoch로 재생성돼야
+    한다 — epoch만 보정하고 timestamp를 원본(다른 시계 도메인)으로 남겨두면
+    overview 시작/종료·evidence 표에 두 시계가 섞여 표시된다(PR #23 리뷰
+    2라운드 Finding B)."""
+    import datetime as dt
+
+    beac_a = [make_frame(number=i + 10, epoch=1000.0 + i * 0.1024, subtype="8", ta=AP1,
+                         bssid=AP1, tsf=str(500_000 + i * 102400)) for i in range(12)]
+    beac_b = [make_frame(number=i + 10, epoch=998.0 + i * 0.1024, subtype="8", ta=AP1,
+                         bssid=AP1, tsf=str(500_000 + i * 102400)) for i in range(12)]
+    extra_b = make_frame(number=99, epoch=998.5, seq="777", subtype="40")
+    original_ref_ts = beac_a[0].timestamp
+    original_b_ts = extra_b.timestamp
+
+    a = _src("w1", *beac_a)
+    b = _src("w2", *(beac_b + [extra_b]))
+    merge_captures(_pair([("w1", a), ("w2", b)]))
+
+    assert beac_a[0].timestamp == original_ref_ts  # 기준(offset 0) 소스는 원본 유지
+    assert extra_b.timestamp != original_b_ts       # 비-기준 소스는 재생성됨
+
+    expected = dt.datetime.fromtimestamp(extra_b.epoch).strftime("%Y-%m-%d %H:%M:%S.%f")
+    assert extra_b.timestamp == expected
+    # Frame.time_short 파싱 규칙(공백 분리 파트 중 콜론2+점 포함, 15자)과 호환.
+    assert len(extra_b.time_short) == 15
+    assert extra_b.time_short == expected.split(" ")[1]
 
 
 def test_control_frame_approx_dedup():

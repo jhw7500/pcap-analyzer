@@ -161,10 +161,21 @@ async def _save_pcap_upload(file: UploadFile):
 
 
 def _cleanup_tmps(*paths: str) -> None:
-    """주어진 임시 경로들을 모두 unlink(존재하지 않아도 무시). 빈 문자열은 skip."""
+    """주어진 임시 경로들을 모두 unlink 시도(존재하지 않아도 무시). 빈 문자열은 skip.
+
+    경로 하나의 unlink가 raise(예: Windows에서 백신/인덱서가 파일을 잠금)해도
+    나머지 경로는 계속 정리한다 — try/except 없이 순회하면 첫 실패에서 예외가
+    전파돼 그 뒤 경로들이 전부 누수된다(PR #23 리뷰 2라운드 Finding C).
+    missing_ok=True는 "이미 없는 파일"만 안전하게 무시할 뿐 "존재하는데
+    잠긴 파일"의 OSError는 그대로 던지므로 별도로 흡수해야 한다.
+    """
     for p in paths:
-        if p:
+        if not p:
+            continue
+        try:
             Path(p).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 @router.post("/api/upload")

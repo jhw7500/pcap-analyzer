@@ -1,7 +1,9 @@
 """merge.estimate_offset — 비콘 TSF 교차 매칭 오프셋 추정."""
+from collections import OrderedDict
+
 import pytest
 
-from analyzer.core.merge import estimate_offset
+from analyzer.core.merge import estimate_offset, merge_captures, _tsf_table
 from tests.conftest import make_frame
 
 AP = "00:80:4c:e1:09:cb"
@@ -108,3 +110,58 @@ def test_seq_fallback_ref_occurrence_not_reused():
     r = estimate_offset(ref, other)
     assert r.method == "seq-fallback"
     assert r.pairs == 10  # 9(기본) + 1(근접만) — 먼 쪽은 재사용 금지로 미매칭
+
+
+def test_tsf_table_excludes_ambiguous_duplicate_key():
+    """같은 캡처 안에서 (bssid, tsf)가 서로 다른 epoch로 두 번 등장하면 어느
+    쪽이 진짜인지 알 수 없으므로 테이블에서 완전히 제외해야 한다 — 마지막
+    값으로 덮어쓰면(수정 전) 잘못된 epoch가 매칭에 섞인다(PR #23 리뷰
+    2라운드 Finding E-1)."""
+    frames = [
+        make_frame(number=1, epoch=1000.0, subtype="8", ta=AP, bssid=AP, tsf="999999"),
+        make_frame(number=2, epoch=1050.0, subtype="8", ta=AP, bssid=AP, tsf="999999"),  # 같은 키, 다른 epoch(모호)
+        make_frame(number=3, epoch=1001.0, subtype="8", ta=AP, bssid=AP, tsf="111111"),  # 정상 단독 키
+    ]
+    table = _tsf_table(frames)
+    assert (AP, 999999) not in table
+    assert table[(AP, 111111)] == 1001.0
+
+
+def test_merge_captures_prefers_alignment_sources_for_offset():
+    """alignment_sources가 주어지면 본 sources(content_*)에 비콘이 하나도
+    없어도 그 정렬 증거로 TSF 오프셋을 추정해야 한다 — 내용 필터로 본
+    프레임에서 비콘이 사라진 상황을 재현한다(PR #23 리뷰 2라운드 Finding A)."""
+    align_w1 = _beacons(1000.0, 100_000, 12, "w1")
+    align_w2 = _beacons(998.0, 100_000, 12, "w2")  # +2.0s
+
+    content_w1 = [make_frame(number=1, epoch=1001.0, seq="200", subtype="40", source="w1")]
+    content_w2 = [make_frame(number=1, epoch=999.005, seq="200", subtype="40", source="w2")]
+
+    mr = merge_captures(
+        OrderedDict([("w1", content_w1), ("w2", content_w2)]),
+        alignment_sources=OrderedDict([("w1", align_w1), ("w2", align_w2)]),
+    )
+    assert mr.offsets["w2"].method == "tsf"
+    assert mr.offsets["w2"].pairs == 12
+    assert mr.offsets["w2"].offset_sec == pytest.approx(2.0, abs=0.001)
+    # 본 sources(content_w2)에도 보정이 적용돼야 한다.
+    assert content_w2[0].epoch == pytest.approx(1001.005, abs=0.001)
+
+
+def test_merge_captures_falls_back_to_main_frames_when_alignment_insufficient():
+    """정렬 증거로도 TSF 매칭이 부족하면(극단적으로 비콘 자체가 적은 캡처)
+    본 sources 프레임 기준으로 2차 시도(seq 폴백 포함)한다."""
+    align_w1 = _beacons(1000.0, 100_000, 3, "w1")  # 10쌍 미만 — tsf 실패
+    align_w2 = _beacons(998.0, 100_000, 3, "w2")
+
+    content_w1 = [make_frame(number=i + 1, epoch=1000.0 + i, seq=str(100 + i),
+                             subtype="40", source="w1") for i in range(10)]
+    content_w2 = [make_frame(number=i + 1, epoch=999.7 + i, seq=str(100 + i),
+                             subtype="40", source="w2") for i in range(10)]
+
+    mr = merge_captures(
+        OrderedDict([("w1", content_w1), ("w2", content_w2)]),
+        alignment_sources=OrderedDict([("w1", align_w1), ("w2", align_w2)]),
+    )
+    assert mr.offsets["w2"].method == "seq-fallback"
+    assert mr.offsets["w2"].offset_sec == pytest.approx(0.3, abs=0.001)

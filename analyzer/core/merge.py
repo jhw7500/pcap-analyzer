@@ -9,10 +9,11 @@ IQR 3.4ms — 사전 timesync 보정 없이도 무선 간 정렬이 가능함을
 TSF 폴백((TA, seq, subtype) 매칭)은 ±5초 창을 쓰므로 사전 보정된 입력을
 전제한다(스펙 §3). 그것도 실패하면 오프셋 0 + 경고.
 """
+import datetime as dt
 import statistics
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .models import Frame
 
@@ -34,14 +35,29 @@ class OffsetResult:
 
 
 def _tsf_table(frames: List[Frame]) -> Dict[Tuple[str, int], float]:
+    """(BSSID, TSF) → epoch 매핑.
+
+    같은 캡처 안에서 같은 키가 서로 다른 epoch로 두 번 이상 등장하면 어느
+    발생이 진짜 짝인지 알 수 없다 — 마지막 값으로 덮어쓰면(기존 동작) 잘못된
+    epoch가 섞여 오프셋 중앙값을 오염시킬 수 있다. 재등장한 키는 테이블에서
+    아예 제외해 모호한 매칭을 원천 차단한다(PR #23 리뷰 2라운드 Finding E-1).
+    """
     out: Dict[Tuple[str, int], float] = {}
+    dupes: set = set()
     for f in frames:
         if f.subtype != "8" or not f.bssid or not f.tsf:
             continue
         try:
-            out[(f.bssid, int(f.tsf))] = f.epoch
+            key = (f.bssid, int(f.tsf))
         except ValueError:
             continue  # 비정상 TSF 값은 무시
+        if key in dupes:
+            continue
+        if key in out:
+            del out[key]
+            dupes.add(key)
+            continue
+        out[key] = f.epoch
     return out
 
 
@@ -126,27 +142,32 @@ def _dedup_key(f: Frame) -> Tuple:
     return ("c", f.subtype, f.ta or f.ra, f.retry)
 
 
-def _decoded_score(f: Frame) -> bool:
-    """프레임이 복호화됐다는 지표 — ip_src(IP 페이로드) · arp_opcode(ARP) ·
-    icmp_type(ICMP) · eapol_msgnr(EAPOL 4-way) 중 하나라도 채워져 있으면 True.
+def _decoded_score(f: Frame) -> int:
+    """프레임이 복호화됐다는 지표를 **개수**로 센다 — ip_src(IP 페이로드) ·
+    arp_opcode(ARP) · icmp_type(ICMP) · eapol_msgnr(EAPOL 4-way) · tcp_flags
+    (TCP) 중 채워진 필드 수.
 
-    ip_src만 보면 복호화된 ARP(암호화가 풀렸지만 IP 페이로드가 아니라 arp_opcode만
-    채워짐)가 이른 암호화 사본에 져서 arp_opcode·프로토콜 정보가 소실된다 —
-    제어 트래픽·evidence 분석에서 ARP 이벤트가 누락된다(PR #23 리뷰 Finding D).
+    bool로만 판정하면(1라운드 수정) 지표가 하나라도 있는 두 사본이 항상
+    동률로 취급돼, 필드를 더 많이 보존한 완전한 사본(예: ip_src+icmp_type)이
+    부분적으로만 복호화된 사본(예: ip_src만)에 "이른 epoch" 동률 규칙으로 질
+    수 있다 — 더 많은 정보를 보존한 사본이 대표가 돼야 한다(PR #23 리뷰
+    2라운드 Finding D).
     """
-    return bool(f.ip_src or f.arp_opcode or f.icmp_type or f.eapol_msgnr)
+    return sum(
+        bool(x) for x in (f.ip_src, f.arp_opcode, f.icmp_type, f.eapol_msgnr, f.tcp_flags)
+    )
 
 
 def _prefer_new_representative(rep: Frame, candidate: Frame) -> bool:
-    """대표 교체 여부 판정: 복호화 지표(_decoded_score)가 있는 쪽 우선, 동률이면
-    이른 epoch 우선.
+    """대표 교체 여부 판정: 복호화 지표(_decoded_score) 점수가 높은 쪽 우선,
+    동률이면 이른 epoch 우선.
 
     실측 근거: DFK 캡처는 완전 암호화(ICMP 0건)라 "먼저 잡힌 쪽"을 그대로 대표로
     쓰면 ping 분석에 쓸 IP 필드가 소실된다 — 복호화된 사본이 있으면 그쪽을 대표로.
     """
-    rep_decoded, cand_decoded = _decoded_score(rep), _decoded_score(candidate)
-    if cand_decoded != rep_decoded:
-        return cand_decoded
+    rep_score, cand_score = _decoded_score(rep), _decoded_score(candidate)
+    if cand_score != rep_score:
+        return cand_score > rep_score
     return candidate.epoch < rep.epoch
 
 
@@ -198,25 +219,65 @@ class _MatchIndex:
         return False
 
 
-def merge_captures(sources: "OrderedDict[str, List[Frame]]") -> MergeResult:
+def _format_corrected_timestamp(epoch: float) -> str:
+    """보정된 epoch를 로컬 타임존 timestamp 문자열로 재생성.
+
+    tshark 원본 timestamp 포맷(요일·타임존 약어 포함 등)과는 다르지만, 이
+    문자열의 유일한 계약은 자기 일관성(캡처 내에서 시각 표기가 실제 epoch와
+    맞아야 함)과 `Frame.time_short`가 파싱하는 규칙(공백으로 나눈 파트 중
+    콜론 2개+점을 포함하는 것)과의 호환이다 — "%H:%M:%S.%f"는 정확히 15자라
+    `time_short`의 `part[:15]` 슬라이스와도 일치한다(테스트로 고정).
+    """
+    return dt.datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+def merge_captures(
+    sources: "OrderedDict[str, List[Frame]]",
+    alignment_sources: Optional["OrderedDict[str, List[Frame]]"] = None,
+) -> MergeResult:
     """다중 캡처를 시계 정렬 후 dedup·재번호해 단일 타임라인으로 병합한다.
 
     sources: 태그 → 프레임 리스트(OrderedDict). 첫 항목이 기준(w1) — 나머지는
     이 기준에 대해 estimate_offset으로 보정된다. 각 Frame.source는 이미 태깅됨.
+
+    alignment_sources: 주어지면(sources와 동일 태그 체계) 오프셋 추정을 이
+    프레임 집합으로 **우선** 수행한다 — pipeline.py가 mac_filter/ip_filter
+    없이 비콘만 뽑은 별도 추출 결과(정렬 증거 전용)를 넘긴다. 내용 필터가
+    걸린 본 sources는 STA mac_filter(비콘엔 STA 주소 없음)·ip_filter(비콘엔
+    IP 없음)로 비콘이 통째로 사라질 수 있어, 그 상태로 오프셋을 추정하면
+    TSF 매칭이 실패하고 ±5초 폴백도 183초 스큐엔 무력하다(PR #23 리뷰
+    2라운드 Finding A). 정렬 증거로도 tsf 매칭이 부족하면(극히 드묾 — 비콘
+    자체가 원래 적은 캡처) 본 sources 프레임 기준으로 2차 시도한다(seq
+    폴백 포함 — 정렬 증거는 비콘 전용이라 seq 매칭에 쓸 데이터가 없다).
+    None이면(기본) 기존처럼 sources로 직접 추정한다.
     """
     tags = list(sources.keys())
     reference_tag = tags[0]
     reference = sources[reference_tag]
+    align_reference = alignment_sources.get(reference_tag) if alignment_sources else None
 
     offsets: Dict[str, OffsetResult] = {}
     warnings: List[str] = []
     for tag in tags[1:]:
         frames = sources[tag]
-        result = estimate_offset(reference, frames)
+        align_frames = alignment_sources.get(tag) if alignment_sources else None
+        if align_reference and align_frames:
+            result = estimate_offset(align_reference, align_frames)
+            if result.method != "tsf":
+                result = estimate_offset(reference, frames)
+        else:
+            result = estimate_offset(reference, frames)
         offsets[tag] = result
-        # epoch만 보정해 통합 타임라인을 만든다 — timestamp 문자열은 원본 그대로 둔다.
-        for f in frames:
-            f.epoch += result.offset_sec
+        # epoch를 보정해 통합 타임라인을 만든다. 오프셋이 0이 아닌 소스는
+        # timestamp 문자열도 보정 epoch로 재생성한다 — overview 시작/종료·
+        # evidence 표가 timestamp 문자열을 그대로 쓰므로, epoch만 보정하고
+        # timestamp를 원본(다른 시계 도메인)으로 남겨두면 두 시계가 섞여
+        # 표시된다(PR #23 리뷰 2라운드 Finding B). 기준(offset 0) 소스는
+        # 항상 원본 timestamp를 유지한다.
+        if result.offset_sec:
+            for f in frames:
+                f.epoch += result.offset_sec
+                f.timestamp = _format_corrected_timestamp(f.epoch)
         warnings.extend(result.warnings)
         if result.method == "none":
             warnings.append(f"{tag}: 오프셋 추정 실패 — 원시 시계 그대로 병합됨")

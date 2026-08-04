@@ -6,7 +6,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from .core.extractor import extract_frames, detect_tshark_version
+from .core.extractor import extract_frames, extract_alignment_beacons, detect_tshark_version
 from .core.channels import ap_channel_map
 from .core.detector import detect_roles
 from .core.indexer import FrameIndex
@@ -176,6 +176,19 @@ def run_analysis(
     extract_time_start = "" if defer_time_window else time_start
     extract_time_end = "" if defer_time_window else time_end
 
+    # 다중 무선 + 내용 필터(mac_filter/ip_filter): 본 추출(pass-2, 아래)에
+    # 걸리는 이 필터들은 비콘을 통째로 지울 수 있다 — STA mac_filter는
+    # 비콘에 STA 주소가 없어서, ip_filter는 비콘에 IP가 없어서 매칭되지
+    # 않는다. 비콘이 사라지면 merge.py의 TSF 정렬 증거가 없어지고 ±5초 seq
+    # 폴백도 큰 스큐(실측 183초)엔 무력하다(PR #23 리뷰 2라운드 Finding A).
+    # 이때만 pass-1로 각 무선 파일의 비콘을 필터 없이 따로 뽑아
+    # merge_captures(alignment_sources=...)의 오프셋 추정 전용 입력으로
+    # 쓴다. 단일 무선은 비교 대상 스큐가 없어 정렬 자체가 불필요하므로 제외.
+    need_alignment_pass = multi_wireless and bool(mac_filter or ip_filter)
+    alignment_sources: Optional["OrderedDict[str, list]"] = (
+        OrderedDict() if need_alignment_pass else None
+    )
+
     per_source: "OrderedDict[str, list]" = OrderedDict()
     wireless_sources: List[Dict[str, Any]] = []
     for i, (path, tag) in enumerate(zip(paths, tags)):
@@ -184,6 +197,15 @@ def run_analysis(
         if len(paths) > 1:
             _progress(f"tshark로 프레임 추출 중... ({i + 1}/{len(paths)})",
                       10 + int(18 * i / len(paths)))
+        if need_alignment_pass:
+            align_frames = extract_alignment_beacons(
+                path, tshark_path=_tshark_path, cancel_event=cancel_event,
+            )
+            for f in align_frames:
+                f.source = tag
+            alignment_sources[tag] = align_frames
+            if _cancelled():
+                return {"cancelled": True}
         file_frames = extract_frames(
             path,
             wpa_passphrase=passphrase,
@@ -221,10 +243,18 @@ def run_analysis(
     # 아예 호출하지 않아 기존 파이프라인과 완전히 동일한 결과를 낸다(하위 호환).
     merge_summary: Optional[Dict[str, Any]] = None
     if len(per_source) > 1:
-        mr = merge_captures(per_source)
+        mr = merge_captures(per_source, alignment_sources=alignment_sources)
         frames = mr.frames
         reference_tag = next(iter(per_source))
+        # mr.warnings는 merge_captures가 tags[1:]를 같은 순서로 순회하며 소스별
+        # (off.warnings + "none"이면 tag별 문구) 블록을 이어 붙인 것이다 — 아래
+        # 루프도 정확히 같은 소스 순서·같은 구성으로 tag_warnings를 재구성하므로,
+        # 문자열 값으로 remove()하지 않고 소비한 길이만큼 앞에서 잘라낸다. 값
+        # 기반 remove()는 여러 소스가 동일한 경고 문자열(예: "none" 공통 문구)을
+        # 낼 때 어떤 소스의 몫을 지우는지 보장이 없어 오귀속 위험이 있었다
+        # (PR #23 리뷰 2라운드 Finding E-2).
         remaining_warnings = list(mr.warnings)
+        consumed = 0
         for tag, src_entry in zip(tags, wireless_sources):
             if tag not in per_source:
                 continue
@@ -239,10 +269,9 @@ def run_analysis(
             tag_warnings = list(off.warnings)
             if off.method == "none":
                 tag_warnings.append(f"{tag}: 오프셋 추정 실패 — 원시 시계 그대로 병합됨")
-            for w in tag_warnings:
-                if w in remaining_warnings:
-                    remaining_warnings.remove(w)
+            consumed += len(tag_warnings)
             src_entry["warnings"] = src_entry["warnings"] + tag_warnings
+        remaining_warnings = remaining_warnings[consumed:]
         # 소스별로 귀속되지 않은 나머지 경고(향후 일반 경고 확장 대비)는 기준(w1)에 붙인다.
         if remaining_warnings:
             wireless_sources[0]["warnings"] = wireless_sources[0]["warnings"] + remaining_warnings
