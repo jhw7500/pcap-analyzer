@@ -121,7 +121,14 @@ async def get_progress_latest():
 
 
 async def _save_pcap_upload(file: UploadFile):
-    """업로드 파일 검증·임시 저장. 반환 (tmp_path, error_response) — 하나만 non-None."""
+    """업로드 파일 검증·임시 저장. 반환 (tmp_path, error_response) — 하나만 non-None.
+
+    계약(PR #23 리뷰 8라운드 Finding B — 호출부가 재확인할 필요 없도록 명시):
+    에러 응답(두 번째 원소가 non-None)으로 반환할 때는 **이 함수가 자신이
+    만든 tmp를 이미 정리(unlink)한 뒤**다 — 그 경로는 첫 번째 원소로 항상
+    `None`을 반환하므로 호출부가 그 tmp를 별도로 지울 필요가 없다(지우려
+    해도 `None`이라 지울 대상이 없다).
+    """
     name = file.filename or "unknown.pcap"
     if not name.endswith((".pcap", ".pcapng", ".cap")):
         return None, JSONResponse(error_payload(ErrorCode.INVALID_EXT), status_code=400)
@@ -217,7 +224,11 @@ async def upload_pcap(
             _cleanup_tmps(tmp_name, *wireless_tmps)
             raise
         if werr is not None:
-            _cleanup_tmps(tmp_name, *wireless_tmps)
+            # wtmp는 _save_pcap_upload의 계약상(위 docstring) 이미 None이지만
+            # (에러 반환 시 자체 tmp를 self-clean함), 방어적으로 함께 넘긴다 —
+            # _cleanup_tmps는 falsy 값을 조용히 skip하므로 무해하다(PR #23
+            # 리뷰 8라운드 Finding B).
+            _cleanup_tmps(tmp_name, wtmp, *wireless_tmps)
             return werr
         wireless_tmps.append(wtmp)
         wireless_names.append(wf.filename)

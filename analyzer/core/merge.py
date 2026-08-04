@@ -166,6 +166,13 @@ def estimate_offset(reference: List[Frame], other: List[Frame]) -> OffsetResult:
 @dataclass
 class MergeResult:
     frames: List[Frame]                 # 통합·정렬·재번호된 리스트 (기존 파이프라인 입력)
+    # 계약(TL;DR, PR #23 리뷰 8라운드 Finding C — 3단계 착수자용, 아래 상세
+    # 설명과 중복되더라도 필드 선언부에서 바로 보이는 게 목적): 이 Frame
+    # 객체들은 `frames`(대표로 뽑힌 그룹)와 **인스턴스를 공유**하고
+    # `_merge_decoded_fields` 등에 의해 **in-place로 변경**될 수 있다 — 그
+    # 소스만의 순수 원본이 필요하면 `merge_captures` 호출 **전에** 프레임을
+    # `copy.deepcopy`로 스냅샷 떠 두어라.
+    #
     # 소스별 원본(epoch 보정됨) — 3단계용. 여기 담긴 Frame 객체는 `frames`
     # (대표로 뽑힌 그룹)와 **동일 인스턴스를 공유**한다 — 이 공유가 두 가지
     # 결과를 낳는다:
@@ -427,6 +434,24 @@ def _format_corrected_timestamp(epoch: float) -> str:
     맞아야 함)과 `Frame.time_short`가 파싱하는 규칙(공백으로 나눈 파트 중
     콜론 2개+점을 포함하는 것)과의 호환이다 — "%H:%M:%S.%f"는 정확히 15자라
     `time_short`의 `part[:15]` 슬라이스와도 일치한다(테스트로 고정).
+
+    `dt.datetime.fromtimestamp`는 **호스트**(분석을 실행하는 서버)의 로컬
+    타임존을 쓴다 — KST 개발 환경/UTC 배포 환경처럼 호스트 tz가 다르면
+    표시 시각이 몇 시간 어긋나 보일 수 있다는 우려가 있었다(PR #23 리뷰
+    8라운드 Finding A, HIGH로 제기). 검토 결과 **옵션 B(로컬 유지)를
+    채택**한다 — 자기 일관성은 어느 호스트에서든 항상 성립하기 때문이다:
+    기준(offset 0) 소스의 timestamp 문자열도 tshark의 `frame.time`이
+    "같은 분석 호스트"의 로컬 tz로 렌더한 값이므로, 이 함수가 만드는
+    비-기준 소스의 timestamp와 항상 **같은 tz 도메인**을 공유한다 — 두
+    문자열을 나란히 비교(예: overview 시작/종료, evidence 표)해도 서로
+    어긋나지 않는다. "캡처지 tz ≠ 분석 호스트 tz"일 때 전체 타임스탬프가
+    (기준·비기준 구분 없이) 일괄 이동해 보이는 것은 pcap 애초의 tshark
+    렌더 자체가 갖는 기존 특성(1단계 이전부터, PR #23 이전부터)이지 이
+    함수가 새로 만든 문제가 아니다.
+    TODO(후속): 분석 호스트 tz가 캡처지 tz와 다른 배포(예: UTC 서버로
+    KST 촬영 pcap 분석)에서 사용자에게 표시 tz를 선택하게 하는 옵션화를
+    검토할 것 — 이 함수의 로컬 범위를 넘는 전역 표시 정책 변경이라 별도
+    스코프로 미룬다.
     """
     return dt.datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M:%S.%f")
 

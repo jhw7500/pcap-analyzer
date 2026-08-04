@@ -17,8 +17,8 @@ wlan.seq(Dot11.SC 필드)는 모든 프레임에 명시 설정한다 — TSF 폴
 merge.py의 dedup 키((TA, seq, subtype, retry))가 A/B의 "같은 물리 프레임"을
 정확히 매칭하도록 하기 위함.
 
-실행:
-    python3 /home/jhw/ai/opencode/projects/pcap-analyzer/tests/fixtures/generate_sample_dual.py
+실행(저장소 루트에서):
+    python3 tests/fixtures/generate_sample_dual.py
 결과:
     sample_dual_a.pcap, sample_dual_b.pcap (각각 작은 크기)
 """
