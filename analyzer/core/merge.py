@@ -59,20 +59,41 @@ def estimate_offset(reference: List[Frame], other: List[Frame]) -> OffsetResult:
         med, iqr = _median_iqr([ref_t[k] - oth_t[k] for k in common])
         return OffsetResult(med, "tsf", len(common), iqr)
 
-    # 폴백: (TA, seq, subtype) 매칭 — 사전 보정 전제의 ±5초 창
+    # 폴백: (TA, seq, subtype) 매칭 — 사전 보정 전제의 ±5초 창. seq는 랩어라운드
+    # (12비트, 4096마다 재사용)되므로 같은 키가 창 안에 두 번 이상 등장할 수
+    # 있다 — 창 안 첫 후보를 그대로 취하면(최선착) 더 먼 쪽에 잘못 걸려 실제
+    # 오프셋이 몇 초 어긋난 값으로 붕괴할 수 있다. 키별로 (ref 발생, other
+    # 프레임) 후보 쌍을 모아 |diff| 최근접 순으로 그리디 매칭하고, 매칭된 ref
+    # 발생·other 프레임은 각각 한 번만 소비한다(1:1 — PR #23 리뷰 Finding C).
     ref_keys: Dict[Tuple[str, str, str], List[float]] = {}
     for f in reference:
         if f.ta and f.seq:
             ref_keys.setdefault((f.ta, f.seq, f.subtype), []).append(f.epoch)
-    diffs: List[float] = []
+    other_keys: Dict[Tuple[str, str, str], List[Frame]] = {}
     for f in other:
-        if not (f.ta and f.seq):
+        if f.ta and f.seq:
+            other_keys.setdefault((f.ta, f.seq, f.subtype), []).append(f)
+
+    diffs: List[float] = []
+    for key, other_frames in other_keys.items():
+        ref_epochs = ref_keys.get(key)
+        if not ref_epochs:
             continue
-        for ref_epoch in ref_keys.get((f.ta, f.seq, f.subtype), []):
-            d = ref_epoch - f.epoch
-            if abs(d) <= FALLBACK_MATCH_WINDOW_SEC:
-                diffs.append(d)
-                break
+        candidates = []
+        for ri, ref_epoch in enumerate(ref_epochs):
+            for oi, of in enumerate(other_frames):
+                d = ref_epoch - of.epoch
+                if abs(d) <= FALLBACK_MATCH_WINDOW_SEC:
+                    candidates.append((abs(d), ri, oi, d))
+        candidates.sort(key=lambda c: c[0])
+        used_ref: set = set()
+        used_other: set = set()
+        for _, ri, oi, d in candidates:
+            if ri in used_ref or oi in used_other:
+                continue
+            used_ref.add(ri)
+            used_other.add(oi)
+            diffs.append(d)
     if len(diffs) >= MERGE_MIN_TSF_PAIRS:
         med, iqr = _median_iqr(diffs)
         return OffsetResult(med, "seq-fallback", len(diffs), iqr)
@@ -105,15 +126,27 @@ def _dedup_key(f: Frame) -> Tuple:
     return ("c", f.subtype, f.ta or f.ra, f.retry)
 
 
+def _decoded_score(f: Frame) -> bool:
+    """프레임이 복호화됐다는 지표 — ip_src(IP 페이로드) · arp_opcode(ARP) ·
+    icmp_type(ICMP) · eapol_msgnr(EAPOL 4-way) 중 하나라도 채워져 있으면 True.
+
+    ip_src만 보면 복호화된 ARP(암호화가 풀렸지만 IP 페이로드가 아니라 arp_opcode만
+    채워짐)가 이른 암호화 사본에 져서 arp_opcode·프로토콜 정보가 소실된다 —
+    제어 트래픽·evidence 분석에서 ARP 이벤트가 누락된다(PR #23 리뷰 Finding D).
+    """
+    return bool(f.ip_src or f.arp_opcode or f.icmp_type or f.eapol_msgnr)
+
+
 def _prefer_new_representative(rep: Frame, candidate: Frame) -> bool:
-    """대표 교체 여부 판정: ip_src가 채워진 쪽 우선, 동률이면 이른 epoch 우선.
+    """대표 교체 여부 판정: 복호화 지표(_decoded_score)가 있는 쪽 우선, 동률이면
+    이른 epoch 우선.
 
     실측 근거: DFK 캡처는 완전 암호화(ICMP 0건)라 "먼저 잡힌 쪽"을 그대로 대표로
     쓰면 ping 분석에 쓸 IP 필드가 소실된다 — 복호화된 사본이 있으면 그쪽을 대표로.
     """
-    rep_has_ip, cand_has_ip = bool(rep.ip_src), bool(candidate.ip_src)
-    if cand_has_ip != rep_has_ip:
-        return cand_has_ip
+    rep_decoded, cand_decoded = _decoded_score(rep), _decoded_score(candidate)
+    if cand_decoded != rep_decoded:
+        return cand_decoded
     return candidate.epoch < rep.epoch
 
 

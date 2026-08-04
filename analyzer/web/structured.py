@@ -8,6 +8,7 @@ from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional
 
 from ..core.channels import ap_channel_map, freq_to_band, freq_to_channel, parse_freq
+from ..core.merge import MergeResult
 from ..core.models import Frame
 from ..core.ping_matching import (
     PING_MATCH_WINDOW_SEC,
@@ -49,6 +50,24 @@ def is_special_ip(ip: str) -> bool:
     except (ValueError, IndexError):
         pass
     return False
+
+
+def _structured_merge(mr: MergeResult) -> Dict[str, Any]:
+    """merge_captures 결과를 프론트향 merge 요약 스키마(structured["merge"])로 변환.
+
+    AGENTS.md상 pipeline.py는 오케스트레이션 전용이고 구조화 스키마 생성은 이
+    모듈 소관이라 pipeline.py에서 옮겨왔다(PR #23 리뷰 Finding B). mr.stats는
+    항상 **시간 창 적용 전** 값이다 — 시계 정렬·dedup은 창과 무관하게 전체
+    구간 기준으로 수행되고(PR #23 리뷰 Finding A), 창은 정렬된 프레임 목록에만
+    사후 적용되므로 이 요약도 그 전체 기준 kept/duplicates/coverage를 그대로
+    보여준다(창 이후 재계산 아님).
+    """
+    return {
+        "window_ms": mr.stats["window_ms"],
+        "duplicates": mr.stats["duplicates"],
+        "kept": mr.stats["kept"],
+        "coverage": mr.stats["coverage"],
+    }
 
 
 def _structured_overview(

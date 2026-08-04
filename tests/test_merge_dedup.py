@@ -58,6 +58,19 @@ def test_representative_prefers_decoded_copy():
     assert kept.ip_src == "10.0.0.1" and kept.source == "w2"
 
 
+def test_representative_prefers_decoded_arp_without_ip():
+    """복호화된 ARP(ip_src 없음, arp_opcode 있음)가 이른 암호화 사본에 져서
+    arp_opcode·프로토콜 정보가 소실되면 안 된다(PR #23 리뷰 Finding D)."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, seq="100",
+                              ip_src="", arp_opcode=""))          # 암호화 사본(선행)
+    b = _src("w2", make_frame(number=1, epoch=1000.030, seq="100",
+                              ip_src="", arp_opcode="2"))          # 복호화 ARP(응답)
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+    kept = r.frames[0]
+    assert kept.arp_opcode == "2" and kept.source == "w2"
+
+
 def test_representative_tie_earlier_epoch():
     a = _src("w1", make_frame(number=1, epoch=1000.000, seq="100", ip_src="10.0.0.1"))
     b = _src("w2", make_frame(number=1, epoch=1000.030, seq="100", ip_src="10.0.0.1"))

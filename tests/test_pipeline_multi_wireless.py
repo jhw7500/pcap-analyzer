@@ -132,6 +132,109 @@ def test_wireless_file_with_zero_frames_warned_and_skipped(monkeypatch):
     }
 
 
+def _skew_beacons(epoch0):
+    """102.4ms 간격 비콘 12개 — TSF는 두 소스가 공유(교차 매칭용)."""
+    return [make_frame(number=i + 1, epoch=epoch0 + i * 0.1024, subtype="8", ta=AP1,
+                       bssid=AP1, tsf=str(500_000 + i * 102400)) for i in range(12)]
+
+
+def test_time_filter_deferred_until_after_offset_correction(monkeypatch):
+    """다중 무선 + 시간 필터: 필터를 추출 시 그대로 넘기면(버그) 캡처 간 시계
+    스큐만큼 소스마다 다른 구간이 잘려 공통 TSF 비콘이 통째로 사라진다 —
+    수정 후에는 시간 인자 없이 전체를 추출해 정렬·보정한 뒤 보정된 epoch 위에서
+    창을 적용해야 한다(PR #23 리뷰 Finding A)."""
+    full_w1 = _skew_beacons(1000.0)          # 기준(w1)
+    full_w2 = _skew_beacons(998.0)           # w2 원시 시계 -2.0s (보정 후 w1과 동일 grid)
+    # "버그 재현용" 필터된 추출 결과: 같은 벽시계 창을 각자 원시 시계로 자르면
+    # w1/w2가 서로 겹치지 않는 TSF만 남아 공통 비콘이 0건이 된다.
+    cut_w1 = full_w1[0:3]                    # tsf 500000/602400/704800
+    cut_w2 = full_w2[9:12]                   # tsf 1421600/1524000/1626400 (겹침 없음)
+
+    calls = []
+
+    def _extract(path, **kw):
+        calls.append((path, kw.get("time_start", ""), kw.get("time_end", "")))
+        filtered = bool(kw.get("time_start") or kw.get("time_end"))
+        if path == FILE_W1:
+            return cut_w1 if filtered else full_w1
+        return cut_w2 if filtered else full_w2
+
+    monkeypatch.setattr(pipeline, "extract_frames", _extract)
+    monkeypatch.setattr(pipeline, "detect_tshark_version",
+                        lambda *a, **kw: {"version": "test", "path": "tshark"})
+    monkeypatch.setattr(config, "detect_tshark", lambda: "tshark")
+    monkeypatch.setattr(os.path, "getsize", lambda *a, **kw: 1000)
+    # 실제 로컬 타임존 파싱과 무관하게 창 경계를 직접 통제 — 보정된 병합 grid
+    # (1000.0 + i*0.1024)에서 i=1,2,3(1000.1024~1000.3072)만 남도록 잡는다.
+    epoch_map = {"TS": 1000.05, "TE": 1000.35}
+    monkeypatch.setattr(pipeline, "parse_local_epoch", lambda v: epoch_map.get(v))
+
+    result = pipeline.run_analysis(
+        FILE_W1, wireless_paths=[FILE_W2], time_start="TS", time_end="TE",
+    )
+
+    # ① 무선 추출 호출에는 시간 인자가 전달되지 않아야 한다(전체 구간 추출).
+    assert calls == [(FILE_W1, "", ""), (FILE_W2, "", "")]
+
+    # ② 오프셋 추정은 전체(미필터) 비콘 12쌍 기준 tsf 방식으로 정상 성공해야 한다.
+    assert "error" not in result
+    sources = result["structured"]["sources"]
+    wireless = [s for s in sources if s["role"] == "wireless"]
+    assert wireless[1]["offset_method"] == "tsf"
+    assert wireless[1]["offset_pairs"] == 12
+    assert wireless[1]["applied_offset_ms"] == pytest.approx(2000.0, abs=1.0)
+
+    # merge 통계(구조화 스키마)는 창 적용 **전** 값 — 정렬·dedup은 전체 구간 기준.
+    assert result["structured"]["merge"]["kept"] == 12
+    assert result["structured"]["merge"]["duplicates"] == 12
+
+    # ③ 보정된 epoch 위에서 창이 적용된 결과만 최종 frame_count에 남는다.
+    assert result["frame_count"] == 3
+
+
+def test_time_filter_still_passed_through_for_single_wireless(monkeypatch):
+    """단일 무선 경로는 스큐 비교 대상이 없어 기존처럼 추출 시 시간 필터를
+    그대로 tshark에 넘긴다(하위 호환)."""
+    calls = []
+
+    def _extract(path, **kw):
+        calls.append((path, kw.get("time_start", ""), kw.get("time_end", "")))
+        return _w1_frames()
+
+    monkeypatch.setattr(pipeline, "extract_frames", _extract)
+    monkeypatch.setattr(pipeline, "detect_tshark_version",
+                        lambda *a, **kw: {"version": "test", "path": "tshark"})
+    monkeypatch.setattr(config, "detect_tshark", lambda: "tshark")
+    monkeypatch.setattr(os.path, "getsize", lambda *a, **kw: 1000)
+
+    pipeline.run_analysis(FILE_W1, time_start="2026-01-01 00:00:00", time_end="2026-01-01 00:00:10")
+
+    assert calls == [(FILE_W1, "2026-01-01 00:00:00", "2026-01-01 00:00:10")]
+
+
+def test_time_filter_parse_failure_returns_explicit_error(monkeypatch):
+    """다중 무선 + 시간 필터 파싱 실패 — 조용히 전체 구간으로 넘어가지 않고
+    명시적 에러를 반환해야 한다(기존 tshark 필터 방식과 동일한 실패 정책)."""
+    calls = []
+
+    def _extract(path, **kw):
+        calls.append(path)
+        return _w1_frames() if path == FILE_W1 else _w2_frames()
+
+    monkeypatch.setattr(pipeline, "extract_frames", _extract)
+    monkeypatch.setattr(pipeline, "detect_tshark_version",
+                        lambda *a, **kw: {"version": "test", "path": "tshark"})
+    monkeypatch.setattr(config, "detect_tshark", lambda: "tshark")
+    monkeypatch.setattr(os.path, "getsize", lambda *a, **kw: 1000)
+
+    result = pipeline.run_analysis(
+        FILE_W1, wireless_paths=[FILE_W2], time_start="not-a-date",
+    )
+
+    assert result == {"error": "시간 필터를 해석할 수 없다: not-a-date"}
+    assert calls == []  # 파싱 실패는 추출 전에 걸러야 한다 — 불필요한 tshark 실행 방지.
+
+
 def test_wired_gt_composes_with_multi_wireless(monkeypatch):
     """유선 GT(1단계)와 다중 무선이 동시 동작 — sources = w1, w2, wired 3항목."""
     frames_by_path = {FILE_W1: _w1_frames(), FILE_W2: _w2_frames()}

@@ -11,6 +11,7 @@ from .core.channels import ap_channel_map
 from .core.detector import detect_roles
 from .core.indexer import FrameIndex
 from .core.merge import merge_captures
+from .core.timeparse import parse_local_epoch
 from .core.wired_ping import build_ground_truth
 from .core.modules import (
     overview, retry_mcs, retry_burst, roaming, ping_rtt,
@@ -32,6 +33,7 @@ from .web.structured import (
     _structured_device_stats,
     _structured_system_stats,
     _structured_diagnosis,
+    _structured_merge,
 )
 
 __all__ = [
@@ -45,7 +47,11 @@ __all__ = [
     "_structured_device_stats",
     "_structured_system_stats",
     "_structured_diagnosis",
+    "_structured_merge",
 ]
+
+#: 프레임을 하나도 못 뽑았을 때(추출 실패 또는 시간 창 적용 후 0건) 공통 에러 메시지.
+_NO_FRAMES_ERROR = "프레임을 추출하지 못했습니다. tshark 경로 또는 pcap 파일을 확인하세요."
 
 
 def _make_id(pcap_path: str) -> str:
@@ -137,6 +143,39 @@ def run_analysis(
     # extract_frames를 동일 필터 인자로 호출한다(필터 대칭 자동으로 확보됨).
     paths = [pcap_path] + list(wireless_paths or [])
     tags = [f"w{i + 1}" for i in range(len(paths))]
+
+    # 다중 무선 + 시간 필터: 파일별 tshark 추출에 같은 time_start/time_end를 그대로
+    # 넘기면 캡처 간 시계 스큐(수십~수백 초까지 가능 — merge.py 실측 근거)만큼
+    # 소스마다 실제로 다른 구간이 잘려, 시계 정렬에 쓸 공통 TSF 비콘이 통째로
+    # 사라질 수 있다(오프셋 추정 실패 또는 소스 제외 — PR #23 리뷰 Finding A).
+    # 다중 무선일 때는 정렬에 충분한 전체 구간을 먼저 추출해 merge(오프셋
+    # 추정·보정)한 뒤, 보정된 epoch 위에서 요청 구간을 사후 적용한다. 단일 무선
+    # 경로는 비교 대상 스큐가 없어 기존처럼 추출 시 tshark 필터로 자른다(하위
+    # 호환). mac_filter/ip_filter는 프레임 내용 기반이라 스큐와 무관 — 다중
+    # 무선에서도 추출 시 그대로 유지한다(대칭 필터 보장).
+    multi_wireless = len(paths) > 1
+    defer_time_window = multi_wireless and bool(time_start or time_end)
+
+    window_start_epoch: Optional[float] = None
+    window_end_epoch: Optional[float] = None
+    if defer_time_window:
+        # 무선 extractor.build_tshark_cmd의 `frame.time >= "..."` 필터와 같은
+        # 규칙(로컬 타임존, 초 생략 허용)으로 파싱해야 두 경로가 같은 구간을
+        # 가리킨다 — wired_ping._parse_local_epoch와 공유하는 timeparse 헬퍼.
+        # 파싱 실패는 기존 tshark 필터 방식과 동일하게 명시적 에러로 반환한다
+        # (조용히 전체 구간으로 넘어가지 않는다).
+        if time_start:
+            window_start_epoch = parse_local_epoch(time_start)
+            if window_start_epoch is None:
+                return {"error": f"시간 필터를 해석할 수 없다: {time_start}"}
+        if time_end:
+            window_end_epoch = parse_local_epoch(time_end)
+            if window_end_epoch is None:
+                return {"error": f"시간 필터를 해석할 수 없다: {time_end}"}
+
+    extract_time_start = "" if defer_time_window else time_start
+    extract_time_end = "" if defer_time_window else time_end
+
     per_source: "OrderedDict[str, list]" = OrderedDict()
     wireless_sources: List[Dict[str, Any]] = []
     for i, (path, tag) in enumerate(zip(paths, tags)):
@@ -149,8 +188,8 @@ def run_analysis(
             path,
             wpa_passphrase=passphrase,
             ssid=ssid,
-            time_start=time_start,
-            time_end=time_end,
+            time_start=extract_time_start,
+            time_end=extract_time_end,
             mac_filter=mac_filter,
             ip_filter=ip_filter,
             tshark_path=_tshark_path,
@@ -172,7 +211,7 @@ def run_analysis(
         wireless_sources.append(src_entry)
 
     if not per_source:
-        return {"error": "프레임을 추출하지 못했습니다. tshark 경로 또는 pcap 파일을 확인하세요."}
+        return {"error": _NO_FRAMES_ERROR}
 
     if _cancelled():
         return {"cancelled": True}
@@ -207,14 +246,26 @@ def run_analysis(
         # 소스별로 귀속되지 않은 나머지 경고(향후 일반 경고 확장 대비)는 기준(w1)에 붙인다.
         if remaining_warnings:
             wireless_sources[0]["warnings"] = wireless_sources[0]["warnings"] + remaining_warnings
-        merge_summary = {
-            "window_ms": mr.stats["window_ms"],
-            "duplicates": mr.stats["duplicates"],
-            "kept": mr.stats["kept"],
-            "coverage": mr.stats["coverage"],
-        }
+        # structured["merge"] 스키마 생성은 웹 시각화 소관(analyzer/web/structured.py) —
+        # pipeline은 오케스트레이션만 담당한다(AGENTS.md, PR #23 리뷰 Finding B).
+        # sources 배열의 오프셋 필드(applied_offset_ms 등, 위)는 구조화 스키마가
+        # 아니라 소스 메타데이터라 이 경계 밖 — pipeline에 남는다.
+        merge_summary = _structured_merge(mr)
     else:
         (frames,) = per_source.values()
+
+    # 다중 무선 + 시간 필터를 미룬 경우: 시계 정렬·보정이 끝난 epoch 위에서 이제야
+    # 요청 구간을 적용한다(PR #23 리뷰 Finding A). merge_summary(및 mr.stats)는
+    # 이미 위에서 창 적용 전 값으로 고정됐다 — 정렬·dedup은 항상 전체 구간
+    # 기준이 맞기 때문에 창 이후 재계산하지 않는다.
+    if defer_time_window:
+        frames = [
+            f for f in frames
+            if (window_start_epoch is None or f.epoch >= window_start_epoch)
+            and (window_end_epoch is None or f.epoch < window_end_epoch)
+        ]
+        if not frames:
+            return {"error": _NO_FRAMES_ERROR}
 
     _progress(f"{len(frames):,}프레임 추출 완료. 역할 감지 중...", 30)
     roles = detect_roles(frames)
