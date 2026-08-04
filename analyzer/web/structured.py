@@ -51,10 +51,6 @@ def is_special_ip(ip: str) -> bool:
     return False
 
 
-#: 하위 호환 별칭 — 10라운드까지 이 비공개 이름을 썼다.
-_is_special_ip = is_special_ip
-
-
 def _structured_overview(
     frames: List[Frame],
     roles: Dict[str, Dict[str, Any]],
