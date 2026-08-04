@@ -10,8 +10,9 @@ TSF 폴백((TA, seq, subtype) 매칭)은 ±5초 창을 쓰므로 사전 보정�
 전제한다(스펙 §3). 그것도 실패하면 오프셋 0 + 경고.
 """
 import statistics
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from .models import Frame
 
@@ -77,4 +78,144 @@ def estimate_offset(reference: List[Frame], other: List[Frame]) -> OffsetResult:
         0.0, "none", 0, 0.0,
         warnings=["캡처 간 오프셋을 추정하지 못해 0으로 가정 — 타임라인이 어긋날 수 있다 "
                   "(비콘 TSF 쌍 부족·공통 프레임 없음)"],
+    )
+
+
+@dataclass
+class MergeResult:
+    frames: List[Frame]                 # 통합·정렬·재번호된 리스트 (기존 파이프라인 입력)
+    per_source: Dict[str, List[Frame]]  # 소스별 원본(epoch 보정됨) — 3단계용
+    offsets: Dict[str, OffsetResult]    # 소스 태그 → 추정 결과 (기준 w1 제외)
+    stats: Dict[str, Any]
+    warnings: List[str]
+
+
+def _dedup_key(f: Frame) -> Tuple:
+    """dedup 매칭 키. seq가 있으면 (TA, seq, subtype, retry) 정확 매칭.
+
+    제어 프레임(ACK 등)은 seq가 없어 (subtype, TA 또는 RA, retry)로 근사한다 —
+    같은 상대와 주고받는 동일 subtype 제어 프레임끼리는 구분하지 못하는 한계가
+    있지만, 창(MERGE_DEDUP_WINDOW_SEC)이 좁아 실측 트래픽에서는 충분한 근사다.
+    """
+    if f.seq:
+        return ("s", f.ta, f.seq, f.subtype, f.retry)
+    return ("c", f.subtype, f.ta or f.ra, f.retry)
+
+
+def _prefer_new_representative(rep: Frame, candidate: Frame) -> bool:
+    """대표 교체 여부 판정: ip_src가 채워진 쪽 우선, 동률이면 이른 epoch 우선.
+
+    실측 근거: DFK 캡처는 완전 암호화(ICMP 0건)라 "먼저 잡힌 쪽"을 그대로 대표로
+    쓰면 ping 분석에 쓸 IP 필드가 소실된다 — 복호화된 사본이 있으면 그쪽을 대표로.
+    """
+    rep_has_ip, cand_has_ip = bool(rep.ip_src), bool(candidate.ip_src)
+    if cand_has_ip != rep_has_ip:
+        return cand_has_ip
+    return candidate.epoch < rep.epoch
+
+
+def merge_captures(sources: "OrderedDict[str, List[Frame]]") -> MergeResult:
+    """다중 캡처를 시계 정렬 후 dedup·재번호해 단일 타임라인으로 병합한다.
+
+    sources: 태그 → 프레임 리스트(OrderedDict). 첫 항목이 기준(w1) — 나머지는
+    이 기준에 대해 estimate_offset으로 보정된다. 각 Frame.source는 이미 태깅됨.
+    """
+    tags = list(sources.keys())
+    reference_tag = tags[0]
+    reference = sources[reference_tag]
+
+    offsets: Dict[str, OffsetResult] = {}
+    warnings: List[str] = []
+    for tag in tags[1:]:
+        frames = sources[tag]
+        result = estimate_offset(reference, frames)
+        offsets[tag] = result
+        # epoch만 보정해 통합 타임라인을 만든다 — timestamp 문자열은 원본 그대로 둔다.
+        for f in frames:
+            f.epoch += result.offset_sec
+        warnings.extend(result.warnings)
+        if result.method == "none":
+            warnings.append(f"{tag}: 오프셋 추정 실패 — 원시 시계 그대로 병합됨")
+
+    by_source_raw = {tag: len(sources[tag]) for tag in tags}
+
+    if len(tags) == 1:
+        # 단일 소스는 dedup·재번호 없이 그대로 반환 — 기존 파이프라인 하위 호환.
+        frames = sorted(reference, key=lambda f: f.epoch)
+        stats: Dict[str, Any] = {
+            "window_ms": MERGE_DEDUP_WINDOW_SEC * 1000,
+            "duplicates": 0,
+            "kept": len(frames),
+            "by_source_raw": by_source_raw,
+            "coverage": {"both": 0, "only": {reference_tag: len(frames)}},
+        }
+        return MergeResult(
+            frames=frames,
+            per_source={reference_tag: reference},
+            offsets={},
+            stats=stats,
+            warnings=warnings,
+        )
+
+    all_frames: List[Frame] = []
+    for tag in tags:
+        all_frames.extend(sources[tag])
+    all_frames.sort(key=lambda f: (f.epoch, f.source, f.number))
+
+    # all_groups: 최종 출력용 전체 group(창 밖으로 밀려나도 유지).
+    # window_index: 키별 "아직 매칭 후보인" group들의 슬라이딩 윈도우(deque) —
+    # 전체 순회가 epoch 오름차순이라 앞쪽(오래된) group부터 버려도 안전하다.
+    all_groups: List[Dict[str, Any]] = []
+    window_index: Dict[Tuple, "deque[Dict[str, Any]]"] = {}
+    duplicates = 0
+
+    for f in all_frames:
+        key = _dedup_key(f)
+        dq = window_index.setdefault(key, deque())
+        while dq and f.epoch - dq[0]["epoch"] > MERGE_DEDUP_WINDOW_SEC:
+            dq.popleft()  # 창을 벗어난 group은 더 이상 매칭 후보가 아니다.
+
+        match = None
+        for group in dq:
+            if f.source not in group["sources"] and abs(f.epoch - group["epoch"]) <= MERGE_DEDUP_WINDOW_SEC:
+                match = group
+                break
+
+        if match is not None:
+            duplicates += 1
+            match["sources"].add(f.source)
+            if _prefer_new_representative(match["rep"], f):
+                match["rep"] = f
+                match["epoch"] = f.epoch  # group.epoch는 항상 대표의 epoch로 유지
+        else:
+            group = {"rep": f, "sources": {f.source}, "epoch": f.epoch}
+            dq.append(group)
+            all_groups.append(group)
+
+    merged = [g["rep"] for g in all_groups]
+    merged.sort(key=lambda f: f.epoch)
+    for i, f in enumerate(merged):
+        f.number = i + 1
+
+    both = sum(1 for g in all_groups if len(g["sources"]) >= 2)
+    only: Dict[str, int] = {}
+    for g in all_groups:
+        if len(g["sources"]) == 1:
+            (tag,) = g["sources"]
+            only[tag] = only.get(tag, 0) + 1
+
+    stats = {
+        "window_ms": MERGE_DEDUP_WINDOW_SEC * 1000,
+        "duplicates": duplicates,
+        "kept": len(merged),
+        "by_source_raw": by_source_raw,
+        "coverage": {"both": both, "only": only},
+    }
+
+    return MergeResult(
+        frames=merged,
+        per_source={tag: sources[tag] for tag in tags},
+        offsets=offsets,
+        stats=stats,
+        warnings=warnings,
     )
