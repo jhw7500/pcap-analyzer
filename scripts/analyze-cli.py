@@ -21,9 +21,18 @@ def main():
             sys.exit(2)
         wired = argv[i + 1]
         del argv[i:i + 2]
+    wireless: list = []
+    while "--wireless" in argv:
+        i = argv.index("--wireless")
+        if i + 1 >= len(argv):
+            print("ERROR: --wireless 뒤에 추가 무선 pcap 경로가 필요하다", file=sys.stderr)
+            sys.exit(2)
+        wireless.append(argv[i + 1])
+        del argv[i:i + 2]
     if len(argv) < 3:
         print(
-            "Usage: analyze-cli.py <pcap> <ssid> <passphrase> [out.json] [--wired wired.pcapng]",
+            "Usage: analyze-cli.py <pcap> <ssid> <passphrase> [out.json] "
+            "[--wired wired.pcapng] [--wireless extra.pcapng ...]",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -33,7 +42,10 @@ def main():
     def _p(msg, pct):
         print(f"  [{pct:3d}%] {msg}", file=sys.stderr, flush=True)
 
-    result = run_analysis(pcap, ssid=ssid, passphrase=pw, progress_cb=_p, wired_path=wired)
+    result = run_analysis(
+        pcap, ssid=ssid, passphrase=pw, progress_cb=_p,
+        wired_path=wired, wireless_paths=wireless,
+    )
     if "error" in result:
         print(f"ERROR: {result['error']}", file=sys.stderr)
         sys.exit(1)

@@ -10,6 +10,7 @@ class ErrorCode(str, Enum):
     INVALID_MAGIC = "INVALID_MAGIC"
     FILE_TOO_LARGE = "FILE_TOO_LARGE"
     EMPTY_FILE = "EMPTY_FILE"
+    TOO_MANY_FILES = "TOO_MANY_FILES"
     NO_FRAMES = "NO_FRAMES"
     CANCELLED = "CANCELLED"
     ANALYSIS_NOT_FOUND = "ANALYSIS_NOT_FOUND"
@@ -42,6 +43,10 @@ ERROR_CATALOG: Dict[ErrorCode, Dict[str, str]] = {
     ErrorCode.EMPTY_FILE: {
         "message": "빈 파일입니다.",
         "hint": "유효한 pcap 파일을 업로드하세요.",
+    },
+    ErrorCode.TOO_MANY_FILES: {
+        "message": "무선 캡처 파일이 너무 많습니다.",
+        "hint": "무선 캡처는 최대 4개(기본 1개 + 추가 3개)까지 업로드할 수 있습니다.",
     },
     ErrorCode.NO_FRAMES: {
         "message": "프레임을 추출하지 못했습니다.",
