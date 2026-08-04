@@ -12,6 +12,7 @@ class ErrorCode(str, Enum):
     EMPTY_FILE = "EMPTY_FILE"
     TOO_MANY_FILES = "TOO_MANY_FILES"
     NO_FRAMES = "NO_FRAMES"
+    INVALID_TIME_FILTER = "INVALID_TIME_FILTER"
     CANCELLED = "CANCELLED"
     ANALYSIS_NOT_FOUND = "ANALYSIS_NOT_FOUND"
     ANALYSIS_CORRUPTED = "ANALYSIS_CORRUPTED"
@@ -51,6 +52,10 @@ ERROR_CATALOG: Dict[ErrorCode, Dict[str, str]] = {
     ErrorCode.NO_FRAMES: {
         "message": "프레임을 추출하지 못했습니다.",
         "hint": "tshark 경로 또는 pcap 파일 상태를 확인하세요. 결과 JSON의 tshark_version으로 호환성을 점검하세요.",
+    },
+    ErrorCode.INVALID_TIME_FILTER: {
+        "message": "시간 필터를 해석할 수 없습니다.",
+        "hint": "시작/종료 시각은 \"YYYY-MM-DD HH:MM[:SS]\" 형식으로 입력하세요(초는 생략 가능).",
     },
     ErrorCode.CANCELLED: {
         "message": "분석이 취소되었습니다.",

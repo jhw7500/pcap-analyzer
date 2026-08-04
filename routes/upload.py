@@ -292,6 +292,22 @@ async def upload_pcap(
         _set_progress(job_id, "완료", 100, active=False)
 
     if "error" in result:
+        # pipeline이 error_code를 명시했으면(예: 잘못된 시간 필터 문자열)
+        # 그 코드로 payload를 구성하고 400(클라이언트 입력 오류 — 사용자가
+        # 값을 정정하면 해결됨)을 반환한다. 명시가 없으면(추출 실패 등
+        # 서버/환경 쪽 문제로 간주) 기존처럼 일괄 NO_FRAMES(500)로 폴백한다
+        # — 그러지 않으면 "시간 값을 고치세요"가 정답인 상황에서도 사용자가
+        # "tshark/pcap 파일을 확인하라"는 엉뚱한 안내를 받는다(PR #23 리뷰
+        # 6라운드 Finding A).
+        error_code = result.get("error_code")
+        if error_code:
+            try:
+                payload = error_payload(ErrorCode(error_code))
+            except ValueError:
+                error_code = None
+                payload = error_payload(ErrorCode.NO_FRAMES)
+            payload["job_id"] = job_id
+            return JSONResponse(payload, status_code=400 if error_code else 500)
         payload = error_payload(ErrorCode.NO_FRAMES)
         payload["job_id"] = job_id
         return JSONResponse(payload, status_code=500)

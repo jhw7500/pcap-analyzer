@@ -88,6 +88,31 @@ def test_wireless_bad_magic_cleans_up_prior_tmps(_tshark):
 
 @patch("routes.upload.config.detect_tshark", return_value="tshark")
 @patch("routes.upload.run_analysis")
+def test_malformed_time_filter_with_wireless_files_returns_400(mock_run, _tshark):
+    """다중 무선 + 잘못된 time_start — pipeline이 error_code="INVALID_TIME_FILTER"
+    를 실으면 일괄 NO_FRAMES(500)로 뭉개지 않고 400 + 그 코드를 그대로
+    반환해야 한다(PR #23 리뷰 6라운드 Finding A). 사용자가 "tshark/pcap
+    확인" 대신 "시간 값을 정정하라"는 정확한 안내를 받아야 한다."""
+    mock_run.return_value = {
+        "error": "시간 필터를 해석할 수 없다: not-a-date",
+        "error_code": "INVALID_TIME_FILTER",
+    }
+    resp = client.post(
+        "/api/upload",
+        files=[
+            ("file", ("w1.pcapng", PCAP_MAGIC, "application/octet-stream")),
+            ("wireless_files", ("w2.pcapng", PCAP_MAGIC, "application/octet-stream")),
+        ],
+        data={"time_start": "not-a-date"},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["code"] == "INVALID_TIME_FILTER"
+    assert "job_id" in body
+
+
+@patch("routes.upload.config.detect_tshark", return_value="tshark")
+@patch("routes.upload.run_analysis")
 def test_no_wireless_files_wireless_paths_empty(mock_run, _tshark, tmp_path, monkeypatch):
     import config
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)

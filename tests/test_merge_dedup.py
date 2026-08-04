@@ -289,11 +289,37 @@ def test_renumbered_sequential_and_sorted():
     assert [f.epoch for f in r.frames] == sorted(f.epoch for f in r.frames)
 
 
+def test_orig_number_stamped_before_renumber():
+    """다중 소스 병합 대표는 통합 순번으로 재번호되기 직전에 orig_number에
+    원본 tshark frame.number가 스탬프돼야 한다 — 그러지 않으면 per_source
+    (소스별 원본 리스트)로 "이 대표가 원래 그 소스에서 몇 번이었는지"
+    역추적할 방법이 사라진다(PR #23 리뷰 6라운드 Finding B, 4라운드에
+    경고만 남겼던 지뢰의 실수정)."""
+    a = _src("w1", make_frame(number=50, epoch=1002.0, seq="1"),
+             make_frame(number=51, epoch=1000.0, seq="2"))
+    b = _src("w2", make_frame(number=77, epoch=1001.0, seq="3"))
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+
+    # number는 통합 순번(1,2,3), orig_number는 각자 원본 tshark 번호를 보존.
+    by_orig = {f.orig_number: f.number for f in r.frames}
+    assert by_orig == {51: 1, 77: 2, 50: 3}
+
+    # per_source(원본 소스 리스트)에서도 같은 인스턴스를 공유하므로 그
+    # 대표 프레임을 통해 원본 번호를 그대로 역추적할 수 있다.
+    w1_rep = next(f for f in r.per_source["w1"] if f.orig_number == 50)
+    assert w1_rep.number == 3  # 병합 후 순번으로 갱신된 채 공유됨
+    assert (w1_rep.orig_number or w1_rep.number) == 50  # 복원 규칙
+
+
 def test_single_source_passthrough_numbers_untouched():
-    """단일 소스는 재번호 없이 그대로 — 하위 호환."""
+    """단일 소스는 재번호 없이 그대로 — 하위 호환. 재번호가 아예 없었으므로
+    orig_number는 기본값 0으로 남는다 — `orig_number or number` 복원
+    규칙에서 number(=원본 그대로)가 곧 원본임을 뜻한다(PR #23 리뷰 6라운드
+    Finding B)."""
     a = _src("w1", make_frame(number=7, epoch=1000.0), make_frame(number=9, epoch=1001.0))
     r = merge_captures(_pair([("w1", a)]))
     assert [f.number for f in r.frames] == [7, 9]
+    assert [f.orig_number for f in r.frames] == [0, 0]
     assert r.offsets == {} and r.stats["duplicates"] == 0
 
 

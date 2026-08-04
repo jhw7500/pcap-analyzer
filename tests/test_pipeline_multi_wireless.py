@@ -214,7 +214,10 @@ def test_time_filter_still_passed_through_for_single_wireless(monkeypatch):
 
 def test_time_filter_parse_failure_returns_explicit_error(monkeypatch):
     """다중 무선 + 시간 필터 파싱 실패 — 조용히 전체 구간으로 넘어가지 않고
-    명시적 에러를 반환해야 한다(기존 tshark 필터 방식과 동일한 실패 정책)."""
+    명시적 에러를 반환해야 한다(기존 tshark 필터 방식과 동일한 실패 정책).
+    error_code="INVALID_TIME_FILTER"도 함께 실려야 routes/upload.py가
+    NO_FRAMES(500)로 뭉개지 않고 400으로 표면화한다(PR #23 리뷰 6라운드
+    Finding A)."""
     calls = []
 
     def _extract(path, **kw):
@@ -231,7 +234,10 @@ def test_time_filter_parse_failure_returns_explicit_error(monkeypatch):
         FILE_W1, wireless_paths=[FILE_W2], time_start="not-a-date",
     )
 
-    assert result == {"error": "시간 필터를 해석할 수 없다: not-a-date"}
+    assert result == {
+        "error": "시간 필터를 해석할 수 없다: not-a-date",
+        "error_code": "INVALID_TIME_FILTER",
+    }
     assert calls == []  # 파싱 실패는 추출 전에 걸러야 한다 — 불필요한 tshark 실행 방지.
 
 

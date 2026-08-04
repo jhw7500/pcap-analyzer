@@ -167,11 +167,21 @@ def run_analysis(
         if time_start:
             window_start_epoch = parse_local_epoch(time_start)
             if window_start_epoch is None:
-                return {"error": f"시간 필터를 해석할 수 없다: {time_start}"}
+                # error_code: 호출부(routes/upload.py)가 이 값이 있으면 일괄
+                # NO_FRAMES(500)로 뭉개지 않고 전용 코드(400, 사용자 입력
+                # 정정 유도)로 표면화한다(PR #23 리뷰 6라운드 Finding A).
+                # "error" 문자열은 CLI(analyze-cli.py) 그대로 출력을 위해 유지.
+                return {
+                    "error": f"시간 필터를 해석할 수 없다: {time_start}",
+                    "error_code": "INVALID_TIME_FILTER",
+                }
         if time_end:
             window_end_epoch = parse_local_epoch(time_end)
             if window_end_epoch is None:
-                return {"error": f"시간 필터를 해석할 수 없다: {time_end}"}
+                return {
+                    "error": f"시간 필터를 해석할 수 없다: {time_end}",
+                    "error_code": "INVALID_TIME_FILTER",
+                }
 
     extract_time_start = "" if defer_time_window else time_start
     extract_time_end = "" if defer_time_window else time_end

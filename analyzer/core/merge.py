@@ -166,14 +166,26 @@ def estimate_offset(reference: List[Frame], other: List[Frame]) -> OffsetResult:
 @dataclass
 class MergeResult:
     frames: List[Frame]                 # 통합·정렬·재번호된 리스트 (기존 파이프라인 입력)
-    # 소스별 원본(epoch 보정됨) — 3단계용. 주의(잠재 지뢰, PR #23 리뷰 4라운드
-    # 재리뷰): 여기 담긴 Frame 객체는 `frames`(대표로 뽑힌 그룹)와 **동일
-    # 인스턴스를 공유**한다 — `_merge_decoded_fields`가 대표 프레임을 제자리
-    # mutate하므로, 어떤 소스의 프레임이 dedup 그룹의 대표가 되면 그 소스가
-    # 실제로 복호화하지 못한 필드값을 **다른 소스에서 빌려와** 채운 채로
-    # per_source에도 남는다. 즉 per_source를 "그 소스가 직접 관측·복호화한
-    # 원본"으로 소비하려면(예: 소스별 복호화율 집계) 병합 전 스냅샷이 필요하다
-    # — 현재는 그런 소비자가 없어 문제로 드러나지 않았을 뿐이다.
+    # 소스별 원본(epoch 보정됨) — 3단계용. 여기 담긴 Frame 객체는 `frames`
+    # (대표로 뽑힌 그룹)와 **동일 인스턴스를 공유**한다 — 이 공유가 두 가지
+    # 결과를 낳는다:
+    #
+    # (해소, PR #23 리뷰 6라운드 Finding B) 번호 복원: `frames` 조립 시
+    # 대표는 통합 타임라인 순번으로 재번호된다(`f.number = i + 1`) — 그
+    # 순간 원본 tshark frame.number가 지워지면 per_source로 "이 대표가
+    # 원래 그 소스에서 몇 번이었는지" 역추적할 수 없었다. 재번호 직전에
+    # `Frame.orig_number`에 원본 값을 스탬프하므로, per_source의 대표
+    # 프레임에서 원본 번호가 필요하면 `f.orig_number or f.number`를 쓴다
+    # (`orig_number == 0`이면 재번호가 아예 없었다는 뜻이라 `number`가 곧
+    # 원본이다 — 단일 소스, 또는 이 그룹의 비-대표 프레임).
+    #
+    # (미해소, 잠재 지뢰 — PR #23 리뷰 4라운드 재리뷰) 필드 차용 오염:
+    # `_merge_decoded_fields`가 대표 프레임을 제자리 mutate하므로, 어떤
+    # 소스의 프레임이 dedup 그룹의 대표가 되면 그 소스가 실제로 복호화하지
+    # 못한 필드값을 **다른 소스에서 빌려와** 채운 채로 per_source에도
+    # 남는다. per_source를 "그 소스가 직접 관측·복호화한 원본"으로
+    # 소비하려면(예: 소스별 복호화율 집계) 병합 전 스냅샷이 필요하다 —
+    # 현재는 그런 소비자가 없어 문제로 드러나지 않았을 뿐이다.
     per_source: Dict[str, List[Frame]]
     offsets: Dict[str, OffsetResult]    # 소스 태그 → 추정 결과 (기준 w1 제외)
     stats: Dict[str, Any]
@@ -517,6 +529,14 @@ def merge_captures(
     merged = [g["rep"] for g in all_groups]
     merged.sort(key=lambda f: f.epoch)
     for i, f in enumerate(merged):
+        # 재번호로 원본 tshark frame.number를 덮어쓰기 **직전** 스탬프 — 이
+        # 대표는 자신의 원본 소스 리스트(sources[tag], 즉 per_source)에도
+        # 같은 인스턴스로 들어 있으므로, 스탬프 없이 재번호만 하면 그 소스로
+        # 역추적할 방법이 사라진다(PR #23 리뷰 6라운드 Finding B — 4라운드에
+        # 경고만 남겼던 "번호 지뢰"의 실수정). 이 분기(다중 소스 병합)만
+        # 도달하므로 orig_number==0은 항상 "재번호 안 됨"(단일 소스 또는
+        # 이 그룹의 비-대표 프레임)과 동치다.
+        f.orig_number = f.number
         f.number = i + 1
 
     both = sum(1 for g in all_groups if len(g["sources"]) >= 2)

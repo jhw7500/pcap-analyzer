@@ -197,6 +197,35 @@ class TestUploadAnalysisOutcomes:
         assert body["code"] == "NO_FRAMES"
         assert "job_id" in body
 
+    def test_run_analysis_error_with_code_returns_400(self):
+        """pipeline이 error_code를 명시하면(예: 잘못된 시간 필터) NO_FRAMES(500)
+        로 뭉개지 않고 그 코드로 400을 반환한다(PR #23 리뷰 6라운드 Finding A)."""
+        with patch("routes.upload.run_analysis", return_value={
+            "error": "시간 필터를 해석할 수 없다: not-a-date",
+            "error_code": "INVALID_TIME_FILTER",
+        }), patch("routes.upload.config.detect_tshark", return_value="/usr/bin/tshark"):
+            resp = client.post(
+                "/api/upload",
+                files={"file": ("ok.pcap", VALID_PCAP_HEAD, "application/octet-stream")},
+            )
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["code"] == "INVALID_TIME_FILTER"
+        assert "job_id" in body
+
+    def test_run_analysis_error_with_unknown_code_falls_back_to_500(self):
+        """error_code가 ErrorCode 카탈로그에 없는 값이면(방어적 가드) 기존
+        NO_FRAMES(500)로 폴백한다 — 예상 밖 값으로 크래시하지 않는다."""
+        with patch("routes.upload.run_analysis", return_value={
+            "error": "boom", "error_code": "NOT_A_REAL_CODE",
+        }), patch("routes.upload.config.detect_tshark", return_value="/usr/bin/tshark"):
+            resp = client.post(
+                "/api/upload",
+                files={"file": ("ok.pcap", VALID_PCAP_HEAD, "application/octet-stream")},
+            )
+        assert resp.status_code == 500
+        assert resp.json()["code"] == "NO_FRAMES"
+
     def test_run_analysis_cancelled_returns_499(self):
         with patch("routes.upload.run_analysis", return_value={"cancelled": True}), \
              patch("routes.upload.config.detect_tshark", return_value="/usr/bin/tshark"):

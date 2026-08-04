@@ -50,6 +50,12 @@ class Frame:
     eapol_msgnr: str = ""  # wlan_rsna_eapol.keydes.msgnr — EAPOL 4-way 메시지 번호 1~4
     tsf: str = ""  # wlan.fixed.timestamp — 비콘의 AP TSF(µs). 캡처 간 오프셋 추정용 (merge.py)
     source: str = ""  # 캡처 출처 태그 (w1/w2/… — 다중 무선 병합 시 pipeline이 채움)
+    orig_number: int = 0  # 병합 재번호 직전의 원본 tshark frame.number. 0 = 재번호 안 됨
+    # (단일 소스 또는 dedup 그룹의 비-대표 프레임). 다중 소스 병합 대표 프레임만
+    # merge.merge_captures가 재번호(number 덮어쓰기) 직전에 스탬프한다 —
+    # per_source(소스별 원본 리스트)로 역추적할 때 "이 대표가 원래 그 소스에서
+    # 몇 번 프레임이었는지" 복원하려면 `orig_number or number`를 쓴다(PR #23
+    # 리뷰 6라운드 Finding B).
 
     @property
     def subtype_name(self) -> str:
