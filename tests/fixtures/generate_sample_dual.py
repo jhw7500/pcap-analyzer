@@ -80,6 +80,16 @@ def build():
     req_true_t = BASE_EPOCH + NUM_BEACONS * (TSF_STRIDE / 1e6) + 1.0
     rep_true_t = req_true_t + 0.003  # 3ms 후 응답 (sample_basic.py와 동일 관례)
 
+    # B의 ICMP 프레임만 보정(+2.5s) 후 A보다 10ms 앞서도록 추가 오프셋을 준다
+    # (덮어쓴 -2.5s 오프셋에 더해짐 — B_OFFSET_ICMP_LEAD). 비콘은 완전 동률로 둬도
+    # 무방하지만(오프셋 추정은 TSF만 봄), ICMP는 dedup 대표 선정의 실질 판별력을
+    # 위해 일부러 먼저 그룹을 만들게 한다: 두 사본의 보정 epoch가 완전히 같으면
+    # _MatchIndex.process가 정렬 타이브레이크(source "w1" < "w2")로 항상 A를 그룹
+    # 생성자로 만들어 _prefer_new_representative의 교체 분기가 한 번도 실행되지
+    # 않는다 — B(암호화 사본, IP 없음)가 먼저 대표가 되고 A(복호화 사본)가 실제로
+    # 업그레이드 교체되는 경로를 e2e로 확인하려면 B가 먼저 도착해야 한다.
+    B_OFFSET_ICMP_LEAD = 0.010  # 50ms dedup 창 안 (10ms)
+
     req_a = (
         RadioTap()
         / Dot11(type=2, subtype=0, addr1=AP_MAC, addr2=STA_MAC, addr3=BSSID, SC=req_seq << 4)
@@ -95,7 +105,7 @@ def build():
                 SC=req_seq << 4, FCfield="protected")
         / Raw(load=bytes(24))
     )
-    packets_b.append(_stamp(req_b, req_true_t + B_OFFSET))
+    packets_b.append(_stamp(req_b, req_true_t + B_OFFSET - B_OFFSET_ICMP_LEAD))
 
     rep_a = (
         RadioTap()
@@ -112,7 +122,7 @@ def build():
                 SC=rep_seq << 4, FCfield="protected")
         / Raw(load=bytes(24))
     )
-    packets_b.append(_stamp(rep_b, rep_true_t + B_OFFSET))
+    packets_b.append(_stamp(rep_b, rep_true_t + B_OFFSET - B_OFFSET_ICMP_LEAD))
 
     # A 단독 프레임 1개 (B는 범위 밖이라 못 잡음)
     a_only_seq = 3000
