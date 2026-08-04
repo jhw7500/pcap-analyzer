@@ -89,3 +89,33 @@ def test_wired_save_exception_cleans_up_primary_tmp(_tshark):
 
     assert captured.get("primary_tmp")
     assert not Path(captured["primary_tmp"]).exists()
+
+
+@patch("routes.upload.config.detect_tshark", return_value="tshark")
+def test_job_registration_exception_cleans_up_both_tmp(_tshark):
+    """wired 저장까지 성공한 뒤(두 tmp 모두 디스크에 존재) job 등록 단계
+    (_jobs_lock 진입~_prune_jobs_locked)에서 예외가 나면, 아직 실행 try/finally에
+    진입하지 못했으므로 별도 가드가 없으면 두 tmp 모두 정리되지 않는다
+    (PR #22 10라운드 — Finding E)."""
+    original_save = upload_module._save_pcap_upload
+    captured = {}
+    call_count = {"n": 0}
+
+    async def capturing_save(file):
+        call_count["n"] += 1
+        tmp_name, err = await original_save(file)
+        captured["primary_tmp" if call_count["n"] == 1 else "wired_tmp"] = tmp_name
+        return tmp_name, err
+
+    with patch("routes.upload._save_pcap_upload", side_effect=capturing_save), \
+         patch("routes.upload._prune_jobs_locked",
+               side_effect=RuntimeError("job 등록 중 예외 시뮬레이션")):
+        with pytest.raises(RuntimeError):
+            client.post("/api/upload", files={
+                "file": ("w.pcapng", PCAP_MAGIC, "application/octet-stream"),
+                "wired_file": ("cable.pcapng", PCAP_MAGIC, "application/octet-stream"),
+            })
+
+    assert captured.get("primary_tmp") and captured.get("wired_tmp")
+    assert not Path(captured["primary_tmp"]).exists()
+    assert not Path(captured["wired_tmp"]).exists()

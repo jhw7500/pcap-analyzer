@@ -21,6 +21,7 @@ from .web.signal_cliff import analyze_signal_cliffs
 from .web.evidence import build_debug_block
 from .web.structured import (
     PING_MATCH_WINDOW_SEC,
+    _is_special_ip,
     _structured_overview,
     _structured_signal,
     _structured_ping,
@@ -70,7 +71,10 @@ def _derived_ip_filter(frames, mac_filter: str) -> str:
 
     자기 IP 판정은 `_structured_overview`의 dev_ip 수집과 같은 규칙 — 그 STA가
     송신(ta)한 프레임의 ip.src, 수신(ra)한 프레임의 ip.dst. tshark는 같은 필드의
-    multi-value를 콤마로 join해 주므로 콤마로 분해한다. 유도된 IP가 하나도 없으면
+    multi-value를 콤마로 join해 주므로 콤마로 분해한다. 멀티캐스트/링크로컬/루프백/
+    브로드캐스트/미지정 주소는 `structured._is_special_ip`(같은 규칙을 공유 —
+    `_structured_overview`의 자기 IP 후보 필터와 동일한 정의를 써야 두 경로가
+    "특수 IP"를 다르게 취급하지 않는다)로 제외한다. 유도된 IP가 하나도 없으면
     빈 문자열 — 호출부가 "동등 필터 유도 불가"로 처리한다.
     """
     macs = {m.strip().lower() for m in mac_filter.split(",") if m.strip()}
@@ -83,7 +87,7 @@ def _derived_ip_filter(frames, mac_filter: str) -> str:
                 continue
             for ip in (raw or "").split(","):
                 ip = ip.strip()
-                if ip and ip not in ("0.0.0.0", "255.255.255.255", "::"):
+                if ip and not _is_special_ip(ip):
                     ips.add(ip)
     return ",".join(sorted(ips))
 
@@ -209,10 +213,15 @@ def run_analysis(
         # time_start/end·ip_filter는 무선 extract_frames()와 동일 구간을 보도록
         # 대칭 전달 — 그래야 유선 GT와 무선 관측이 같은 구간을 비교한다.
         # mac_filter는 유선(비-802.11) exchange에 MAC 개념이 없어 그대로 못 넘기므로,
-        # 이미 필터가 적용된 무선 프레임의 IP로 동등한 ip_filter를 유도한다. 사용자가
-        # ip_filter를 명시했으면 그 값이 우선(유도로 덮어쓰지 않는다).
+        # 이미 필터가 적용된 무선 프레임의 IP로 동등한 ip_filter를 유도한다. mac_filter가
+        # 있으면 사용자 ip_filter 값과 무관하게 **항상** 유도값을 쓴다 — frames는 이미
+        # extract_frames에서 mac_filter AND 사용자 ip_filter가 둘 다 적용된 결과이므로
+        # 유도 결과가 두 필터의 교집합을 반영한다. 사용자 ip_filter만 유선에 넘기면
+        # (mac_filter 없을 때만 유도하던 구 규칙) 무선은 "mac_filter AND ip_filter"인데
+        # 유선은 sender가 그 ip_filter 값에 걸려 `_filter_exchanges`의 "sender가 필터에
+        # 있으면 전체 유지" 경로를 타 필터가 무력화되는 비대칭이 생긴다.
         wired_ip_filter, skip_reason = ip_filter, ""
-        if mac_filter and not ip_filter:
+        if mac_filter:
             derived = _derived_ip_filter(frames, mac_filter)
             if derived:
                 wired_ip_filter = derived

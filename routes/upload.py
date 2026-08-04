@@ -199,19 +199,29 @@ async def upload_pcap(
     job_id = _sanitize_job_id(client_job_id)
     cancel_event = threading.Event()
 
-    with _jobs_lock:
-        if not job_id or (job_id in _jobs and _jobs[job_id].get("active")):
-            job_id = str(uuid.uuid4())
-        _jobs[job_id] = {
-            "msg": "분석 준비 중...",
-            "pct": 0,
-            "active": True,
-            "created": time.time(),
-            "cancel": cancel_event,
-            "tmp": tmp_name,
-            "wired_tmp": wired_tmp,
-        }
-        _prune_jobs_locked()
+    # 이 시점에는 wired_tmp가 이미 디스크에 저장돼 있을 수 있다(위 wired 저장
+    # 성공 경로) — 아래 job 등록이 예외를 던지면 이후의 try/finally(실행 구간)에
+    # 진입하지 못해 두 tmp 모두 정리되지 않는다. wired 저장 자체의 예외 가드와
+    # 같은 패턴으로 여기도 감싼다.
+    try:
+        with _jobs_lock:
+            if not job_id or (job_id in _jobs and _jobs[job_id].get("active")):
+                job_id = str(uuid.uuid4())
+            _jobs[job_id] = {
+                "msg": "분석 준비 중...",
+                "pct": 0,
+                "active": True,
+                "created": time.time(),
+                "cancel": cancel_event,
+                "tmp": tmp_name,
+                "wired_tmp": wired_tmp,
+            }
+            _prune_jobs_locked()
+    except Exception:
+        Path(tmp_name).unlink(missing_ok=True)
+        if wired_tmp:
+            Path(wired_tmp).unlink(missing_ok=True)
+        raise
 
     def progress_cb(msg, pct):
         _set_progress(job_id, msg, pct, active=True)

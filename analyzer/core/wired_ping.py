@@ -10,6 +10,7 @@ sender 선정과 꼬리 무응답 판정은 EXPING 재구성(`exping.extract_exc
 import datetime as dt
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -20,6 +21,10 @@ from .ping_matching import find_time_streaks
 MAX_STREAKS = 100
 #: ng_epochs 상한 — 타임라인 마커용 샘플
 MAX_NG_EPOCHS = 1000
+
+#: capinfos 실행 상한(초) — 이 안에서 0.2초 간격으로 취소를 폴링한다
+_CAPINFOS_TIMEOUT_SEC = 30
+_CAPINFOS_POLL_SEC = 0.2
 
 #: 시간 필터 입력 형식 — 초 생략형도 허용
 _TIME_FILTER_FORMATS: Tuple[str, ...] = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M")
@@ -131,9 +136,10 @@ def _detect_capture_end(
     """capinfos로 실제 캡처의 마지막 패킷 시각(epoch)을 구한다. 실패/부재 시 None.
 
     cancel_event가 이미 set이면 capinfos를 **띄우지 않고** None을 반환한다 — 취소를
-    보고한 뒤 자식 프로세스가 하나 더 생기지 않게. 실행 중에 들어온 취소는 잡지
-    못한다(최대 30초 timeout까지 대기) — capinfos는 헤더만 읽어 짧고, 스트리밍이
-    아니라 중간에 끊을 지점이 없어 감시 스레드를 붙일 실익이 없다. 알려진 한계다.
+    보고한 뒤 자식 프로세스가 하나 더 생기지 않게. 실행 **중에** 들어온 취소도
+    0.2초 간격 폴링으로 감지해 terminate(→ 5초 안에 안 죽으면 kill) 후 None을
+    반환한다 — subprocess.run(timeout=30)은 취소가 set돼도 프로세스가 끝날 때까지
+    최대 30초 블록해 /api/cancel이 성공을 보고한 뒤에도 자식이 한동안 남는다.
 
     ICMP 전용 필터(extract_icmp_frames)만으로는 캡처가 진짜 언제 끝났는지 알 수
     없다 — ping이 멈춘 뒤에도 non-ICMP 트래픽으로 캡처가 계속 이어질 수 있다.
@@ -152,7 +158,11 @@ def _detect_capture_end(
         return None
     candidates = []
     if tshark_path:
-        candidates.append(str(Path(tshark_path).parent / "capinfos"))
+        # Windows에서는 tshark.exe 옆에 capinfos.exe가 있다 — 접미사 없는 "capinfos"만
+        # 보면 형제 탐색이 항상 실패해 PATH 폴백(또는 캡처 끝 미확인)으로 떨어진다.
+        candidates.append(
+            str(Path(tshark_path).parent / ("capinfos" + Path(tshark_path).suffix))
+        )
     found = shutil.which("capinfos")
     if found:
         candidates.append(found)
@@ -160,15 +170,42 @@ def _detect_capture_end(
     if not capinfos_path:
         return None
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             [capinfos_path, "-e", "-S", "-M", str(pcap_path)],
-            capture_output=True, text=True, timeout=30,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
-    except (OSError, subprocess.TimeoutExpired, ValueError):
+    except OSError:
         return None
-    if result.returncode != 0:
+    deadline = time.monotonic() + _CAPINFOS_TIMEOUT_SEC
+    stdout = None
+    returncode = None
+    try:
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                return None
+            try:
+                stdout, _stderr = proc.communicate(timeout=_CAPINFOS_POLL_SEC)
+                returncode = proc.returncode
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() >= deadline:
+                    proc.kill()
+                    proc.wait()
+                    return None
+                continue
+    except (OSError, ValueError):
+        proc.kill()
+        proc.wait()
         return None
-    for line in (result.stdout or "").splitlines():
+    if returncode != 0:
+        return None
+    for line in (stdout or "").splitlines():
         stripped = line.strip().lower()
         if stripped.startswith("latest packet time") or stripped.startswith("end time"):
             _, _, value = line.partition(":")
@@ -208,18 +245,33 @@ def _drop_unreachable_tail(
     return kept, dropped
 
 
-def _trailing_unanswered_count(exchanges: List["exping.Exchange"]) -> int:
-    """마지막 응답 뒤에 붙은 무응답 요청 수 — 제거하지 않고 세기만 한다.
+def _unverified_unanswered_count(
+    exchanges: List["exping.Exchange"],
+    frames: List["exping.IcmpFrame"],
+    reply_timeout: float,
+) -> int:
+    """캡처 끝 시각 미확인 시 "응답 기회를 검증 못 한" 무응답 수 — 제거하지 않고
+    세기만 한다.
 
-    캡처 끝 시각을 확인하지 못했을 때 "손실률이 과대 계상될 수 있다"고 경고할
-    대상 건수다. 이 건수가 0이면 경고할 여지 자체가 없다.
+    이전 규칙("마지막 응답 뒤에 붙은 연속 무응답")은 리스트 위치 기준이라 회전
+    다중 target 캡처(무응답 A 뒤에 **다른** target의 응답 B가 리스트 마지막에
+    옴)에서 A를 놓친다 — A가 마지막이 아니라는 이유만으로 "꼬리"가 아니라고
+    판단하지만, A의 응답 창이 캡처 끝에서 잘렸을 가능성은 위치와 무관하다.
+
+    대신 시각 기준으로 판정한다: L = 관측된 전체 ICMP 프레임(frames, cohort/필터
+    적용 전 — 이 시점엔 아직 전체 캡처 기준)의 최대 epoch(캡처 끝의 근사). 무응답
+    요청 x가 `x.time + reply_timeout >= L`이면 그 응답 창이 L(캡처가 실제로 어디까지
+    이어졌는지 아는 마지막 지점)에 닿거나 넘어가므로 "응답이 왔었을 수도, 캡처가
+    먼저 끝났을 수도" 있어 검증 불가다 — 경계(정확히 L에서 창이 닫히는 경우)는
+    "캡처가 그 순간 끝났을 수도 있다"는 불확실성이 여전히 남아 있어 안전한 쪽
+    (검증 불가로 간주)을 택한다. `x.time + reply_timeout < L`이면 그 창이 캡처
+    안에서 완전히 닫힌 뒤에도 응답이 없었으므로 확정 손실 — 경고 대상이 아니다
+    (과대 계상 우려 자체가 없다).
     """
-    n = 0
-    for x in reversed(exchanges):
-        if x.answered:
-            break
-        n += 1
-    return n
+    if not frames:
+        return 0
+    latest = max(f[0] for f in frames)
+    return sum(1 for x in exchanges if not x.answered and x.time + reply_timeout >= latest)
 
 
 def build_ground_truth(
@@ -244,8 +296,9 @@ def build_ground_truth(
     이전(전체 캡처 기준)인 이유: 창 끝 근처 요청의 응답이 창 밖(그러나 캡처 안)에
     있어도 매칭돼야 한다. ④가 ⑤보다 먼저인 이유: 필터로 창을 먼저 자르면 창 안
     마지막 자리의 진짜 손실이 물리적 꼬리로 오인될 수 있다(trailing_dropped는 항상
-    물리적 꼬리 기준). 캡처 끝이 미확인이면 ④를 건너뛰고(drop 0건) 꼬리 무응답을
-    손실로 집계한 뒤 과대 계상 가능성을 warnings로 알린다.
+    물리적 꼬리 기준). 캡처 끝이 미확인이면 ④를 건너뛰고(drop 0건) 응답 기회를
+    검증하지 못한 무응답(_unverified_unanswered_count)을 손실로 집계한 뒤 과대
+    계상 가능성을 warnings로 알린다.
 
     cancel_event(threading.Event)를 주면 추출 중 취소가 자식 tshark까지 전파되고
     (exping.extract_icmp_frames), 그때는 error가 아니라 {"cancelled": True}를
@@ -325,11 +378,11 @@ def build_ground_truth(
         # 자체가 손실된 요청인 경우. 손실을 숨기는 쪽보다 남겨 두고 과대 계상
         # 가능성을 경고하는 쪽이 안전하다(사용자가 캡처를 보고 판단할 수 있다).
         dropped = 0
-        tail = _trailing_unanswered_count(exchanges)
-        if tail:
+        unverified = _unverified_unanswered_count(exchanges, frames, reply_timeout)
+        if unverified:
             warnings.append(
-                f"캡처 끝 시각 미확인 — 꼬리 무응답 {tail}건을 손실로 집계 "
-                "(캡처가 응답보다 먼저 끊긴 경우 손실률이 과대 계상될 수 있음)"
+                f"캡처 끝 시각 미확인 — 응답 기회를 검증하지 못한 무응답 {unverified}건을 "
+                "손실로 집계 (캡처가 응답보다 먼저 끊긴 경우 손실률이 과대 계상될 수 있음)"
             )
     else:
         exchanges, dropped = _drop_unreachable_tail(exchanges, capture_end, reply_timeout)

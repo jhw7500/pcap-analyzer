@@ -247,9 +247,44 @@ def test_no_mac_filter_does_not_derive_ip_filter(monkeypatch):
     assert captured["ip_filter"] == ""
 
 
-def test_user_ip_filter_wins_over_mac_filter_derivation(monkeypatch):
-    """사용자가 ip_filter를 명시했으면 그 값이 우선 — 유도로 덮어쓰지 않는다."""
+def test_user_ip_filter_used_as_is_without_mac_filter(monkeypatch):
+    """mac_filter가 없을 때만 사용자 ip_filter가 그대로 전달된다 — mac_filter가
+    있으면(아래 test_mac_filter_and_ip_filter_combined_uses_derived) 유도값이
+    우선한다 (PR #22 10라운드 — 기존 '사용자 ip_filter 우선' 테스트를 이 조건으로
+    좁혔다)."""
     captured = _capture_gt_kwargs(monkeypatch)
     pipeline.run_analysis("wireless.pcapng", wired_path="wired.pcapng",
-                          mac_filter=STA1, ip_filter="10.0.0.2")
+                          ip_filter="10.0.0.2")
     assert captured["ip_filter"] == "10.0.0.2"
+
+
+def test_mac_filter_and_ip_filter_combined_uses_derived(monkeypatch):
+    """mac_filter와 ip_filter를 동시에 지정하면 무선은 두 필터의 AND(교집합)를
+    보는데, 유선에 사용자 ip_filter만 그대로 넘기면(구 코드) sender가 그 값에
+    걸려 `_filter_exchanges`의 '전체 유지' 경로를 타 모집단이 어긋난다 (PR #22
+    10라운드 — Finding A). frames는 이미 mac_filter AND ip_filter가 둘 다 적용된
+    추출 결과이므로, `_derived_ip_filter`가 그 교집합을 정확히 반영한다."""
+    captured = _capture_gt_kwargs(monkeypatch)
+    pipeline.run_analysis("wireless.pcapng", wired_path="wired.pcapng",
+                          mac_filter=STA1, ip_filter="10.0.0.99")
+    # 사용자가 준 "10.0.0.99"가 아니라 STA1의 유도값(직접 토폴로지 _frames() 기준
+    # "10.0.0.1")이 유선에 전달돼야 한다.
+    assert captured["ip_filter"] == "10.0.0.1"
+
+
+# --------------------------------------------------------------------------
+# _derived_ip_filter 특수 IP 범위 (PR #22 10라운드 — Finding F)
+# --------------------------------------------------------------------------
+
+
+def test_derived_ip_filter_excludes_special_ip_ranges():
+    """멀티캐스트·링크로컬·루프백·미지정 주소는 유도 대상에서 제외된다 —
+    `analyzer.web.structured._is_special_ip`와 규칙을 통일했다. 이전에는
+    0.0.0.0/255.255.255.255/'::'만 걸러 169.254.x.x(링크로컬)·127.x(루프백)가
+    유도된 ip_filter에 섞여 들어갈 수 있었다."""
+    frames = [
+        make_frame(number=1, ta=STA1, ra=AP1, ip_src="169.254.1.1,10.0.0.5"),
+        make_frame(number=2, ta=AP1, ra=STA1, ip_dst="127.0.0.1"),
+        make_frame(number=3, ta=STA1, ra=AP1, ip_src="0.0.0.0"),
+    ]
+    assert pipeline._derived_ip_filter(frames, STA1) == "10.0.0.5"

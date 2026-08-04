@@ -553,3 +553,75 @@ def test_ip_filter_selects_cohort_sender_among_multiple_hosts(tmp_path):
     assert "error" not in gt
     assert gt["sender"] == "10.0.0.1"
     assert gt["total"] == 1 and gt["ng"] == 0
+
+
+# --------------------------------------------------------------------------
+# capinfos 이식성·취소 응답성, 미확인 캡처 끝 경고 정밀화 (PR #22 10라운드)
+# --------------------------------------------------------------------------
+
+
+def _fake_capinfos(tmp_path, name: str, body: str) -> str:
+    """tshark 형제 경로에 놓는 가짜 capinfos. tshark 실행파일도 함께 만든다."""
+    (tmp_path / name).write_text("#!/bin/sh\n" + body)
+    (tmp_path / name).chmod(0o755)
+    return str(tmp_path / name)
+
+
+def test_capinfos_sibling_uses_tshark_suffix(tmp_path):
+    """Windows에서는 tshark.exe 옆에 capinfos.exe가 있다 — 접미사 없는 이름만 보면
+    형제 탐색이 항상 실패해 캡처 끝 미확인 경로로 떨어진다 (PR #22 10라운드)."""
+    tshark = tmp_path / "tshark.exe"
+    tshark.write_text("#!/bin/sh\n:\n")
+    tshark.chmod(0o755)
+    _fake_capinfos(tmp_path, "capinfos.exe",
+                   "printf 'Latest packet time:   1700000001.703000\\n'\n")
+    end = wired_ping._detect_capture_end("x.pcapng", str(tshark))
+    assert end == pytest.approx(1700000001.703, abs=0.01)
+
+
+def test_detect_capture_end_cancel_during_capinfos(tmp_path):
+    """capinfos 실행 **중** 취소가 들어와도 즉시 끊어야 한다 — subprocess.run은
+    timeout(30초)까지 블록돼 /api/cancel이 성공을 보고한 뒤에도 자식이 남는다."""
+    tshark = tmp_path / "tshark"
+    tshark.write_text("#!/bin/sh\n:\n")
+    tshark.chmod(0o755)
+    _fake_capinfos(tmp_path, "capinfos", "exec sleep 5\n")
+    cancel = threading.Event()
+    timer = threading.Timer(0.2, cancel.set)
+    timer.daemon = True
+    timer.start()
+    t0 = time.monotonic()
+    assert wired_ping._detect_capture_end("x.pcapng", str(tshark), cancel) is None
+    timer.cancel()
+    assert time.monotonic() - t0 < 3  # sleep 5초를 기다리지 않았다
+
+
+def test_unverified_warning_counts_rotating_target_unanswered(tmp_path):
+    """회전 다중 target ping에서 무응답 A 뒤에 응답된 B가 오면 A는 '연속 꼬리'가
+    아니어서 경고에서 빠졌다 — 그러나 A의 응답 창이 캡처 끝에 잘렸을 수 있다.
+    경고 대상은 '마지막 관측 프레임까지 응답 기회가 검증되지 않은 무응답'이다."""
+    body = (
+        "printf '100.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"    # A: 무응답
+        "printf '100.1\\t10.0.0.1\\t10.0.0.3\\t8\\t7\\t2\\t\\n'\n"    # B: 응답 있음
+        "printf '100.102\\t10.0.0.3\\t10.0.0.1\\t0\\t7\\t2\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=_fake_tshark(tmp_path, body))
+    assert "error" not in gt
+    assert gt["total"] == 2 and gt["ng"] == 1
+    assert gt["trailing_dropped"] == 0
+    warn = [w for w in gt["warnings"] if "캡처 끝 시각 미확인" in w]
+    assert len(warn) == 1 and "1건" in warn[0]
+
+
+def test_unverified_warning_skips_unanswered_closed_inside_capture(tmp_path):
+    """응답 창이 캡처 안에서 닫힌 무응답(마지막 프레임보다 reply_timeout 이상 앞선
+    요청)은 확정 손실이므로 경고 대상이 아니다."""
+    body = (
+        "printf '100.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"    # A: 무응답, 창이 닫힘
+        "printf '102.0\\t10.0.0.1\\t10.0.0.3\\t8\\t7\\t2\\t\\n'\n"    # B: 응답 있음
+        "printf '102.002\\t10.0.0.3\\t10.0.0.1\\t0\\t7\\t2\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=_fake_tshark(tmp_path, body))
+    assert "error" not in gt
+    assert gt["ng"] == 1
+    assert not any("캡처 끝 시각 미확인" in w for w in gt["warnings"])
