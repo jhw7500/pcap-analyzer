@@ -766,6 +766,84 @@
     const fullList = ping.full_list || [];
     const pingStatsData = ping.stats || {};
 
+    /* 유선 ground truth 카드 — ping.ground_truth 있을 때만 (스펙 §4) */
+    const gt = ping.ground_truth || null;
+    const gtDiv = document.getElementById('ping-ground-truth');
+    if (gt && gtDiv && typeof gt.ng === 'number' && typeof gt.total === 'number'
+        && typeof gt.loss_pct === 'number') {
+        // GT는 gt.sender 1개 호스트의 ping만 집계한다(pick_sender). 카드의
+        // "무선 관측 손실"에 pingStatsData(전체 ICMP 흐름 집계)를 그대로 쓰면
+        // 배경 호스트의 ping까지 섞여 서로 다른 모집단을 비교하게 된다 — GT와
+        // 같은 송신원(src===gt.sender)의 request만 걸러 동일 모집단으로 맞춘다.
+        let wirelessLoss = '—';
+        let wirelessLossLabel = '무선 관측 손실(전체)';
+        if (gt.sender) {
+            wirelessLossLabel = '무선 관측 손실(동일 송신원)';
+            const senderItems = fullList.filter(p => p.src === gt.sender &&
+                (p.status === 'matched' || p.status === 'loss' || p.status === 'loss_gap'))
+                .filter(p => {
+                    // 유선 GT의 time_end 경계 배제(13라운드: 응답 창이 time_end를
+                    // 넘어갈 여지가 있고 실제 응답도 경계 밖인 요청 제외)를 무선
+                    // 비교에도 미러링한다 — 그러지 않으면 그 요청이 무선
+                    // full_list에는 loss로 남아 GT 분모(제외됨)와 다른 모집단을
+                    // 비교해 인위적 초과 무선 손실이 생긴다(PR #22 14라운드 —
+                    // Finding B, 유선 술어의 정확한 미러). matched는 그대로
+                    // 유지한다 — 무선이 matched라는 건 응답이 실제로 관측됐다는
+                    // 뜻이라, 유선의 "응답이 구간 안이면 유지" 판정과 대응한다.
+                    // strict `<`(14라운드 마무리): 유선 near_boundary가
+                    // `x.time >= threshold`(제외 쪽)라 그 정확한 보수(complement,
+                    // 유지 쪽)는 `p.epoch < cutoff`다 — `<=`였다면 knife-edge
+                    // (p.epoch === cutoff)에서 유선은 배제하는데 무선은 유지해
+                    // 다시 어긋난다. loss_gap의 epoch는 실손실 프레임이 없어
+                    // 근접 anchor 프레임(ping_matching._record_phantom_loss)의
+                    // 시각을 빌린 근사값이다 — reply-only 흐름(gap_direction ===
+                    // 'reply')에서는 그 anchor가 request가 아니라 reply 프레임일
+                    // 수 있어, 유선 Exchange.time(항상 요청 시각)과 정확히
+                    // 같은 기준이 아닐 수 있다(근사 비교로 감수).
+                    if (typeof gt.boundary_cutoff_epoch !== 'number') return true;
+                    if (p.status === 'matched') return true;
+                    return p.epoch < gt.boundary_cutoff_epoch;
+                });
+            // sender가 걸린 짝 없는 관측이 **방향과 무관하게** 하나라도 있으면
+            // 모집단이 어긋난다 — 그 흐름의 정상 관측이 분모에서 통째로 빠져
+            // 손실률이 과대 표시된다. observations(ping_matching의
+            // _observation_entry)는 애초에 "관측됐지만 RTT 측정 불가"만 담으므로
+            // 존재 자체가 모집단 불완전의 증거다. 방향을 가리지 않는 이유:
+            //   - 요청-only: sender가 보낸 request가 관측(src === sender)
+            //   - 응답-only: 모니터가 sender로 오는 reply만 관측(dst === sender)
+            //   - 혼합: 한 target은 양방향이라 matched가 존재 → "matched 0건"
+            //     같은 단방향 조건이나 요청 방향만 보는 조건으로는 못 걸러진다.
+            const unpairedSenderObs = (ping.observations || []).some(o =>
+                o.src === gt.sender || o.dst === gt.sender);
+            if (unpairedSenderObs) {
+                wirelessLoss = '— (단방향/혼합 캡처 — 비교 불가)';
+            } else if (senderItems.length) {
+                const lossN = senderItems.filter(p => p.status === 'loss' || p.status === 'loss_gap').length;
+                const pct = (lossN * 100 / senderItems.length).toFixed(2);
+                wirelessLoss = `${lossN.toLocaleString()}건 (${pct}%)`;
+            }
+        } else {
+            const s = pingStatsData;
+            wirelessLoss = (s.loss_count != null && s.loss_pct != null)
+                ? `${s.loss_count.toLocaleString()}건 (${s.loss_pct}%)` : '—';
+        }
+        gtDiv.classList.remove('hidden');
+        gtDiv.innerHTML = `
+          <div class="bg-gray-800 border border-emerald-700 rounded-lg p-4">
+            <div class="text-emerald-300 font-semibold mb-2">유선 Ground Truth (포트 미러 캡처)</div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+              <div><div class="text-gray-400">확정 손실</div>
+                <div class="${gt.ng > 0 ? 'text-red-400' : 'text-green-400'}">${gt.ng.toLocaleString()}건 (${gt.loss_pct}%)</div></div>
+              <div><div class="text-gray-400">전체 요청</div><div>${gt.total.toLocaleString()}건</div></div>
+              <div><div class="text-gray-400">${wirelessLossLabel}</div><div>${wirelessLoss}</div></div>
+              <div><div class="text-gray-400">연속 손실 구간</div><div>${(gt.streaks || []).length}곳</div></div>
+            </div>
+            <p class="text-gray-500 text-xs mt-2">
+              무선 관측 손실이 유선 확정 손실보다 크면 모니터 캡처 누락이 손실로 과대 계상된 것입니다
+              (docs/EXPING.md 실측: 0.16% 대 15.65%).</p>
+          </div>`;
+    }
+
     // Ping KPI
     const pingKpi = document.getElementById('ping-kpi');
     if (pingKpi && pingStatsData.count !== undefined) {

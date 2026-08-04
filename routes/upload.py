@@ -118,9 +118,50 @@ async def get_progress_latest():
         })
 
 
+async def _save_pcap_upload(file: UploadFile):
+    """업로드 파일 검증·임시 저장. 반환 (tmp_path, error_response) — 하나만 non-None."""
+    name = file.filename or "unknown.pcap"
+    if not name.endswith((".pcap", ".pcapng", ".cap")):
+        return None, JSONResponse(error_payload(ErrorCode.INVALID_EXT), status_code=400)
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=Path(name).suffix)
+    total = 0
+    first_chunk = True
+    try:
+        while True:
+            chunk = await file.read(_UPLOAD_CHUNK_SIZE)
+            if not chunk:
+                break
+            if first_chunk:
+                if not has_valid_pcap_magic(chunk):
+                    tmp.close()
+                    Path(tmp.name).unlink(missing_ok=True)
+                    return None, JSONResponse(
+                        error_payload(ErrorCode.INVALID_MAGIC), status_code=400)
+                first_chunk = False
+            total += len(chunk)
+            if total > config.max_upload_size():
+                tmp.close()
+                Path(tmp.name).unlink(missing_ok=True)
+                limit_mb = config.max_upload_size() // (1024 * 1024)
+                return None, JSONResponse(
+                    error_payload(ErrorCode.FILE_TOO_LARGE, f"(상한 {limit_mb}MB)"),
+                    status_code=413)
+            tmp.write(chunk)
+    except Exception:
+        tmp.close()
+        Path(tmp.name).unlink(missing_ok=True)
+        raise
+    tmp.close()
+    if first_chunk:
+        Path(tmp.name).unlink(missing_ok=True)
+        return None, JSONResponse(error_payload(ErrorCode.EMPTY_FILE), status_code=400)
+    return tmp.name, None
+
+
 @router.post("/api/upload")
 async def upload_pcap(
     file: UploadFile = File(...),
+    wired_file: UploadFile | None = File(None),
     ssid: str = Form(""),
     passphrase: str = Form(""),
     mac_filter: str = Form(""),
@@ -134,72 +175,67 @@ async def upload_pcap(
         return JSONResponse(error_payload(ErrorCode.TSHARK_MISSING), status_code=500)
 
     name = file.filename or "unknown.pcap"
-    if not name.endswith((".pcap", ".pcapng", ".cap")):
-        return JSONResponse(error_payload(ErrorCode.INVALID_EXT), status_code=400)
+    tmp_name, err = await _save_pcap_upload(file)
+    if err is not None:
+        return err
 
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=Path(name).suffix)
-    total = 0
-    first_chunk = True
-    try:
-        while True:
-            chunk = await file.read(_UPLOAD_CHUNK_SIZE)
-            if not chunk:
-                break
-            if first_chunk:
-                if not has_valid_pcap_magic(chunk):
-                    tmp.close()
-                    Path(tmp.name).unlink(missing_ok=True)
-                    return JSONResponse(error_payload(ErrorCode.INVALID_MAGIC), status_code=400)
-                first_chunk = False
-            total += len(chunk)
-            if total > config.max_upload_size():
-                tmp.close()
-                Path(tmp.name).unlink(missing_ok=True)
-                limit_mb = config.max_upload_size() // (1024 * 1024)
-                return JSONResponse(
-                    error_payload(ErrorCode.FILE_TOO_LARGE, f"(상한 {limit_mb}MB)"),
-                    status_code=413,
-                )
-            tmp.write(chunk)
-    except Exception:
-        tmp.close()
-        Path(tmp.name).unlink(missing_ok=True)
-        raise
-    tmp.close()
-    if first_chunk:
-        Path(tmp.name).unlink(missing_ok=True)
-        return JSONResponse(error_payload(ErrorCode.EMPTY_FILE), status_code=400)
+    wired_tmp = ""
+    wired_name = ""
+    # 브라우저는 미선택 file input도 빈 filename 파트로 보낸다 — filename으로 판별
+    if wired_file is not None and (wired_file.filename or ""):
+        try:
+            wired_tmp, werr = await _save_pcap_upload(wired_file)
+        except Exception:
+            Path(tmp_name).unlink(missing_ok=True)
+            raise
+        if werr is not None:
+            wired_tmp = ""
+            Path(tmp_name).unlink(missing_ok=True)
+            return werr
+        wired_name = wired_file.filename
 
     # 클라이언트가 미리 만든 job_id를 우선 사용(본인 job만 폴링/취소하기 위함).
     # 미제공·형식오류·이미 active한 id와 충돌하면 서버가 uuid를 생성한다.
     job_id = _sanitize_job_id(client_job_id)
     cancel_event = threading.Event()
 
-    with _jobs_lock:
-        if not job_id or (job_id in _jobs and _jobs[job_id].get("active")):
-            job_id = str(uuid.uuid4())
-        _jobs[job_id] = {
-            "msg": "분석 준비 중...",
-            "pct": 0,
-            "active": True,
-            "created": time.time(),
-            "cancel": cancel_event,
-            "tmp": tmp.name,
-        }
-        _prune_jobs_locked()
+    # 이 시점에는 wired_tmp가 이미 디스크에 저장돼 있을 수 있다(위 wired 저장
+    # 성공 경로) — 아래 job 등록이 예외를 던지면 이후의 try/finally(실행 구간)에
+    # 진입하지 못해 두 tmp 모두 정리되지 않는다. wired 저장 자체의 예외 가드와
+    # 같은 패턴으로 여기도 감싼다.
+    try:
+        with _jobs_lock:
+            if not job_id or (job_id in _jobs and _jobs[job_id].get("active")):
+                job_id = str(uuid.uuid4())
+            _jobs[job_id] = {
+                "msg": "분석 준비 중...",
+                "pct": 0,
+                "active": True,
+                "created": time.time(),
+                "cancel": cancel_event,
+                "tmp": tmp_name,
+                "wired_tmp": wired_tmp,
+            }
+            _prune_jobs_locked()
+    except Exception:
+        Path(tmp_name).unlink(missing_ok=True)
+        if wired_tmp:
+            Path(wired_tmp).unlink(missing_ok=True)
+        raise
 
     def progress_cb(msg, pct):
         _set_progress(job_id, msg, pct, active=True)
 
     def _run():
         return run_analysis(
-            tmp.name,
+            tmp_name,
             ssid=ssid,
             passphrase=passphrase,
             time_start=time_start,
             time_end=time_end,
             mac_filter=mac_filter,
             ip_filter=ip_filter,
+            wired_path=wired_tmp,
             cancel_event=cancel_event,
             progress_cb=progress_cb,
         )
@@ -208,11 +244,13 @@ async def upload_pcap(
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, _run)
     finally:
-        try:
-            Path(tmp.name).unlink(missing_ok=True)
-        except OSError:
-            # Windows: 백신/인덱서가 임시파일을 잠그면 삭제가 실패할 수 있음 — 분석 결과는 보존
-            pass
+        for p in (tmp_name, wired_tmp):
+            if p:
+                try:
+                    Path(p).unlink(missing_ok=True)
+                except OSError:
+                    # Windows: 백신/인덱서가 임시파일을 잠그면 삭제가 실패할 수 있음 — 분석 결과는 보존
+                    pass
         _set_progress(job_id, "완료", 100, active=False)
 
     if "error" in result:
@@ -225,6 +263,14 @@ async def upload_pcap(
         return JSONResponse(payload, status_code=499)
 
     result["pcap_name"] = name
+    # sources의 임시 파일명을 원본 업로드 파일명으로 치환
+    for src in result.get("structured", {}).get("sources") or []:
+        if src.get("role") == "wireless":
+            src["name"] = name
+        elif src.get("role") == "wired" and wired_name:
+            src["name"] = wired_name
+    if wired_name:
+        result["pcap_names"] = [name, wired_name]
     analysis_id = result["id"]
     data_dir = config.ensure_data_dir()
     result_path = data_dir / f"{analysis_id}.json"

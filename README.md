@@ -2,6 +2,8 @@
 
 WLAN(802.11) pcap 파일을 업로드하면 `tshark`로 프레임을 추출하고, AP/STA 역할 자동 감지 → 11개 분석 모듈 실행 → 웹 대시보드에서 시각화하는 네트워크 디버깅 도구. 자동차 WiFi(88Q9098 칩셋) 환경을 주요 타겟으로 한다.
 
+유선(포트 미러) pcap을 함께 업로드하면 ping 손실의 ground truth를 계산해 무선 관측 손실과 병기하고, 확정 손실 구간을 무선 이벤트(로밍·재전송)와 자동 대조한다. 설계: `docs/superpowers/specs/2026-08-03-multi-pcap-analysis-design.md`
+
 ## 주요 기능
 
 - **자동 역할 감지**: Beacon/ProbeResp/BSSID 휴리스틱으로 AP와 STA 분리

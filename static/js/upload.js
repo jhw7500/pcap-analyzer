@@ -124,6 +124,15 @@
             return;
         }
 
+        const wiredInput = document.getElementById('wired-file');
+        if (wiredInput && wiredInput.files.length) {
+            const maxMb = parseInt(wiredInput.dataset.maxMb || fileInput.dataset.maxMb || '200', 10);
+            if (wiredInput.files[0].size > maxMb * 1024 * 1024) {
+                alert(`유선 pcap이 업로드 상한(${maxMb}MB)을 초과합니다.`);
+                return;
+            }
+        }
+
         const formData = new FormData(form);
         formData.set('file', fileInput.files[0]);
         // 진행률/취소를 본인 분석에만 한정하기 위해 클라이언트가 job_id를 먼저 생성해 전송.

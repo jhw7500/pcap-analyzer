@@ -421,15 +421,22 @@ def count_wireless_requests(frames: list[IcmpFrame], sender: str) -> tuple[int, 
     return total, wireless
 
 
-def extract_exchanges(
+def extract_icmp_frames(
     pcap: str | Path,
     tshark: str = "tshark",
-    sender: str | None = None,
-    timeout: float = DEFAULT_REPLY_TIMEOUT,
     child_timeout: float | None = CHILD_TIMEOUT,
-    allow_wireless: bool = False,
-) -> tuple[list[Exchange], str]:
-    """pcap 을 읽어 (교환 목록, 송신 호스트) 를 낸다.
+    cancel_event: "threading.Event | None" = None,
+    warnings_out: "list[str] | None" = None,
+) -> list[IcmpFrame]:
+    """pcap 에서 ICMP echo request/reply 프레임만 스트리밍 추출한다.
+
+    `extract_exchanges` 의 하위 레이어다 — tshark 서브프로세스 실행·부분 실패
+    허용·자식 타임아웃·stderr 임시파일 캡처만 담당하고, sender 선정/무선 가드/
+    짝짓기는 하지 않는다. `analyzer.core.wired_ping.build_ground_truth` 가 시간/IP
+    필터가 적용된 부분집합에서 sender 를 다시 고르기 위해(전체 pcap 최다 요청자가
+    아니라 필터 구간의 최다 요청자를 sender 로 써야 한다) 이 레이어를 직접
+    재사용한다 — `extract_exchanges` 를 거치면 sender 가 전체 pcap 기준으로
+    이미 확정돼 버린다.
 
     tshark 출력을 한 줄씩 걸러 담는다 — 프레임이 수백만인 캡처에서 출력 전체를
     메모리에 올리지 않기 위해서다. `check=True` 를 쓰지 않는 이유는
@@ -442,7 +449,25 @@ def extract_exchanges(
 
     `child_timeout` 은 tshark 상한(초)이다. `None`(또는 0)이면 상한을 걸지 않는다 —
     무기한 대기를 감수한다는 뜻이니 의도한 경우에만 쓴다.
+
+    `cancel_event` 를 주면 그 이벤트가 set 되는 즉시 tshark 자식을 종료하고
+    `InterruptedError` 를 낸다(무선 추출 `extractor.extract_frames` 의 취소 계약과
+    같다 — 웹에서 /api/cancel 이 성공을 보고했는데 자식은 child_timeout 까지 살아
+    임시파일과 pcap 핸들을 쥐고 있는 일을 막는다). 부분 프레임으로 계속하지 않는
+    이유: 취소 시점까지 읽은 것만으로 집계하면 손실률이 조용히 틀린다. 예외를
+    새로 쓰는 이유: 기존 `ValueError`/`TimeoutError` 계약을 건드리지 않기 위함.
+    미전달(기본 `None`)이면 감시 스레드를 아예 만들지 않아 동작이 불변이다.
+
+    `warnings_out` 리스트를 주면 부분 실패(비정상 종료했지만 프레임은 건진 경우)
+    경고를 stderr 와 **같은 내용**으로 거기에도 담는다. stderr 만으로는 웹 경로가
+    그 사실을 알 길이 없어, 잘린/손상 pcap 이 아무 경고 없이 "성공한 ground
+    truth" 로 게시된다(손실률이 실제보다 낮게 나온다). stderr 출력은 그대로
+    유지되므로 CLI 동작은 불변이다.
     """
+    if cancel_event is not None and cancel_event.is_set():
+        # 이미 취소된 뒤라면 자식을 띄우지도 않는다.
+        raise InterruptedError("취소됨")
+
     frames: list[IcmpFrame] = []
     with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as errf:
         proc = subprocess.Popen(
@@ -454,20 +479,56 @@ def extract_exchanges(
         # 파이프 읽기에서 블록되면 루프 안의 시각 검사는 영영 실행되지 않는다.
         # 밖에서 죽여야 한다. 외부 kill 과 구분하려고 발동 여부를 따로 남긴다.
         timed_out: list[bool] = []
+        cancelled: list[bool] = []
 
         def _kill_child() -> None:
             timed_out.append(True)
             proc.kill()
 
+        def _cancel_watcher() -> None:
+            # extractor._cancel_watcher 와 같은 패턴: 부모가 파이프 읽기에서 막혀
+            # 있으므로 감시 스레드가 자식을 죽이고 stdout 을 닫아 읽기를 깨운다.
+            while proc.poll() is None:
+                if cancel_event.wait(0.05):
+                    cancelled.append(True)
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    except OSError:
+                        pass
+                    try:
+                        if proc.stdout is not None:
+                            proc.stdout.close()
+                    except OSError:
+                        pass
+                    return
+
         killer = threading.Timer(child_timeout, _kill_child) if child_timeout else None
         if killer is not None:
             killer.daemon = True
             killer.start()
+        watcher = (
+            threading.Thread(target=_cancel_watcher, daemon=True)
+            if cancel_event is not None
+            else None
+        )
+        if watcher is not None:
+            watcher.start()
         try:
             for line in proc.stdout or ():
                 parsed = parse_icmp_line(line)
                 if parsed is not None:
                     frames.append(parsed)
+            returncode = proc.wait()
+        except (ValueError, OSError):
+            # 취소 감시 스레드가 stdout 을 닫으면 읽기가 여기로 떨어진다.
+            # 취소가 아니면 원래대로 올려보낸다.
+            if not cancelled:
+                proc.kill()
+                proc.wait()
+                raise
             returncode = proc.wait()
         except BaseException:
             # 여기서 안 죽이면 tshark 가 고아로 남아 pcap 파일 핸들을 계속 쥔다.
@@ -477,10 +538,15 @@ def extract_exchanges(
         finally:
             if killer is not None:
                 killer.cancel()
+            if watcher is not None:
+                watcher.join(timeout=1)
             if proc.stdout is not None:
                 proc.stdout.close()
         errf.seek(0)
         err = errf.read()
+
+    if cancelled or (cancel_event is not None and cancel_event.is_set()):
+        raise InterruptedError("취소됨")
 
     if timed_out:
         raise TimeoutError(f"tshark 가 {child_timeout:g}초 안에 끝나지 않아 중단했다: {pcap}")
@@ -492,15 +558,37 @@ def extract_exchanges(
             raise ValueError(f"tshark 가 실패했다 (exit {returncode}): {last}")
         # 프레임을 건졌어도 비정상 종료면 캡처가 중간에 끊겼을 수 있다. 조용히 넘기면
         # 못 읽은 요청만큼 손실률이 실제보다 **낮게** 나오는데 사용자는 알 길이 없다.
-        print(
-            f"[!] tshark 가 exit {returncode} 로 끝났다 — 결과가 일부일 수 있다: {last}",
-            file=sys.stderr,
-        )
-        print(
-            f"[!] 읽은 ICMP 프레임 {len(frames):,}개로 계속한다. "
+        # 문구를 한 번만 만들어 stderr(CLI)와 warnings_out(웹) 양쪽에 같은 내용을
+        # 흘린다 — 두 경로가 갈라져 한쪽만 갱신되는 일을 막는다.
+        partial_msgs = [
+            f"tshark 가 exit {returncode} 로 끝났다 — 결과가 일부일 수 있다: {last}",
+            f"읽은 ICMP 프레임 {len(frames):,}개로 계속한다. "
             "손실률이 실제보다 낮게 나올 수 있으니 캡처 무결성을 확인하라.",
-            file=sys.stderr,
-        )
+        ]
+        for msg in partial_msgs:
+            print(f"[!] {msg}", file=sys.stderr)
+        if warnings_out is not None:
+            warnings_out.extend(partial_msgs)
+    return frames
+
+
+def extract_exchanges(
+    pcap: str | Path,
+    tshark: str = "tshark",
+    sender: str | None = None,
+    timeout: float = DEFAULT_REPLY_TIMEOUT,
+    child_timeout: float | None = CHILD_TIMEOUT,
+    allow_wireless: bool = False,
+) -> tuple[list[Exchange], str]:
+    """pcap 을 읽어 (교환 목록, 송신 호스트) 를 낸다.
+
+    프레임 추출(서브프로세스 실행·부분 실패 허용·자식 타임아웃)은
+    `extract_icmp_frames` 에 위임한다 — 이 함수는 그 위에 sender 선정(전체 pcap
+    최다 요청자)·무선 캡처 가드·요청↔응답 짝짓기만 얹는다. 공개 시그니처·예외
+    종류·stderr 메시지·CLI 동작은 리팩토링 전과 동일하다(tests/test_exping.py 전체
+    그린으로 검증).
+    """
+    frames = extract_icmp_frames(pcap, tshark, child_timeout)
     src = sender or pick_sender(frames)
 
     total, wireless = count_wireless_requests(frames, src)

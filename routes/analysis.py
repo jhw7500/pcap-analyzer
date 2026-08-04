@@ -75,6 +75,32 @@ def _safe_filename_id(analysis_id: str) -> str:
     )
 
 
+def _html_safe_json(payload: Any) -> str:
+    """`<script>` 블록 안에 그대로 심을 수 있는 JSON 문자열.
+
+    json.dumps는 `<`, `>`, `&`를 이스케이프하지 않는다. structured에는 업로드
+    **파일명**처럼 사용자가 정한 문자열이 실리므로(`sources[].name`), 이름에
+    `</script>`가 들어 있으면 스크립트 블록이 거기서 닫히고 그 뒤가 마크업으로
+    해석된다 — 저장형 XSS. `\\uXXXX` 이스케이프는 JSON 문자열 안에서 같은 문자로
+    복원되므로 브라우저가 파싱해 얻는 값은 그대로다.
+
+    U+2028/U+2029도 함께 이스케이프한다 — JSON에선 합법이지만 (ES2019 이전) JS
+    소스에서는 줄바꿈으로 취급돼 스크립트를 깨뜨린다.
+
+    Jinja의 `| tojson`(analysis.html의 다른 삽입부)도 같은 일을 하지만 여기서는
+    쓰지 않는다: `default=str`(직렬화 불가 값 방어)과 `ensure_ascii=False`(한글이
+    \\uXXXX로 부풀지 않게)가 필요하기 때문이다.
+    """
+    return (
+        json.dumps(payload, ensure_ascii=False, default=str)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
 def _build_casefile_or_error(result: dict[str, Any], incident_id: str = ""):
     try:
         payload = build_casefile(result, incident_id=incident_id)
@@ -104,9 +130,8 @@ async def analysis_page(request: Request, analysis_id: str):
         "analysis.html",
         {
             "result": result,
-            "result_json": json.dumps(
-                result.get("structured", {}), ensure_ascii=False, default=str
-            ),
+            # `| safe`로 <script> 안에 그대로 심기므로 HTML-safe 직렬화가 필수다.
+            "result_json": _html_safe_json(result.get("structured", {})),
             "offline_assets": config.is_offline_assets(),
             "pdf_available": is_pdf_available(),
         },

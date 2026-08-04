@@ -25,6 +25,32 @@ from ..core.thresholds import (
 )
 
 
+def is_special_ip(ip: str) -> bool:
+    """멀티캐스트·링크로컬·루프백·브로드캐스트·미지정 주소 판정.
+
+    `_structured_overview`의 자기 IP 후보 필터와 `pipeline._derived_ip_filter`의
+    mac_filter→ip_filter 유도가 이 규칙을 공유한다 — 한쪽만 넓히면 두 경로가 서로
+    다른 "특수 IP" 정의를 쓰게 돼 유도 결과에 링크로컬/루프백 잔재가 섞일 수 있다.
+    모듈 밖(pipeline.py)에서도 import해 쓰므로 공개 이름을 쓴다.
+    """
+    if ip in ("", "0.0.0.0", "255.255.255.255", "::"):
+        return True
+    if ip.lower().startswith("ff") and ":" in ip:  # IPv6 multicast
+        return True
+    try:
+        octets = ip.split(".")
+        first = int(octets[0])
+        if 224 <= first <= 239:  # IPv4 multicast
+            return True
+        if first == 127:  # IPv4 loopback
+            return True
+        if first == 169 and int(octets[1]) == 254:  # IPv4 link-local
+            return True
+    except (ValueError, IndexError):
+        pass
+    return False
+
+
 def _structured_overview(
     frames: List[Frame],
     roles: Dict[str, Dict[str, Any]],
@@ -45,25 +71,12 @@ def _structured_overview(
     # MAC ↔ IP 매핑 — 관찰된 IP 양측 추출:
     #   송신(TA=mac)의 ip.src + 수신(RA=mac)의 ip.dst
     # 단방향 캡처에서 한 쪽만 잡히는 케이스를 보완하기 위해 양쪽 모두 본다.
-    # broadcast/multicast/unspecified는 제외
-    def _is_special_ip(ip: str) -> bool:
-        if ip in ("", "0.0.0.0", "255.255.255.255", "::"):
-            return True
-        if ip.lower().startswith("ff") and ":" in ip:  # IPv6 multicast
-            return True
-        try:
-            first = int(ip.split(".")[0])
-            if 224 <= first <= 239:  # IPv4 multicast
-                return True
-        except (ValueError, IndexError):
-            pass
-        return False
-
+    # broadcast/multicast/링크로컬/루프백/unspecified는 제외 (is_special_ip)
     def _split_ips(raw: str):
         # tshark는 같은 필드의 multi-value를 콤마로 join해서 반환할 수 있음
         for ip in raw.split(","):
             ip = ip.strip()
-            if ip and not _is_special_ip(ip):
+            if ip and not is_special_ip(ip):
                 yield ip
 
     # 빈도 기반 IP 후보 수집:
@@ -708,6 +721,313 @@ def _structured_system_stats(frames: List[Frame], index) -> Dict[str, Any]:
     return _device_entry_stats(frames, lambda f: bool(f.ta), "", "SYSTEM")
 
 
+#: 유선 손실 구간 대조 창 (streak 앞뒤 초) — 로밍·재전송이 손실보다 약간 앞설 수 있다
+_WIRED_LOSS_WINDOW_SEC = 2.0
+#: 대조하는 streak 수 상한 — 이슈 목록 폭주 방지
+_WIRED_LOSS_MAX_STREAKS = 20
+#: 재전송 "폭주"로 인정하는 최소 건수/비율 — 이 둘을 모두 넘겨야 이상 징후로 본다.
+#: 낱개 retry는 정상 동작이라 이상 징후에 포함하지 않는다.
+_WIRED_LOSS_RETRY_MIN = 3
+_WIRED_LOSS_RETRY_PCT = 30.0
+
+
+def _cliffs_overlapping_window(signal_cliffs, win, allow_names=None):
+    """cliff 중 시간 구간이 손실 창과 겹치는 것들. [(sta_name, cliff), ...].
+
+    allow_names가 주어지면 그 STA 이름들의 cliff만 본다 — 대상 STA가 특정된
+    경우 무관한 STA의 절벽이 이 STA의 유선 손실을 이상 징후로 둔갑시키면 안 된다.
+    None이면(매핑 실패) 전체 STA를 본다.
+
+    signal_cliffs는 직렬화 라운드트립에서 null이거나 dict가 아닌 항목을 포함할 수
+    있다(구버전 result 호환) — sta_diags의 기존 방어 패턴과 동일하게 isinstance로 거른다.
+    cliff는 {epoch, duration_sec, drop_db, ...}(analyzer/web/signal_cliff.py) — 프레임
+    참조가 없어 [epoch, epoch+duration_sec] 구간으로 겹침을 판정한다.
+    """
+    out = []
+    if not isinstance(signal_cliffs, dict):
+        return out
+    for sta_name, sc in signal_cliffs.items():
+        if allow_names is not None and sta_name not in allow_names:
+            continue
+        if not isinstance(sc, dict):
+            continue
+        for c in sc.get("cliffs") or []:
+            if not isinstance(c, dict):
+                continue
+            c_start = c.get("epoch")
+            if not isinstance(c_start, (int, float)):
+                continue
+            dur = c.get("duration_sec")
+            c_end = c_start + dur if isinstance(dur, (int, float)) else c_start
+            if c_start <= win["end_epoch"] and c_end >= win["start_epoch"]:
+                out.append((sta_name, c))
+    return out
+
+
+def _cliff_sta_names(signal_stas, sta_macs):
+    """signal["stas"]의 이름→mac 매핑으로 sta_macs에 해당하는 STA 이름 집합.
+
+    signal_cliffs의 키는 STA 표시명(roles[mac]["name"])이라 MAC과 직접 비교할 수
+    없다. structured["signal"]["stas"][name]["mac"]이 그 역참조를 제공한다.
+    """
+    names = set()
+    if not isinstance(signal_stas, dict):
+        return names
+    for name, info in signal_stas.items():
+        if isinstance(info, dict) and info.get("mac") in sta_macs:
+            names.add(name)
+    return names
+
+
+def _cliff_frame_refs(cliffs, signal_stas, frames, index):
+    """cliff 근거 프레임 — evidence.cliff_evidence를 STA별로 재사용해 소싱.
+
+    "창 안 아무 프레임"을 근거로 대면 "이 구간에 RSSI 절벽이 있었다"는 결론과
+    프레임 사이에 인과가 없다. cliff 시각 ±1초의 그 STA 송신 프레임을 근거로
+    삼는 기존 헬퍼(sta_diags의 signal_cliff issue와 동일)를 그대로 쓴다.
+    """
+    from . import evidence as ev
+
+    by_mac = defaultdict(list)
+    for sta_name, c in cliffs:
+        info = signal_stas.get(sta_name) if isinstance(signal_stas, dict) else None
+        mac = info.get("mac") if isinstance(info, dict) else None
+        if mac:
+            by_mac[mac].append(c)
+    refs = []
+    for mac, mac_cliffs in by_mac.items():
+        nums, _win = ev.cliff_evidence(mac, mac_cliffs, frames, index)
+        refs.extend(nums)
+    return refs
+
+
+def _frame_is_ap(mac, frame, ap_macs):
+    """이 프레임에서 그 MAC이 AP인가 — detected roles 또는 프레임의 BSSID로 판정.
+
+    인프라 모드에서 BSSID는 AP의 MAC이다: TA==BSSID면 AP가 송신한 프레임,
+    RA==BSSID면 AP가 수신한 프레임. beacon/ProbeResp/AssocResp가 없어
+    detect_roles가 AP를 못 찾은 data-only 캡처에서도 이 판정은 성립하므로,
+    ap_macs만 보는 것보다 훨씬 넓은 캡처에서 AP를 가려낼 수 있다.
+
+    BSSID가 비면(필드 없음/파싱 실패) 그 프레임에 대해서는 판정 근거가 없어
+    False — 호출부가 기존 방향 휴리스틱으로 떨어진다. IBSS/ad-hoc은 BSSID가 어느
+    단말의 MAC도 아니므로 자연히 False가 되어 영향이 없다.
+    """
+    if not mac:
+        return False
+    return mac in ap_macs or (bool(frame.bssid) and mac == frame.bssid)
+
+
+def _sender_sta_macs_by_target(frames, sender, ap_macs=None, targets=None):
+    """ping **대상 IP별** 무선 상대 STA MAC 집합. {target_ip: {mac, ...}}.
+
+    streak마다 그 streak의 target 매핑만 써야 한다 — sender가 여러 STA를 ping하는
+    캡처에서 전체 target의 매핑을 합쳐 쓰면(union) target B STA의 로밍/재전송
+    폭주/RSSI 절벽이 target A의 손실 구간을 설명하는 근거로 둔갑한다.
+
+    앵커로 쓰는 프레임은 **그 GT가 집계한 ping 모집단**(sender↔targets의 ICMP echo
+    request/reply)으로 한정한다. sender IP가 실린 아무 패킷이나 앵커로 쓰면, 같은
+    호스트가 무관한 STA로 보내는 TCP/UDP 트래픽까지 매핑에 섞여 그 STA의
+    로밍·재전송 폭주·RSSI 절벽이 대상 STA의 유선 손실을 high로 둔갑시킨다.
+    targets(gt['targets'] 키)가 없으면(구버전 결과 등) sender 기준 ICMP echo만으로
+    매핑한다 — 대상 목록이 없다는 이유로 매핑을 포기하진 않는다.
+
+    앵커 프레임에서 그 IP의 **무선 상대편**을 역추적한다. 어느 쪽이 상대인지는
+    토폴로지에 따라 다르다:
+
+    - sender가 STA 자신인 배치: 업링크 요청은 STA가 직접 송신하므로
+      ip.src==sender 프레임의 TA가 STA, 응답은 STA로 돌아오므로 ip.dst==sender
+      프레임의 RA가 STA.
+    - sender가 AP **상류**인 배치(유선 EXPING PC가 AP 너머의 STA들을 ping —
+      이 도구의 주 용도): 다운링크 요청은 AP가 송신하므로 ip.src==sender 프레임의
+      TA는 AP고 상대 STA는 RA, 업링크 응답은 ra=AP이므로 상대 STA는 TA다.
+
+    두 배치를 가르는 근거는 "프레임의 한쪽이 AP인가"다 — AP면 반대편이 그 sender의
+    무선 상대다. AP를 STA로 잘못 매핑하면 그 AP를 경유하는 모든 무선 트래픽이
+    스코프에 들어와(AP는 모든 STA의 상대다) 스코프가 통째로 무력화된다. 판정은
+    `_frame_is_ap`가 detected roles(ap_macs)와 **프레임의 BSSID** 둘 다로 한다 —
+    beacon/ProbeResp/AssocResp가 없는 data-only 캡처는 detect_roles가 AP를 하나도
+    못 찾지만, 인프라 모드의 BSSID는 AP의 MAC이라 프레임만으로도 판정된다.
+    한계: ap_macs가 비고 BSSID도 없는 프레임은 판정 근거가 전무해 기존 방향
+    휴리스틱(요청의 TA / 응답의 RA)으로 떨어진다 — sender가 STA 자신인 배치에서만
+    맞고, 상류 배치라면 그 프레임에서는 AP가 매핑될 수 있다.
+
+    브로드캐스트/멀티캐스트는 제외(_is_unicast). 어떤 target의 앵커도 못 찾으면 그
+    키는 아예 없다 — 호출부가 그 streak만 "매핑 실패"로 처리해 전체-무선 대조로
+    폴백한다. sender가 STA 자신인 배치에서는 모든 target이 같은 MAC(그 STA의
+    라디오)으로 매핑되는데, 실제로 같은 라디오이므로 정상이다.
+    """
+    by_target: Dict[str, set] = defaultdict(set)
+    if not sender:
+        return {}
+    from ..core.detector import _is_unicast
+
+    ap_macs = ap_macs or set()
+    # targets: gt["targets"]는 {대상IP: {...}} — 키만 쓴다. 구버전/오염 값(None,
+    # 문자열 등)은 빈 집합으로 정규화해 "대상 제한 없음"으로 떨어뜨린다.
+    target_ips = set(targets) if isinstance(targets, (dict, list, set, tuple)) else set()
+    for f in frames:
+        if f.is_icmp_request and f.ip_src == sender:
+            # echo request(sender → 대상). 송신자가 AP면 다운링크 — 상대는 RA.
+            target, peer = f.ip_dst, (f.ra if _frame_is_ap(f.ta, f, ap_macs) else f.ta)
+        elif f.is_icmp_reply and f.ip_dst == sender:
+            # echo reply(대상 → sender). 수신자가 AP면 업링크 — 상대는 TA.
+            target, peer = f.ip_src, (f.ta if _frame_is_ap(f.ra, f, ap_macs) else f.ra)
+        else:
+            continue
+        if target_ips and target not in target_ips:
+            continue
+        # 고른 상대까지 AP면(DS 간 전달 등) 그 프레임은 앵커 기여 없음 — 잘못된
+        # 매핑보다 무매핑이 낫다(호출부가 매핑 실패로 폴백한다).
+        if target and _is_unicast(peer) and not _frame_is_ap(peer, f, ap_macs):
+            by_target[target].add(peer)
+    return dict(by_target)
+
+
+def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None, signal_stas=None,
+                                   index=None, ap_macs=None):
+    """유선 확정 손실 streak별 무선 대조 이슈 후보. 근거 프레임이 없으면 후보 제외.
+
+    로밍/재전송/RSSI 절벽 판정은 **그 streak의 target에 대응하는 STA**로 스코프를
+    좁힌다(_sender_sta_macs_by_target) — 그러지 않으면 다중 STA 캡처에서 무관한
+    STA나 다른 target STA의 이벤트가 이 손실을 설명하는 근거로 둔갑한다. 매핑
+    앵커는 GT가 집계한 ping 모집단(sender↔gt['targets']의 ICMP echo)으로 한정되고
+    (sender의 비-ICMP 트래픽이 무관한 STA를 끌어들이지 못하게), ap_macs(detected
+    roles의 AP MAC)로 AP를 배제한다 — sender가 AP 상류면 sender IP가 걸린 프레임의
+    상대가 AP라 AP를 매핑하게 되고, 그러면 그 AP를 경유하는 전체 무선이 스코프에
+    들어와 스코프가 무력화된다. cliff는 signal_cliffs의 키가 STA 표시명이라
+    signal_stas(=structured["signal"]["stas"], name→mac)로 역참조해 그 streak의 STA
+    것만 인정한다. 매핑 실패(그 target의 ping이 무선에 안 잡힘, 암호화 미해제 등)
+    시 **그 streak만** 전체-무선 대조로 폴백하되 귀속이 불확실하므로 severity를
+    high→medium으로 낮추고 msg에 명시한다.
+
+    이상 징후 = 로밍/해제 프레임 ≥1 또는 재전송 폭주(_WIRED_LOSS_RETRY_MIN건 이상 &&
+    _WIRED_LOSS_RETRY_PCT% 이상) 또는 창과 겹치는 signal_cliff ≥1 (스펙 §4).
+    낱개 retry(폭주 미달)만으로는 이상 징후로 보지 않는다 — 정상 동작 범위.
+
+    frame_refs는 무선 pcap의 frame.number다 — 유선 프레임 번호를 섞으면 프레임
+    테이블 조회가 깨진다. 캡처 구멍(창 안에 무선 프레임 0건)은 근거를 댈 수
+    없어 이슈를 만들지 않는다(근거 없는 결론 금지) — 알려진 한계.
+    """
+    signal_cliffs = signal_cliffs if isinstance(signal_cliffs, dict) else {}
+    signal_stas = signal_stas if isinstance(signal_stas, dict) else {}
+    mapping = _sender_sta_macs_by_target(
+        frames, gt.get("sender") or "", ap_macs, gt.get("targets")
+    )
+    # target별 sta_bssids(그 STA가 관측된 BSSID) — **전체 frames**에서 한 번씩만
+    # 계산해 재사용한다(PR #22 14라운드 — Codex P1). STA의 소속 AP는 손실 창과
+    # 무관한 전역 속성이라, in_win(그 streak의 창)으로 제한하면 창 안에 이 STA의
+    # 트래픽이 우연히 없을 때(사용자 활동이 뜸한 순간) sta_bssids가 비어 버린다
+    # — 전체 캡처에는 이 STA가 어느 AP에 붙어 있었는지 보여주는 프레임이 있을
+    # 수 있는데도 그 정보를 못 쓰게 된다. 같은 target이 여러 streak를 가질 수
+    # 있어(반복 손실 구간) target별로 한 번만 계산해 streak마다 전체 frames를
+    # 다시 스캔하지 않는다.
+    bssids_by_target = {
+        target: {g.bssid for g in frames
+                 if (g.ta in sta_macs or g.ra in sta_macs) and g.bssid}
+        for target, sta_macs in mapping.items()
+    }
+
+    out = []
+    for streak in (gt.get("streaks") or [])[:_WIRED_LOSS_MAX_STREAKS]:
+        start, end = streak.get("start_epoch"), streak.get("end_epoch")
+        if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+            continue
+        # 이 streak의 target STA만 — 다른 target STA의 이벤트는 이 손실의 근거가 아니다.
+        sta_macs = mapping.get(streak.get("target")) or set()
+        mapped = bool(sta_macs)
+        sta_label = (
+            f"STA {', '.join(sorted(sta_macs))}" if mapped
+            else "STA 매핑 불가 — 전체 무선 기준"
+        )
+        # 매핑 성공 시 그 STA의 cliff만, 실패 시 None(전체 STA)으로 폴백.
+        cliff_names = _cliff_sta_names(signal_stas, sta_macs) if mapped else None
+        win = {"start_epoch": start - _WIRED_LOSS_WINDOW_SEC,
+               "end_epoch": end + _WIRED_LOSS_WINDOW_SEC}
+        in_win = [f for f in frames if win["start_epoch"] <= f.epoch <= win["end_epoch"]]
+        if not in_win:
+            continue
+        # 매핑 성공 시 대상 STA의 프레임만, 실패 시 기존처럼 창 안 전체.
+        scoped = (
+            [f for f in in_win if f.ta in sta_macs or f.ra in sta_macs]
+            if mapped else in_win
+        )
+        if mapped:
+            # AP가 그 STA로 보내는 **브로드캐스트** Deauth/Disassoc(ta=AP,
+            # ra=브로드캐스트)는 위 STA-MAC 술어(ta/ra ∈ sta_macs)에 걸리지 않는다
+            # — ra가 브로드캐스트라 sta_macs 어디에도 없기 때문이다. 그 STA에 실제로
+            # 영향을 미치는 방송 해제인데도 스코프에서 빠지면 창 안에 다른 이벤트가
+            # 없을 때 "무선 이상 징후 없음"으로 오판된다(PR #22 12라운드 — Codex P1).
+            # sta_bssids(전체 frames 기준, 위에서 target별로 사전 계산 — 14라운드)로
+            # AP가 여럿인 캡처(로밍 등)에서 이 STA의 AP만 특정해 무관 AP의 방송
+            # 해제를 배제한다. sta_bssids가 비면(이 STA가 전체 캡처에서도 BSSID와
+            # 함께 한 번도 관측되지 않음) 그 STA의 AP를 특정할 근거가 전무하다 —
+            # 12라운드의 _frame_is_ap 폴백(아무 AP나 수용)은 폐기했다. 근거 없이
+            # 아무 AP를 그 STA의 AP로 추정하면 다중 AP 캡처에서 무관 AP의 방송
+            # 해제가 이 STA의 손실 근거로 오귀속된다 — "무매핑이 오매핑보다
+            # 낫다"는 9라운드 원칙과 같다.
+            from ..core.detector import BROADCAST
+            sta_bssids = bssids_by_target.get(streak.get("target")) or set()
+            if sta_bssids:
+                for f in in_win:
+                    if f.subtype not in ("10", "12") or f.ra != BROADCAST:
+                        continue
+                    if (f.ta in sta_bssids or f.bssid in sta_bssids) and f not in scoped:
+                        scoped.append(f)
+        # DeAuth(12)는 is_roaming_related(ROAMING_SUBTYPES)가 이미 포함하므로
+        # 여기선 그것만으로 안 잡히는 DisAssoc(10)만 보강한다.
+        roam = [f for f in scoped if f.is_roaming_related or f.subtype == "10"]
+        data_frames = [f for f in scoped if f.is_data]
+        retry_frames = [f for f in data_frames if f.retry]
+        retry_pct = (len(retry_frames) * 100.0 / len(data_frames)) if data_frames else 0.0
+        retry_burst = (
+            len(retry_frames) >= _WIRED_LOSS_RETRY_MIN
+            and retry_pct >= _WIRED_LOSS_RETRY_PCT
+        )
+        cliffs = _cliffs_overlapping_window(signal_cliffs, win, cliff_names)
+
+        reasons = []
+        if roam:
+            reasons.append(f"로밍/해제 {len(roam)}건")
+        if retry_burst:
+            reasons.append(
+                f"재전송 폭주({len(retry_frames)}/{len(data_frames)}={retry_pct:.0f}%)"
+            )
+        if cliffs:
+            reasons.append(f"RSSI 절벽 {len(cliffs)}건")
+
+        head = (f"유선 확정 손실 {streak.get('count')}건 "
+                f"({streak.get('target', '?')}, {streak.get('duration_sec')}초)")
+        if reasons:
+            # 매핑 실패 시 귀속이 불확실하므로 severity를 medium으로 낮춘다
+            # (근거·메시지는 그대로 보존 — 정보 자체는 여전히 유용하다).
+            severity = "high" if mapped else "medium"
+            # refs: 창 안 로밍/retry 프레임(폭주 미달이라도)에, cliff가 있으면
+            # cliff 시각 근처 프레임(_cliff_frame_refs)을 더한다 — 각 근거가
+            # msg에 적은 사유와 실제로 대응하도록. 끝내 아무것도 못 찾으면
+            # 스코프 전체로 폴백한다(근거 없는 결론 금지의 최후 수단).
+            anomaly = {f.number for f in roam} | {f.number for f in retry_frames}
+            if cliffs:
+                anomaly.update(_cliff_frame_refs(cliffs, signal_stas, frames, index))
+            refs = sorted(anomaly) if anomaly else [f.number for f in scoped]
+            issue = {
+                "severity": severity, "category": "유선 손실",
+                "msg": f"{head} — 구간 내 무선: {', '.join(reasons)} ({sta_label})",
+                "action": "통합 타임라인에서 해당 구간의 로밍·재전송·RSSI를 확인하세요.",
+            }
+        else:
+            issue = {
+                "severity": "medium", "category": "유선 손실",
+                "msg": (f"{head} — 구간 내 무선 이상 징후 없음 "
+                        f"(트래픽 {len(scoped)}건 정상, {sta_label})"),
+                "action": "무선 구간 외 원인(유선/AP 상위단)을 의심하세요.",
+            }
+            refs = [f.number for f in scoped]
+        out.append({"issue": issue, "refs": refs, "window": win,
+                    "signal_type": "wired_loss"})
+    return out
+
+
 def _structured_diagnosis(
     structured: Dict[str, Any], frames: List[Frame] = None, index=None
 ) -> Dict[str, Any]:
@@ -1059,6 +1379,22 @@ def _structured_diagnosis(
                     "time_window": issue.get("time_window"),
                 }
             )
+
+    # 유선 ground truth 손실 구간 ↔ 무선 이벤트 대조 (스펙 §4)
+    # ap_macs: sender→STA 매핑에서 AP를 배제하기 위한 집합. signal["aps"]는
+    # _structured_signal이 roles의 role=="AP"에서 만든 것이라 detect_roles의 AP
+    # 집합과 동일하다 — roles를 진단 함수까지 새로 넘기지 않고 같은 출처를 쓴다
+    # (cliff 매핑이 쓰는 signal["stas"]와 대칭).
+    ap_macs = {
+        info.get("mac") for info in (signal.get("aps") or {}).values()
+        if isinstance(info, dict) and info.get("mac")
+    }
+    for cand in _ground_truth_issue_candidates(
+        ping.get("ground_truth") or {}, frames or [], structured.get("signal_cliffs"),
+        signal.get("stas"), index, ap_macs,
+    ):
+        _add_net_issue(cand["issue"], cand["refs"], cand["window"],
+                       signal_type=cand["signal_type"])
 
     severity_order = {"high": 0, "medium": 1, "low": 2}
     all_issues.sort(key=lambda x: severity_order.get(x["severity"], 3))

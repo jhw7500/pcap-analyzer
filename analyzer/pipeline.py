@@ -9,6 +9,7 @@ from .core.extractor import extract_frames, detect_tshark_version
 from .core.channels import ap_channel_map
 from .core.detector import detect_roles
 from .core.indexer import FrameIndex
+from .core.wired_ping import build_ground_truth
 from .core.modules import (
     overview, retry_mcs, retry_burst, roaming, ping_rtt,
     control_traffic, signal_quality, per_second,
@@ -20,6 +21,7 @@ from .web.signal_cliff import analyze_signal_cliffs
 from .web.evidence import build_debug_block
 from .web.structured import (
     PING_MATCH_WINDOW_SEC,
+    is_special_ip,
     _structured_overview,
     _structured_signal,
     _structured_ping,
@@ -51,6 +53,45 @@ def _make_id(pcap_path: str) -> str:
     return f"{ts}_{name}_{h}"
 
 
+def _derived_ip_filter(frames, mac_filter: str) -> str:
+    """mac_filter 대상 STA가 **자기 IP로 쓴 주소**들을 유선 GT용 ip_filter 문자열로.
+
+    mac_filter는 유선(비-802.11) 캡처에 MAC 개념이 없어 그대로 넘길 수 없다. 대신
+    필터 대상 STA의 IP를 유도해 넘기면 유선 GT도 같은 모집단을 본다 — 그러지 않으면
+    무선은 특정 STA만, 유선은 sender의 모든 target을 집계해 GT 카드가 서로 다른
+    모집단을 비교하고 필터 밖 target의 streak가 전체 기준 진단으로 폴백한다.
+
+    "프레임에 보이는 모든 IP"가 아니라 **대상 STA 자신의 IP**만 모으는 이유: 유선
+    GT의 sender(ping을 보낸 호스트) IP까지 목록에 들어가면 wired_ping의
+    `_filter_exchanges`가 "sender가 필터에 있으면 전체 유지"(무선 `ip.addr ==`
+    대칭 규칙) 경로를 타서 다른 target들이 그대로 남는다 — 모집단이 다시 어긋난다.
+    대상 STA의 IP만 넘기면 그 STA와의 ping만 남는다. sender가 곧 그 STA인 직접
+    토폴로지에서는 그 IP가 sender라 전체 유지가 되는데, 그 경우엔 그게 정확한
+    모집단이다(그 STA가 보낸 모든 ping).
+
+    자기 IP 판정은 `_structured_overview`의 dev_ip 수집과 같은 규칙 — 그 STA가
+    송신(ta)한 프레임의 ip.src, 수신(ra)한 프레임의 ip.dst. tshark는 같은 필드의
+    multi-value를 콤마로 join해 주므로 콤마로 분해한다. 멀티캐스트/링크로컬/루프백/
+    브로드캐스트/미지정 주소는 `structured.is_special_ip`(같은 규칙을 공유 —
+    `_structured_overview`의 자기 IP 후보 필터와 동일한 정의를 써야 두 경로가
+    "특수 IP"를 다르게 취급하지 않는다)로 제외한다. 유도된 IP가 하나도 없으면
+    빈 문자열 — 호출부가 "동등 필터 유도 불가"로 처리한다.
+    """
+    macs = {m.strip().lower() for m in mac_filter.split(",") if m.strip()}
+    if not macs:
+        return ""
+    ips = set()
+    for f in frames:
+        for mac, raw in ((f.ta, f.ip_src), (f.ra, f.ip_dst)):
+            if (mac or "").lower() not in macs:
+                continue
+            for ip in (raw or "").split(","):
+                ip = ip.strip()
+                if ip and not is_special_ip(ip):
+                    ips.add(ip)
+    return ",".join(sorted(ips))
+
+
 def run_analysis(
     pcap_path: str,
     ssid: str = "",
@@ -59,6 +100,7 @@ def run_analysis(
     time_end: str = "",
     mac_filter: str = "",
     ip_filter: str = "",
+    wired_path: str = "",
     progress_cb: Optional[Callable[[str, int], None]] = None,
     cancel_event: Optional[Any] = None,
 ) -> Dict[str, Any]:
@@ -158,6 +200,68 @@ def run_analysis(
 
     _progress("시각화: Ping 데이터 생성 중...", 93)
     structured["ping"] = _structured_ping(frames, roles)
+    if _cancelled():
+        return {"cancelled": True}
+
+    # 입력 파일 메타 — 유선 ground truth가 있으면 ping에 부착 (스펙 §4·§6)
+    sources = [{
+        "name": Path(pcap_path).name, "role": "wireless",
+        "frame_count": len(frames), "warnings": [],
+    }]
+    if wired_path:
+        _progress("유선 ground truth 분석 중...", 93)
+        # time_start/end·ip_filter는 무선 extract_frames()와 동일 구간을 보도록
+        # 대칭 전달 — 그래야 유선 GT와 무선 관측이 같은 구간을 비교한다.
+        # mac_filter는 유선(비-802.11) exchange에 MAC 개념이 없어 그대로 못 넘기므로,
+        # 이미 필터가 적용된 무선 프레임의 IP로 동등한 ip_filter를 유도해 별도 인자
+        # (derived_ip_filter)로 전달한다. 사용자 ip_filter는 **항상 그대로** 전달하고
+        # (10라운드처럼 유도값으로 대체하지 않는다), build_ground_truth 내부에서 두
+        # 필터를 독립적으로 순차 적용해 AND로 결합한다 (PR #22 11라운드 — Finding A).
+        # 대체 방식(10라운드)의 결함: 직접 토폴로지(mac_filter 대상 STA == sender)에서
+        # 유도값은 sender 자신의 IP다 — 이 값이 사용자가 명시한 target-only ip_filter를
+        # 덮어쓰면, 유선 `_filter_exchanges`의 "sender가 필터에 있으면 전체 유지"
+        # 경로를 타 사용자가 원한 target 좁히기가 사라진다. 병행(AND) 방식에서는 사용자
+        # 필터가 narrowing을 맡고 derived 필터(sender 포함)는 무해한 no-op이 되어
+        # 두 토폴로지(직접/상류) 모두 옳다 — 자세한 근거는 wired_ping.build_ground_truth
+        # docstring 참조.
+        wired_derived_filter, skip_reason = "", ""
+        if mac_filter:
+            derived = _derived_ip_filter(frames, mac_filter)
+            if derived:
+                wired_derived_filter = derived
+            else:
+                # 유도 실패(미해독 캡처 등) — 다른 모집단을 비교하느니 생략한다.
+                skip_reason = (
+                    "mac_filter와 동등한 유선 필터를 유도할 수 없어 ground truth 를 "
+                    "생략했다 (무선 프레임에서 대상 STA의 IP를 찾지 못함)"
+                )
+        if skip_reason:
+            sources.append({
+                "name": Path(wired_path).name, "role": "wired",
+                "frame_count": None, "warnings": [skip_reason],
+            })
+        else:
+            gt = build_ground_truth(
+                wired_path,
+                tshark_path=_tshark_path or "tshark",
+                time_start=time_start,
+                time_end=time_end,
+                ip_filter=ip_filter,
+                derived_ip_filter=wired_derived_filter,
+                cancel_event=cancel_event,
+            )
+            if gt.get("cancelled"):
+                return {"cancelled": True}
+            wired_src = {
+                "name": Path(wired_path).name, "role": "wired",
+                "frame_count": None, "warnings": list(gt.get("warnings", [])),
+            }
+            if "error" in gt:
+                wired_src["warnings"].append(gt["error"])
+            else:
+                structured.setdefault("ping", {})["ground_truth"] = gt
+            sources.append(wired_src)
+    structured["sources"] = sources
     if _cancelled():
         return {"cancelled": True}
 
