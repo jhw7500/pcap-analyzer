@@ -21,6 +21,7 @@ merge.py의 dedup 키((TA, seq, subtype, retry))가 A/B의 "같은 물리 프레
     python3 tests/fixtures/generate_sample_dual.py
 결과:
     sample_dual_a.pcap, sample_dual_b.pcap (각각 작은 크기)
+    sample_wired.pcap (유선 RTT 골든 테스트용)
 """
 from pathlib import Path
 

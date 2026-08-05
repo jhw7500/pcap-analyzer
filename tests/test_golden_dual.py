@@ -47,8 +47,9 @@ def result():
 
 @pytest.fixture(scope="module")
 def result_wired():
-    if not (FIXTURE_A.exists() and FIXTURE_B.exists() and FIXTURE_WIRED.exists()):
-        pytest.skip("fixture pcap not found")
+    _skip_if_missing()
+    if not FIXTURE_WIRED.exists():
+        pytest.skip(f"fixture pcap not found: {FIXTURE_WIRED}")
     return run_analysis(str(FIXTURE_A), wireless_paths=[str(FIXTURE_B)],
                         wired_path=str(FIXTURE_WIRED))
 
