@@ -22,6 +22,7 @@ pytestmark = [pytest.mark.slow, pytest.mark.tshark]
 
 FIXTURE_A = Path(__file__).parent / "fixtures" / "sample_dual_a.pcap"
 FIXTURE_B = Path(__file__).parent / "fixtures" / "sample_dual_b.pcap"
+FIXTURE_WIRED = Path(__file__).parent / "fixtures" / "sample_wired.pcap"
 
 # generate_sample_dual.py 설계값 — 생성기 상수와 1:1 대응
 NUM_BEACONS = 12
@@ -42,6 +43,15 @@ def _skip_if_missing():
 def result():
     _skip_if_missing()
     return run_analysis(str(FIXTURE_A), wireless_paths=[str(FIXTURE_B)])
+
+
+@pytest.fixture(scope="module")
+def result_wired():
+    _skip_if_missing()
+    if not FIXTURE_WIRED.exists():
+        pytest.skip(f"fixture pcap not found: {FIXTURE_WIRED}")
+    return run_analysis(str(FIXTURE_A), wireless_paths=[str(FIXTURE_B)],
+                        wired_path=str(FIXTURE_WIRED))
 
 
 @pytest.fixture(scope="module")
@@ -144,3 +154,14 @@ def test_sniffer_compare_golden(result):
     # 배지 불변식 자체(키 존재 + 값 w1/w2 정확 일치)는 다음 테스트가 검증한다:
     # tests/test_frame_table.py::TestSourceBadge::test_debug_block_rows_carry_source_only_with_sniffer_compare
     assert result["structured"]["debug"]["frames"] == []
+
+
+def test_wired_rtt_golden_exact(result_wired):
+    """유선 RTT 골든 — 결정적 픽스처라 통계를 정확값으로 고정한다(스펙 §1·§6)."""
+    gt = result_wired["structured"]["ping"]["ground_truth"]
+    assert (gt["total"], gt["ok"], gt["ng"], gt["loss_pct"]) == (5, 4, 1, 20.0)
+    ex = gt["exchanges"]
+    assert len(ex) == gt["total"]
+    assert [e["rtt_ms"] for e in ex] == [1.0, 2.0, None, 4.0, 5.0]
+    assert gt["rtt_stats"] == {"n": 4, "min_ms": 1.0, "avg_ms": 3.0,
+                               "max_ms": 5.0, "p95_ms": 5.0}
