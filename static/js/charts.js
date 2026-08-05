@@ -1138,6 +1138,7 @@
         ? gt.exchanges : null;
 
     function renderPingKpiWired() {
+        if (!pingKpi) return;
         const rs = gt.rtt_stats || null;
         pingKpi.innerHTML = [
             { label: '총 요청 (유선 확정)', value: (gt.total ?? 0).toLocaleString() + '건', color: '' },
@@ -1195,6 +1196,7 @@
     }
 
     function renderPingStatsWired() {
+        if (!pingStats) return;
         const rs = gt.rtt_stats || null;
         const rows = [
             ['총 요청', (gt.total ?? 0).toLocaleString() + '건'],
