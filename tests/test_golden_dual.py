@@ -137,9 +137,11 @@ def test_sniffer_compare_golden(result):
         assert sum(p["frames"] for p in sc["series"][tag]) \
             == by_tag[tag]["frame_count"]
 
-    # debug 행 출처 배지 — 존재 시 반드시 실제 태그 집합 안에 있어야 한다.
-    # (진단 이슈가 없으면 debug.frames는 공) —뮤테이션 내성: frame_to_row의
-    # include_source 분기가 깨지면 source 값이 누락되거나 타문자열이 된다.
+    # ⑤ debug 행 출처 배지: frame_to_row(include_source=True) 불변식 검증.
+    # 구조적으로 이 골든 픽스처는 네트워크 이상 없음(diagnosis["issues"] 0건)
+    # → debug["frames"]는 항상 빈 배열이므로 아래 조건부 분기는 실제 검증 불가.
+    # 진정한 검증(non-empty frame_refs 주입 + source 배지 단언)은 별도 테스트에
+    # 위임: tests/test_frame_table.py::TestSourceBadge::test_debug_block_rows_carry_source_only_with_sniffer_compare
     rows = result["structured"]["debug"]["frames"]
     if rows:
         assert all(r.get("source") in ("w1", "w2") for r in rows)
