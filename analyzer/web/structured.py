@@ -70,6 +70,60 @@ def _structured_merge(mr: MergeResult) -> Dict[str, Any]:
     }
 
 
+def _structured_sniffer_compare(mr: MergeResult) -> Optional[Dict[str, Any]]:
+    """스니퍼 비교 스키마(structured["sniffer_compare"]) 생성 — 스펙 §5.
+
+    소스가 2개 미만이면 None — 비교 대상이 없으니 섹션 자체를 생략한다
+    (alignment 전용 merge로 생존 소스가 1개인 경우 포함). 시계열은
+    per_source(보정된 epoch) 기준 **시간 창 적용 전** 전체 구간이다 —
+    _structured_merge와 같은 원칙(정렬·병합 통계는 창과 무관하게 전체 구간
+    기준)이고, coverage도 같은 mr.stats에서 그대로 재노출한다.
+
+    per_source 계약(analyzer/core/merge.py MergeResult 주석): 여기서 소비하는
+    필드는 epoch·retry·rssi뿐 — 셋 다 _MERGEABLE_DECODED_FIELDS에 없어 대표
+    필드 차용 오염을 받지 않고, 재번호되는 number는 쓰지 않으므로 병합 전
+    스냅샷이 필요 없다(tests/test_sniffer_compare.py의 가드 테스트로 고정).
+    """
+    if len(mr.per_source) < 2:
+        return None
+    series: Dict[str, List[Dict[str, Any]]] = {}
+    for tag, frames in mr.per_source.items():
+        counts: "Counter[int]" = Counter()
+        retries: "Counter[int]" = Counter()
+        rssi_sum: Dict[int, int] = {}
+        rssi_n: Dict[int, int] = {}
+        for f in frames:
+            sec = int(f.epoch)
+            counts[sec] += 1
+            if f.retry:
+                retries[sec] += 1
+            r = f.rssi_first
+            if r is not None:
+                rssi_sum[sec] = rssi_sum.get(sec, 0) + r
+                rssi_n[sec] = rssi_n.get(sec, 0) + 1
+        timeline: List[Dict[str, Any]] = []
+        if counts:
+            for sec in range(min(counts), max(counts) + 1):
+                n = rssi_n.get(sec, 0)
+                timeline.append({
+                    "epoch": sec,
+                    "frames": counts.get(sec, 0),
+                    "retry": retries.get(sec, 0),
+                    "rssi_avg": round(rssi_sum[sec] / n, 1) if n else None,
+                })
+        series[tag] = timeline
+    cov = mr.stats.get("coverage") or {}
+    return {
+        "tags": list(mr.per_source.keys()),
+        "series": series,
+        "coverage": {
+            "both": cov.get("both", 0),
+            "only": dict(cov.get("only", {})),
+            "groups_total": mr.stats.get("kept", 0),
+        },
+    }
+
+
 def _structured_overview(
     frames: List[Frame],
     roles: Dict[str, Dict[str, Any]],
