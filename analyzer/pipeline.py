@@ -317,7 +317,11 @@ def run_analysis(
         # sources 배열의 오프셋 필드(applied_offset_ms 등, 위)는 구조화 스키마가
         # 아니라 소스 메타데이터라 이 경계 밖 — pipeline에 남는다.
         merge_summary = _structured_merge(mr)
-        sniffer_summary = _structured_sniffer_compare(mr)
+        # 시계열은 사용자 요청 창(보정 epoch 기준)으로 잘라 나머지 결과와 같은
+        # 구간을 기술하게 한다(PR #24 Codex P2). 창 미지정이면 둘 다 None.
+        sniffer_summary = _structured_sniffer_compare(
+            mr, window_start_epoch, window_end_epoch
+        )
     else:
         (frames,) = per_source.values()
 

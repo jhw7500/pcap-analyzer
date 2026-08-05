@@ -4,6 +4,7 @@ pipeline.run_analysis가 오케스트레이션 중 호출한다. 각 함수는 f
 (필요 시 FrameIndex)를 받아 UI가 소비하는 중첩 dict를 반환한다.
 """
 
+import math
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional
 
@@ -70,14 +71,31 @@ def _structured_merge(mr: MergeResult) -> Dict[str, Any]:
     }
 
 
-def _structured_sniffer_compare(mr: MergeResult) -> Optional[Dict[str, Any]]:
+#: 초당 시계열 zero-fill(갭 0 채움)을 허용하는 최대 구간(초). 손상 epoch
+#: (0·먼 미래값) 프레임이 섞이면 range()가 수십억 항목으로 팽창하는 경로라
+#: (PR #24 Gemini 리뷰 HIGH), 이보다 긴 구간은 관측된 초만 담는 희소
+#: 시계열로 폴백해 출력 크기를 프레임 수에 비례시킨다. 정상 스니퍼 배치
+#: 테스트(분~시간 단위)는 전부 zero-fill 경로를 탄다.
+_SNIFFER_FILL_MAX_SPAN_SEC = 6 * 3600
+
+
+def _structured_sniffer_compare(
+    mr: MergeResult,
+    window_start_epoch: Optional[float] = None,
+    window_end_epoch: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
     """스니퍼 비교 스키마(structured["sniffer_compare"]) 생성 — 스펙 §5.
 
     소스가 2개 미만이면 None — 비교 대상이 없으니 섹션 자체를 생략한다
-    (alignment 전용 merge로 생존 소스가 1개인 경우 포함). 시계열은
-    per_source(보정된 epoch) 기준 **시간 창 적용 전** 전체 구간이다 —
-    _structured_merge와 같은 원칙(정렬·병합 통계는 창과 무관하게 전체 구간
-    기준)이고, coverage도 같은 mr.stats에서 그대로 재노출한다.
+    (alignment 전용 merge로 생존 소스가 1개인 경우 포함).
+
+    시계열은 per_source(보정된 epoch) 기준이되, 사용자가 시간 창을 지정한
+    분석에서는 pipeline이 window_*_epoch(정렬 보정 후 벽시계 기준, [start,
+    end) 반개구간 — pipeline의 defer 창과 동일 의미)를 넘겨 같은 창으로
+    잘라낸다 — 나머지 결과가 전부 창 구간만 기술하는데 이 카드만 전체
+    캡처를 그리면 오해를 부른다(PR #24 Codex P2). coverage는 시간 창과
+    무관한 병합(정렬·dedup) 통계이므로 _structured_merge와 같은 원칙으로
+    항상 전체 구간 기준 mr.stats를 재노출한다.
 
     per_source 계약(analyzer/core/merge.py MergeResult 주석): 여기서 소비하는
     필드는 epoch·retry·rssi뿐 — 셋 다 _MERGEABLE_DECODED_FIELDS에 없어 대표
@@ -93,6 +111,14 @@ def _structured_sniffer_compare(mr: MergeResult) -> Optional[Dict[str, Any]]:
         rssi_sum: Dict[int, int] = {}
         rssi_n: Dict[int, int] = {}
         for f in frames:
+            # epoch 없는/비유한 프레임 방어 — _structured_per_second와 동일한
+            # 이유(int(None)→TypeError, int(nan)→ValueError로 분석 전체 중단).
+            if f.epoch is None or not math.isfinite(f.epoch):
+                continue
+            if window_start_epoch is not None and f.epoch < window_start_epoch:
+                continue
+            if window_end_epoch is not None and f.epoch >= window_end_epoch:
+                continue
             sec = int(f.epoch)
             counts[sec] += 1
             if f.retry:
@@ -103,7 +129,12 @@ def _structured_sniffer_compare(mr: MergeResult) -> Optional[Dict[str, Any]]:
                 rssi_n[sec] = rssi_n.get(sec, 0) + 1
         timeline: List[Dict[str, Any]] = []
         if counts:
-            for sec in range(min(counts), max(counts) + 1):
+            lo, hi = min(counts), max(counts)
+            if hi - lo <= _SNIFFER_FILL_MAX_SPAN_SEC:
+                secs = range(lo, hi + 1)
+            else:
+                secs = sorted(counts)
+            for sec in secs:
                 n = rssi_n.get(sec, 0)
                 timeline.append({
                     "epoch": sec,
