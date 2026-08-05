@@ -1,0 +1,384 @@
+"""merge.merge_captures — 캡처 간 dedup·재번호."""
+from collections import OrderedDict
+
+import pytest
+
+from analyzer.core.merge import merge_captures
+from tests.conftest import make_frame, AP1, STA1
+
+
+def _src(tag, *frames):
+    for f in frames:
+        f.source = tag
+    return list(frames)
+
+
+def _pair(tag_frames):
+    return OrderedDict(tag_frames)
+
+
+def test_cross_source_duplicate_merged_once():
+    """같은 (TA, seq, subtype, retry) 프레임이 두 캡처에 잡히면 1개로."""
+    a = _src("w1",
+             make_frame(number=1, epoch=1000.000, seq="100", subtype="40"),
+             make_frame(number=2, epoch=1001.000, seq="101", subtype="40"))
+    b = _src("w2",
+             make_frame(number=1, epoch=1000.020, seq="100", subtype="40"),  # 중복(+20ms)
+             make_frame(number=2, epoch=1002.000, seq="102", subtype="40"))  # w2 단독
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 3
+    assert r.stats["duplicates"] == 1
+    assert r.stats["coverage"]["both"] == 1
+    assert r.stats["coverage"]["only"] == {"w1": 1, "w2": 1}
+
+
+def test_retry_bit_not_deduped():
+    """재전송(retry=1)은 원본(retry=0)과 다른 프레임 — 병합 금지."""
+    a = _src("w1", make_frame(number=1, epoch=1000.0, seq="100", retry=False))
+    b = _src("w2", make_frame(number=1, epoch=1000.01, seq="100", retry=True))
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 2 and r.stats["duplicates"] == 0
+
+
+def test_outside_window_not_deduped():
+    a = _src("w1", make_frame(number=1, epoch=1000.0, seq="100"))
+    b = _src("w2", make_frame(number=1, epoch=1000.2, seq="100"))  # +200ms > 창
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 2
+
+
+def test_representative_prefers_decoded_copy():
+    """실측 근거(DFK 암호화): 대표는 IP 필드가 채워진 쪽 — 먼저 잡힌 쪽이 아니라."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, seq="100", ip_src=""))       # 암호화 사본(선행)
+    b = _src("w2", make_frame(number=7, epoch=1000.030, seq="100", ip_src="10.0.0.1",
+                              ip_dst="10.0.0.2", icmp_type="8"))                      # 복호화 사본
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+    kept = r.frames[0]
+    assert kept.ip_src == "10.0.0.1" and kept.source == "w2"
+
+
+def test_representative_prefers_decoded_arp_without_ip():
+    """복호화된 ARP(ip_src 없음, arp_opcode 있음)가 이른 암호화 사본에 져서
+    arp_opcode·프로토콜 정보가 소실되면 안 된다(PR #23 리뷰 Finding D)."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, seq="100",
+                              ip_src="", arp_opcode=""))          # 암호화 사본(선행)
+    b = _src("w2", make_frame(number=1, epoch=1000.030, seq="100",
+                              ip_src="", arp_opcode="2"))          # 복호화 ARP(응답)
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+    kept = r.frames[0]
+    assert kept.arp_opcode == "2" and kept.source == "w2"
+
+
+def test_representative_prefers_more_decoded_fields():
+    """복호화 지표를 bool 동률로만 판정하면(1라운드 수정) 부분적으로만 복호화된
+    사본(ip_src만)이 더 많은 필드를 보존한 완전한 사본(ip_src+icmp_type)을
+    "이른 epoch" 동률 규칙으로 이길 수 있다 — 개수가 많은 쪽이 이겨야 한다
+    (PR #23 리뷰 2라운드 Finding D)."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, seq="100",
+                              ip_src="10.0.0.1"))                                  # 부분 복호화(선행, 이른 epoch)
+    b = _src("w2", make_frame(number=1, epoch=1000.030, seq="100",
+                              ip_src="10.0.0.1", ip_dst="10.0.0.2", icmp_type="8"))  # 완전 복호화(더 늦음)
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+    kept = r.frames[0]
+    assert kept.icmp_type == "8" and kept.source == "w2"
+
+
+def test_representative_prefers_tcp_len_field():
+    """tcp_len이 점수에 빠지면 ip_src+tcp_flags 동률에서 tcp_len까지 가진
+    완전판(is_pure_tcp_ack 판정에 tcp_len=="0" 필요)이 부분판에 "이른 epoch"
+    규칙으로 질 수 있다 — tcp_len도 지표에 포함돼야 한다(PR #23 리뷰 3라운드
+    Finding B). tcp_len="0"도 bool("0")이 True라 정상적으로 "채워짐"으로
+    계산된다."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, seq="100",
+                              ip_src="10.0.0.1", tcp_flags="0x10"))                  # tcp_len 없음(선행)
+    b = _src("w2", make_frame(number=1, epoch=1000.030, seq="100",
+                              ip_src="10.0.0.1", tcp_flags="0x10", tcp_len="0"))     # tcp_len까지 있는 완전판
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+    kept = r.frames[0]
+    assert kept.tcp_len == "0" and kept.source == "w2"
+
+
+def test_representative_merges_missing_decoded_fields_from_other_copy():
+    """_decoded_score가 보는 필드(ip_src, icmp_type)만 같아 동률 판정되면
+    "이른 epoch"인 부분 사본이 대표로 남는데, ip_dst/icmp_seq/icmp_ident는
+    점수에 없어 대표 선정만으로는 못 가려낸다 — 대표가 아닌 완전 사본에만
+    있는 그 필드들이 그대로 소실되면, build_ping_matches가 정확히 그
+    필드들로 흐름을 매칭하므로 RTT/loss가 왜곡될 수 있다(PR #23 리뷰
+    4라운드 Finding B). 대표 선정과 별개로 결손 필드는 병합돼야 한다."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, seq="100",
+                              ip_src="10.0.0.1", icmp_type="8"))                       # 이른 부분 사본(대표로 선정됨)
+    b = _src("w2", make_frame(number=1, epoch=1000.030, seq="100",
+                              ip_src="10.0.0.1", ip_dst="10.0.0.2", icmp_type="8",
+                              icmp_seq="5", icmp_ident="1234"))                        # 완전 사본(늦음, 점수 동률)
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+    kept = r.frames[0]
+    assert kept.source == "w1"  # 대표 정체성은 여전히 이른 사본(동률 + 이른 epoch)
+    assert kept.ip_dst == "10.0.0.2"
+    assert kept.icmp_seq == "5"
+    assert kept.icmp_ident == "1234"
+
+
+def test_representative_does_not_merge_observational_fields():
+    """rssi 등 관측 필드는 사본마다 본질적으로 다른 실측값이라 병합 대상이
+    아니다 — 대표가 아닌 사본의 rssi가 대표에 섞여 들어가면 그 사본이 실제로
+    관측한 값이라는 의미가 깨진다(PR #23 리뷰 4라운드 Finding B)."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, seq="100",
+                              ip_src="10.0.0.1", rssi=""))                # 대표(rssi 없음)
+    b = _src("w2", make_frame(number=1, epoch=1000.030, seq="100",
+                              ip_src="10.0.0.1", rssi="-55"))             # rssi 있음(점수엔 무관, 병합 금지 대상)
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+    kept = r.frames[0]
+    assert kept.source == "w1"
+    assert kept.rssi == ""  # 관측 필드는 병합되지 않음 — 대표 자신의 값 유지
+
+
+def test_representative_merges_current_ap_field():
+    """이른 ReassocReq 사본에 current_ap가 비어 있고 나중 사본에 있으면 —
+    둘 다 _decoded_score 동률(0점, current_ap는 점수 대상이 아님)이라 이른
+    사본이 대표로 남는데, current_ap가 병합 목록에 없으면 값이 소실된다.
+    _structured_roaming이 current_ap로 직전 AP·밴드 전환을 판정하므로
+    로밍 분석이 왜곡될 수 있다(PR #23 리뷰 5라운드)."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, subtype="2", seq="100",
+                              current_ap=""))                       # 이른 사본(대표로 선정됨, current_ap 없음)
+    b = _src("w2", make_frame(number=1, epoch=1000.030, subtype="2", seq="100",
+                              current_ap="aa:bb:cc:00:00:99"))      # 나중 사본(완전)
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+    kept = r.frames[0]
+    assert kept.source == "w1"  # 대표 정체성은 여전히 이른 사본(동률 + 이른 epoch)
+    assert kept.current_ap == "aa:bb:cc:00:00:99"
+
+
+def test_representative_merges_reason_code_field():
+    """DeAuth 사본 중 이른 쪽에 reason_code가 없고 늦은 쪽에 있으면(둘 다
+    _decoded_score 0점 동률) 이른 사본이 대표로 남는데, reason_code가
+    병합되지 않으면 프레임 표(web/frame_table.py)의 사유 코드가 소실된다
+    (PR #23 리뷰 5라운드)."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, subtype="12", seq="100",
+                              reason_code=""))
+    b = _src("w2", make_frame(number=1, epoch=1000.030, subtype="12", seq="100",
+                              reason_code="3"))
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+    kept = r.frames[0]
+    assert kept.source == "w1"
+    assert kept.reason_code == "3"
+
+
+def test_representative_adopts_specific_protocol_over_generic():
+    """암호화된 EAPOL 사본(subtype 40 — QoS Data와 동일)이 대표가 되면
+    protocol이 "802.11"(포괄값)로 남아 is_roaming_related(protocol=="EAPOL"
+    검사)가 그 프레임을 로밍 관련으로 못 잡을 수 있다 — protocol은 항상
+    뭔가를 보고해 절대 빈 문자열이 아니므로 "빈 값만 채움" 규칙으로는
+    못 잡는다. 포괄값("802.11"/빈 값)이면 사본의 구체 값을 채택해야 한다
+    (PR #23 리뷰 5라운드)."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, subtype="40", seq="100",
+                              protocol="802.11"))                  # 암호화 사본(대표로 선정됨, 포괄값)
+    b = _src("w2", make_frame(number=1, epoch=1000.030, subtype="40", seq="100",
+                              protocol="EAPOL"))                    # 복호화 사본(구체값)
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+    kept = r.frames[0]
+    assert kept.source == "w1"
+    assert kept.protocol == "EAPOL"
+    assert kept.is_roaming_related is True
+
+
+def test_representative_does_not_merge_receiver_specific_fields():
+    """rssi 외에도 mcs/mcs_phy/data_rate/channel_freq/tsf 등 수신기 고유
+    관측값은 병합 대상이 아니다 — Frame 필드 전수 스윕으로 재확인한다
+    (PR #23 리뷰 5라운드)."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, subtype="8", seq="",
+                              ta="aa:aa:aa:aa:aa:01", bssid="aa:aa:aa:aa:aa:01",
+                              tsf="", mcs="", mcs_phy="", data_rate="", channel_freq=""))
+    b = _src("w2", make_frame(number=1, epoch=1000.030, subtype="8", seq="",
+                              ta="aa:aa:aa:aa:aa:01", bssid="aa:aa:aa:aa:aa:01",
+                              tsf="123456", mcs="7", mcs_phy="HT", data_rate="54",
+                              channel_freq="2412"))
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+    kept = r.frames[0]
+    assert kept.source == "w1"
+    assert kept.tsf == "" and kept.mcs == "" and kept.mcs_phy == ""
+    assert kept.data_rate == "" and kept.channel_freq == ""
+
+
+def test_representative_tie_earlier_epoch():
+    a = _src("w1", make_frame(number=1, epoch=1000.000, seq="100", ip_src="10.0.0.1"))
+    b = _src("w2", make_frame(number=1, epoch=1000.030, seq="100", ip_src="10.0.0.1"))
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert r.frames[0].source == "w1"
+
+
+def test_offset_applied_before_dedup():
+    """w2가 -2.0초 뒤진 시계여도 TSF 정렬 후 dedup이 잡는다."""
+    beac_a = [make_frame(number=i + 10, epoch=1000.0 + i * 0.1024, subtype="8", ta=AP1,
+                         bssid=AP1, tsf=str(500_000 + i * 102400)) for i in range(12)]
+    beac_b = [make_frame(number=i + 10, epoch=998.0 + i * 0.1024, subtype="8", ta=AP1,
+                         bssid=AP1, tsf=str(500_000 + i * 102400)) for i in range(12)]
+    dat_a = make_frame(number=1, epoch=1001.000, seq="200", subtype="40")
+    dat_b = make_frame(number=1, epoch=999.005, seq="200", subtype="40")  # 보정 후 +5ms
+    a = _src("w1", *(beac_a + [dat_a]))
+    b = _src("w2", *(beac_b + [dat_b]))
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert r.offsets["w2"].method == "tsf"
+    assert r.offsets["w2"].offset_sec == pytest.approx(2.0, abs=0.001)
+    # 비콘 12쌍 + 데이터 1쌍 전부 dedup → 13
+    assert r.stats["duplicates"] == 13
+    assert len(r.frames) == 13
+
+
+def test_offset_applied_regenerates_non_reference_timestamp():
+    """오프셋이 적용된 비-기준 소스는 timestamp 문자열도 보정 epoch로 재생성돼야
+    한다 — epoch만 보정하고 timestamp를 원본(다른 시계 도메인)으로 남겨두면
+    overview 시작/종료·evidence 표에 두 시계가 섞여 표시된다(PR #23 리뷰
+    2라운드 Finding B)."""
+    import datetime as dt
+
+    beac_a = [make_frame(number=i + 10, epoch=1000.0 + i * 0.1024, subtype="8", ta=AP1,
+                         bssid=AP1, tsf=str(500_000 + i * 102400)) for i in range(12)]
+    beac_b = [make_frame(number=i + 10, epoch=998.0 + i * 0.1024, subtype="8", ta=AP1,
+                         bssid=AP1, tsf=str(500_000 + i * 102400)) for i in range(12)]
+    extra_b = make_frame(number=99, epoch=998.5, seq="777", subtype="40")
+    original_ref_ts = beac_a[0].timestamp
+    original_b_ts = extra_b.timestamp
+
+    a = _src("w1", *beac_a)
+    b = _src("w2", *(beac_b + [extra_b]))
+    merge_captures(_pair([("w1", a), ("w2", b)]))
+
+    assert beac_a[0].timestamp == original_ref_ts  # 기준(offset 0) 소스는 원본 유지
+    assert extra_b.timestamp != original_b_ts       # 비-기준 소스는 재생성됨
+
+    expected = dt.datetime.fromtimestamp(extra_b.epoch).strftime("%Y-%m-%d %H:%M:%S.%f")
+    assert extra_b.timestamp == expected
+    # Frame.time_short 파싱 규칙(공백 분리 파트 중 콜론2+점 포함, 15자)과 호환.
+    assert len(extra_b.time_short) == 15
+    assert extra_b.time_short == expected.split(" ")[1]
+
+
+def test_control_frame_approx_dedup():
+    """seq 없는 제어 프레임(ACK 등)은 (subtype, ta/ra, 창) 근사 dedup."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, seq="", subtype="29", ta="", ra=STA1))
+    b = _src("w2", make_frame(number=1, epoch=1000.010, seq="", subtype="29", ta="", ra=STA1))
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 1
+
+
+def test_same_source_never_deduped():
+    """같은 캡처(로테이션 연속 파일 포함) 안에서는 dedup하지 않는다."""
+    a = _src("w1",
+             make_frame(number=1, epoch=1000.000, seq="100"),
+             make_frame(number=2, epoch=1000.010, seq="100"))  # 같은 소스 — 유지
+    r = merge_captures(_pair([("w1", a)]))
+    assert len(r.frames) == 2 and r.stats["duplicates"] == 0
+
+
+def test_renumbered_sequential_and_sorted():
+    a = _src("w1", make_frame(number=50, epoch=1002.0, seq="1"),
+             make_frame(number=51, epoch=1000.0, seq="2"))
+    b = _src("w2", make_frame(number=50, epoch=1001.0, seq="3"))
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert [f.number for f in r.frames] == [1, 2, 3]
+    assert [f.epoch for f in r.frames] == sorted(f.epoch for f in r.frames)
+
+
+def test_orig_number_stamped_before_renumber():
+    """다중 소스 병합 대표는 통합 순번으로 재번호되기 직전에 orig_number에
+    원본 tshark frame.number가 스탬프돼야 한다 — 그러지 않으면 per_source
+    (소스별 원본 리스트)로 "이 대표가 원래 그 소스에서 몇 번이었는지"
+    역추적할 방법이 사라진다(PR #23 리뷰 6라운드 Finding B, 4라운드에
+    경고만 남겼던 지뢰의 실수정)."""
+    a = _src("w1", make_frame(number=50, epoch=1002.0, seq="1"),
+             make_frame(number=51, epoch=1000.0, seq="2"))
+    b = _src("w2", make_frame(number=77, epoch=1001.0, seq="3"))
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+
+    # number는 통합 순번(1,2,3), orig_number는 각자 원본 tshark 번호를 보존.
+    by_orig = {f.orig_number: f.number for f in r.frames}
+    assert by_orig == {51: 1, 77: 2, 50: 3}
+
+    # per_source(원본 소스 리스트)에서도 같은 인스턴스를 공유하므로 그
+    # 대표 프레임을 통해 원본 번호를 그대로 역추적할 수 있다.
+    w1_rep = next(f for f in r.per_source["w1"] if f.orig_number == 50)
+    assert w1_rep.number == 3  # 병합 후 순번으로 갱신된 채 공유됨
+    assert (w1_rep.orig_number or w1_rep.number) == 50  # 복원 규칙
+
+
+def test_single_source_passthrough_numbers_untouched():
+    """단일 소스는 재번호 없이 그대로 — 하위 호환. 재번호가 아예 없었으므로
+    orig_number는 기본값 0으로 남는다 — `orig_number or number` 복원
+    규칙에서 number(=원본 그대로)가 곧 원본임을 뜻한다(PR #23 리뷰 6라운드
+    Finding B)."""
+    a = _src("w1", make_frame(number=7, epoch=1000.0), make_frame(number=9, epoch=1001.0))
+    r = merge_captures(_pair([("w1", a)]))
+    assert [f.number for f in r.frames] == [7, 9]
+    assert [f.orig_number for f in r.frames] == [0, 0]
+    assert r.offsets == {} and r.stats["duplicates"] == 0
+
+
+def test_control_frame_nearest_match_not_first_match():
+    """근사 키(제어 프레임) dedup은 창 안 후보 중 '가장 가까운' 것과 매칭돼야 한다.
+
+    A1(t=1000.000)·A2(t=1000.030)는 같은 근사 키(w1, 같은 소스라 서로 dedup 안 됨).
+    B(t=1000.049)는 A2에 19ms 거리, A1에는 49ms 거리 — 둘 다 창(50ms) 안이지만
+    A2가 더 가깝다. 삽입순(=A1 먼저) 스캔으로 첫 매치를 취하면 B가 더 먼 A1과
+    잘못 병합된다 — '가장 가까운' 것을 선택해야 한다.
+    """
+    a1 = make_frame(number=1, epoch=1000.000, seq="", subtype="29", ta="", ra=STA1, ip_src="")
+    a2 = make_frame(number=2, epoch=1000.030, seq="", subtype="29", ta="", ra=STA1, ip_src="")
+    b1 = make_frame(number=1, epoch=1000.049, seq="", subtype="29", ta="", ra=STA1, ip_src="10.0.0.9")
+    a = _src("w1", a1, a2)
+    b = _src("w2", b1)
+    r = merge_captures(_pair([("w1", a), ("w2", b)]))
+    assert len(r.frames) == 2
+    assert r.stats["duplicates"] == 1
+    # B는 ip_src가 있어 병합되면 항상 대표가 된다 — 병합 안 된(단독) 쪽의 epoch로
+    # 어느 A와 합쳐졌는지 판별: 올바른 최근접 매칭이면 A1(1000.000)이 단독으로 남는다.
+    standalone = next(f for f in r.frames if f.ip_src == "")
+    assert standalone.epoch == pytest.approx(1000.000)
+
+
+def test_three_source_dedup_does_not_inflate_window():
+    """3+ 소스에서 대표 교체가 group의 매칭 앵커를 흔들면 실효 창이 팽창한다 —
+    w1@0(대표, 정보 없음) 생성 후 w2@30ms가 정보가 더 많아 대표로 교체되면
+    (앵커가 group["epoch"]뿐이던 시절엔 이 30ms로 이동), w3@60ms는 새 대표
+    (w2)와는 30ms 이내라 매칭돼 버리지만 실제로는 그 group의 최초 관측
+    (w1)과 60ms 떨어져 있다(창 50ms 초과). group 생성 시점 epoch
+    (creation_epoch, 불변)를 앵커로 고정해 퇴거·매칭 거리 판정 모두 그
+    기준이어야 한다(PR #23 리뷰 7라운드 Finding A)."""
+    a = _src("w1", make_frame(number=1, epoch=1000.000, seq="100"))                       # 대표(최초, 정보 없음)
+    b = _src("w2", make_frame(number=1, epoch=1000.030, seq="100", ip_src="10.0.0.1"))    # 정보 더 많음 — 대표 교체
+    c = _src("w3", make_frame(number=1, epoch=1000.060, seq="100"))                       # w1과 60ms(창 밖), w2와 30ms(창 안)
+    r = merge_captures(_pair([("w1", a), ("w2", b), ("w3", c)]))
+    assert len(r.frames) == 2          # {w1,w2} 병합 1개 + {w3} 단독 1개
+    assert r.stats["duplicates"] == 1  # w2만 duplicate — w3는 새 group
+    assert r.stats["coverage"]["both"] == 1
+    assert r.stats["coverage"]["only"] == {"w3": 1}
+
+
+def test_same_source_burst_bucket_bounded():
+    """같은 소스·같은 근사 키가 창 안에서 밀집(서로 dedup 불가)해도 매칭 후보
+    버킷은 MERGE_MAX_LIVE_GROUPS를 넘지 않는다 — 무한 누적에 의한 선형 스캔(O(n²))
+    회귀 가드. 월클록 측정 대신 내부 버킷 길이를 구조적으로 검증한다.
+    """
+    from analyzer.core.merge import MERGE_MAX_LIVE_GROUPS, _MatchIndex, _dedup_key
+
+    frames = [make_frame(number=i + 1, epoch=1000.0 + i * 1e-5, seq="", subtype="29",
+                         ta="", ra=STA1) for i in range(500)]
+    for f in frames:
+        f.source = "w1"
+
+    index = _MatchIndex()
+    for f in frames:
+        index.process(f)
+
+    key = _dedup_key(frames[0])
+    assert index.bucket_len(key) <= MERGE_MAX_LIVE_GROUPS
+    assert len(index.all_groups) == 500  # 전부 같은 소스라 dedup 없이 새 group

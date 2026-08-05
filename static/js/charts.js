@@ -70,6 +70,28 @@
         ).join('');
     }
 
+    /* ── 무선 병합 요약 카드 ── 다중 무선 dedup 시(DATA.merge)만 표시, 구버전 결과는 무동작 */
+    const mergeInfo = DATA.merge;
+    if (kpiContainer && mergeInfo && typeof mergeInfo.duplicates === 'number') {
+        const coverage = mergeInfo.coverage || {};
+        const both = typeof coverage.both === 'number' ? coverage.both : 0;
+        const only = coverage.only || {};
+        const onlyParts = Object.entries(only)
+            .filter(([, n]) => typeof n === 'number' && n > 0)
+            .map(([tag, n]) => `${escapeHtml(tag)}: ${n.toLocaleString()}`)
+            .join(', ');
+        const onlyLine = onlyParts
+            ? `<p class="text-xs text-gray-500 mt-1">단독 포착 — ${onlyParts}</p>`
+            : '';
+        kpiContainer.insertAdjacentHTML('afterend',
+            `<div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-6">
+                <h3 class="text-sm font-semibold text-gray-400 mb-1">무선 병합</h3>
+                <p class="text-sm text-gray-300">중복 제거 <span class="font-semibold text-white">${mergeInfo.duplicates.toLocaleString()}</span>건 · 양쪽 포착 <span class="font-semibold text-white">${both.toLocaleString()}</span>건</p>
+                ${onlyLine}
+            </div>`
+        );
+    }
+
     /* ── 802.11 카테고리 분류 ── 표준 type_subtype 기반 ── */
     function categorizeSubtype(sub) {
         const n = parseInt(sub, 10);

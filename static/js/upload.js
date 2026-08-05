@@ -133,6 +133,21 @@
             }
         }
 
+        const wirelessInput = document.getElementById('wireless-files');
+        if (wirelessInput && wirelessInput.files.length) {
+            if (wirelessInput.files.length > 3) {
+                alert('추가 무선 pcap은 최대 3개입니다.');
+                return;
+            }
+            const maxMb = parseInt(wirelessInput.dataset.maxMb || fileInput.dataset.maxMb || '200', 10);
+            for (const wf of wirelessInput.files) {
+                if (wf.size > maxMb * 1024 * 1024) {
+                    alert(`추가 무선 pcap이 업로드 상한(${maxMb}MB)을 초과합니다: ${wf.name}`);
+                    return;
+                }
+            }
+        }
+
         const formData = new FormData(form);
         formData.set('file', fileInput.files[0]);
         // 진행률/취소를 본인 분석에만 한정하기 위해 클라이언트가 job_id를 먼저 생성해 전송.

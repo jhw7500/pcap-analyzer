@@ -10,7 +10,9 @@ class ErrorCode(str, Enum):
     INVALID_MAGIC = "INVALID_MAGIC"
     FILE_TOO_LARGE = "FILE_TOO_LARGE"
     EMPTY_FILE = "EMPTY_FILE"
+    TOO_MANY_FILES = "TOO_MANY_FILES"
     NO_FRAMES = "NO_FRAMES"
+    INVALID_TIME_FILTER = "INVALID_TIME_FILTER"
     CANCELLED = "CANCELLED"
     ANALYSIS_NOT_FOUND = "ANALYSIS_NOT_FOUND"
     ANALYSIS_CORRUPTED = "ANALYSIS_CORRUPTED"
@@ -43,9 +45,17 @@ ERROR_CATALOG: Dict[ErrorCode, Dict[str, str]] = {
         "message": "빈 파일입니다.",
         "hint": "유효한 pcap 파일을 업로드하세요.",
     },
+    ErrorCode.TOO_MANY_FILES: {
+        "message": "무선 캡처 파일이 너무 많습니다.",
+        "hint": "무선 캡처는 최대 4개(기본 1개 + 추가 3개)까지 업로드할 수 있습니다.",
+    },
     ErrorCode.NO_FRAMES: {
         "message": "프레임을 추출하지 못했습니다.",
         "hint": "tshark 경로 또는 pcap 파일 상태를 확인하세요. 결과 JSON의 tshark_version으로 호환성을 점검하세요.",
+    },
+    ErrorCode.INVALID_TIME_FILTER: {
+        "message": "시간 필터를 해석할 수 없습니다.",
+        "hint": "시작/종료 시각은 \"YYYY-MM-DD HH:MM[:SS]\" 형식으로 입력하세요(초는 생략 가능).",
     },
     ErrorCode.CANCELLED: {
         "message": "분석이 취소되었습니다.",

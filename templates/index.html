@@ -59,6 +59,13 @@
                            class="w-full text-sm text-gray-300 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-gray-700 file:text-gray-300">
                     <p class="text-gray-500 text-xs mt-1">포트 미러링 유선 캡처 — 확정 손실률(ground truth) 계산에 사용</p>
                 </div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-1">추가 무선 pcap (선택 — 최대 3개, 두 번째 스니퍼 등)</label>
+                    <input type="file" name="wireless_files" id="wireless-files" multiple accept=".pcap,.pcapng,.cap"
+                           data-max-mb="{{ max_upload_mb }}"
+                           class="w-full text-sm text-gray-300 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-gray-700 file:text-gray-300">
+                    <p class="text-gray-500 text-xs mt-1">같은 채널을 다른 위치에서 캡처한 파일 — TSF 정렬 후 중복 제거 통합</p>
+                </div>
             </div>
         </details>
 

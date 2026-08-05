@@ -53,6 +53,7 @@ TSHARK_FIELDS = [
     "wlan.fixed.current_ap",      # cols[27] — Reassoc Request의 직전 연결 AP (로밍 전 AP)
     "radiotap.channel.freq",      # cols[28] — 채널 주파수 MHz (채널/밴드 판별용)
     "wlan_rsna_eapol.keydes.msgnr",  # cols[29] — EAPOL 4-way 메시지 번호 1~4
+    "wlan.fixed.timestamp",       # cols[30] — 비콘 TSF(µs). 캡처 간 시계 오프셋 추정 (merge.py)
 ]
 
 
@@ -271,9 +272,136 @@ def parse_tsv_line(line: str) -> Optional[FrameType]:
             current_ap=cols[27] if len(cols) > 27 else "",
             channel_freq=cols[28] if len(cols) > 28 else "",
             eapol_msgnr=cols[29] if len(cols) > 29 else "",
+            tsf=cols[30] if len(cols) > 30 else "",
         )
     except (ValueError, IndexError):
         return None
+
+
+def extract_alignment_beacons(
+    pcap_path: str,
+    tshark_path: Optional[str] = None,
+    cancel_event: Optional[threading.Event] = None,
+) -> List[FrameType]:
+    """비콘(subtype=8)만 **내용 필터 없이** 최소 필드로 뽑아 다중 무선 시계
+    정렬 증거로 쓴다.
+
+    pipeline.py의 본 추출(extract_frames)은 mac_filter/ip_filter를 그대로
+    받는데, STA mac_filter는 비콘에 STA 주소가 없어서, ip_filter는 비콘에
+    IP가 없어서 매칭되지 않아 비콘이 통째로 사라질 수 있다 — 그러면 merge.py의
+    TSF 정렬 증거가 없어져 ±5초 seq 폴백도 큰 스큐(실측 183초)엔 무력해진다
+    (PR #23 리뷰 2라운드 Finding A). 이 함수는 그 필터들을 아예 걸지 않고
+    `wlan.fc.type_subtype==8` 하나만으로 비콘 전량을 뽑아
+    merge_captures(alignment_sources=...)의 오프셋 추정 전용 입력으로 쓴다 —
+    본 파이프라인이 쓰는 프레임 집합과는 완전히 별개다.
+
+    extract_frames의 스트리밍·취소·stderr 캡처 패턴을 재사용하되 필드를
+    3개(epoch·bssid·tsf)로 최소화한 간략 버전이다. 실패(tshark 부재, 비정상
+    종료 등) 시 예외를 던지지 않고 빈 리스트를 반환하며 stderr에 경고를
+    남긴다 — 정렬 증거 부재는 merge.py의 기존 "오프셋 추정 실패" 경고
+    경로(estimate_offset의 method="none")가 그대로 처리한다.
+    """
+    resolved_path = tshark_path or "tshark"
+    cmd = [
+        resolved_path, "-r", pcap_path, "-T", "fields",
+        "-e", "frame.time_epoch", "-e", "wlan.bssid", "-e", "wlan.fixed.timestamp",
+        "-Y", "wlan.fc.type_subtype==8",
+    ]
+
+    stderr_file = tempfile.NamedTemporaryFile(
+        mode="w+", suffix=".tshark-align-stderr", delete=False, encoding="utf-8"
+    )
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=stderr_file, text=True,
+            bufsize=1, encoding="utf-8", errors="replace",
+        )
+    except OSError as exc:
+        print(f"[WARN] 정렬 증거(비콘) 추출 실패({pcap_path}): {exc}", file=sys.stderr)
+        _cleanup_stderr_file(stderr_file)
+        return []
+
+    cancelled = [False]
+
+    def _cancel_watcher():
+        while proc.poll() is None:
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled[0] = True
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        pass
+                try:
+                    if proc.stdout is not None:
+                        proc.stdout.close()
+                except Exception:
+                    pass
+                return
+            time.sleep(0.05)
+
+    watcher: Optional[threading.Thread] = None
+    if cancel_event is not None:
+        watcher = threading.Thread(target=_cancel_watcher, daemon=True)
+        watcher.start()
+
+    frames: List[FrameType] = []
+    stdout = proc.stdout
+    if stdout is not None:
+        try:
+            for i, line in enumerate(stdout):
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                cols = line.rstrip("\n").split("\t")
+                if len(cols) < 3:
+                    continue
+                epoch_s, bssid, tsf = cols[0].strip(), cols[1].strip(), cols[2].strip()
+                if not epoch_s or not bssid or not tsf:
+                    continue
+                try:
+                    epoch = float(epoch_s)
+                except ValueError:
+                    continue
+                frames.append(Frame(
+                    number=i + 1, epoch=epoch, timestamp="", retry=False, subtype="8",
+                    protocol="", length=0, mcs="", rssi="", ta="", ra="",
+                    ip_src="", ip_dst="", icmp_type="", arp_opcode="", tcp_len="",
+                    tcp_flags="", seq="", bssid=bssid, tsf=tsf,
+                ))
+        except (ValueError, OSError):
+            # stdout 강제 close 시 발생 가능 — 무시하고 정상 종료 흐름으로
+            pass
+
+    _ = proc.wait()
+    if watcher is not None:
+        watcher.join(timeout=1)
+
+    if cancelled[0]:
+        _cleanup_stderr_file(stderr_file)
+        return []
+
+    if proc.returncode != 0:
+        stderr_content = ""
+        try:
+            stderr_file.flush()
+            stderr_file.seek(0)
+            stderr_content = stderr_file.read()
+        except (OSError, ValueError):
+            pass
+        print(
+            f"[WARN] 정렬 증거(비콘) 추출 실패({pcap_path}, exit {proc.returncode}): "
+            f"{stderr_content.strip()[:500]}",
+            file=sys.stderr,
+        )
+        _cleanup_stderr_file(stderr_file)
+        return []
+
+    _cleanup_stderr_file(stderr_file)
+    return frames
 
 
 def extract_frames(

@@ -7,7 +7,6 @@
 sender 선정과 꼬리 무응답 판정은 EXPING 재구성(`exping.extract_exchanges`)과
 다르게 동작한다 — 이 모듈만의 규칙이니 각 함수 docstring에 근거를 남긴다.
 """
-import datetime as dt
 import shutil
 import subprocess
 import time
@@ -16,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import exping
 from .ping_matching import find_time_streaks
+from .timeparse import parse_local_epoch as _parse_local_epoch
 
 #: streaks 항목 수 상한 — 비정상 캡처(수천 구간)로 결과 JSON이 비대해지는 것 방지
 MAX_STREAKS = 100
@@ -25,24 +25,6 @@ MAX_NG_EPOCHS = 1000
 #: capinfos 실행 상한(초) — 이 안에서 0.2초 간격으로 취소를 폴링한다
 _CAPINFOS_TIMEOUT_SEC = 30
 _CAPINFOS_POLL_SEC = 0.2
-
-#: 시간 필터 입력 형식 — 초 생략형도 허용
-_TIME_FILTER_FORMATS: Tuple[str, ...] = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M")
-
-
-def _parse_local_epoch(value: str) -> Optional[float]:
-    """"YYYY-MM-DD HH:MM[:SS]" 문자열을 로컬 타임존 기준 epoch로 파싱.
-
-    무선 쪽 extractor.build_tshark_cmd의 `frame.time >= "..."` 필터도 tshark가
-    로컬 타임존으로 해석하므로, 이 함수도 로컬 타임존(datetime.timestamp())을
-    써야 두 필터가 같은 구간을 가리킨다. 실패 시 None.
-    """
-    for fmt in _TIME_FILTER_FORMATS:
-        try:
-            return dt.datetime.strptime(value, fmt).timestamp()
-        except ValueError:
-            continue
-    return None
 
 
 def _filter_exchanges(

@@ -6,6 +6,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import List
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -18,6 +19,7 @@ from analyzer.pipeline import run_analysis
 
 _UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB
 _JOBS_MAX = 100  # 최근 N개만 유지
+_MAX_WIRELESS_FILES = 4  # 기본(file) 1개 + wireless_files 최대 3개
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
@@ -119,7 +121,14 @@ async def get_progress_latest():
 
 
 async def _save_pcap_upload(file: UploadFile):
-    """업로드 파일 검증·임시 저장. 반환 (tmp_path, error_response) — 하나만 non-None."""
+    """업로드 파일 검증·임시 저장. 반환 (tmp_path, error_response) — 하나만 non-None.
+
+    계약(PR #23 리뷰 8라운드 Finding B — 호출부가 재확인할 필요 없도록 명시):
+    에러 응답(두 번째 원소가 non-None)으로 반환할 때는 **이 함수가 자신이
+    만든 tmp를 이미 정리(unlink)한 뒤**다 — 그 경로는 첫 번째 원소로 항상
+    `None`을 반환하므로 호출부가 그 tmp를 별도로 지울 필요가 없다(지우려
+    해도 `None`이라 지울 대상이 없다).
+    """
     name = file.filename or "unknown.pcap"
     if not name.endswith((".pcap", ".pcapng", ".cap")):
         return None, JSONResponse(error_payload(ErrorCode.INVALID_EXT), status_code=400)
@@ -158,9 +167,30 @@ async def _save_pcap_upload(file: UploadFile):
     return tmp.name, None
 
 
+def _cleanup_tmps(*paths: str) -> None:
+    """주어진 임시 경로들을 모두 unlink 시도(존재하지 않아도 무시). 빈 문자열은 skip.
+
+    경로 하나의 unlink가 raise(예: Windows에서 백신/인덱서가 파일을 잠금)해도
+    나머지 경로는 계속 정리한다 — try/except 없이 순회하면 첫 실패에서 예외가
+    전파돼 그 뒤 경로들이 전부 누수된다(PR #23 리뷰 2라운드 Finding C).
+    missing_ok=True는 "이미 없는 파일"만 안전하게 무시할 뿐 "존재하는데
+    잠긴 파일"의 OSError는 그대로 던지므로 이 함수가 자체 흡수한다 —
+    호출부가 다시 try/except로 감쌀 필요가 없다(감싸면 절대 실행되지
+    않는 except 블록만 남는다, PR #23 리뷰 7라운드 Finding B).
+    """
+    for p in paths:
+        if not p:
+            continue
+        try:
+            Path(p).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 @router.post("/api/upload")
 async def upload_pcap(
     file: UploadFile = File(...),
+    wireless_files: List[UploadFile] = File([]),
     wired_file: UploadFile | None = File(None),
     ssid: str = Form(""),
     passphrase: str = Form(""),
@@ -174,23 +204,46 @@ async def upload_pcap(
     if not tshark:
         return JSONResponse(error_payload(ErrorCode.TSHARK_MISSING), status_code=500)
 
+    # 브라우저는 미선택 file input도 빈 filename 파트로 보낸다 — filename으로 판별
+    valid_wireless_files = [wf for wf in wireless_files if wf is not None and (wf.filename or "")]
+    if 1 + len(valid_wireless_files) > _MAX_WIRELESS_FILES:
+        return JSONResponse(error_payload(ErrorCode.TOO_MANY_FILES), status_code=400)
+
     name = file.filename or "unknown.pcap"
     tmp_name, err = await _save_pcap_upload(file)
     if err is not None:
         return err
 
+    # 추가 무선 파일들(w2, w3, …) — 하나라도 실패하면 그때까지 저장된 것 전부 정리
+    wireless_tmps: List[str] = []
+    wireless_names: List[str] = []
+    for wf in valid_wireless_files:
+        try:
+            wtmp, werr = await _save_pcap_upload(wf)
+        except Exception:
+            _cleanup_tmps(tmp_name, *wireless_tmps)
+            raise
+        if werr is not None:
+            # wtmp는 _save_pcap_upload의 계약상(위 docstring) 이미 None이지만
+            # (에러 반환 시 자체 tmp를 self-clean함), 방어적으로 함께 넘긴다 —
+            # _cleanup_tmps는 falsy 값을 조용히 skip하므로 무해하다(PR #23
+            # 리뷰 8라운드 Finding B).
+            _cleanup_tmps(tmp_name, wtmp, *wireless_tmps)
+            return werr
+        wireless_tmps.append(wtmp)
+        wireless_names.append(wf.filename)
+
     wired_tmp = ""
     wired_name = ""
-    # 브라우저는 미선택 file input도 빈 filename 파트로 보낸다 — filename으로 판별
     if wired_file is not None and (wired_file.filename or ""):
         try:
             wired_tmp, werr = await _save_pcap_upload(wired_file)
         except Exception:
-            Path(tmp_name).unlink(missing_ok=True)
+            _cleanup_tmps(tmp_name, *wireless_tmps)
             raise
         if werr is not None:
             wired_tmp = ""
-            Path(tmp_name).unlink(missing_ok=True)
+            _cleanup_tmps(tmp_name, *wireless_tmps)
             return werr
         wired_name = wired_file.filename
 
@@ -199,9 +252,9 @@ async def upload_pcap(
     job_id = _sanitize_job_id(client_job_id)
     cancel_event = threading.Event()
 
-    # 이 시점에는 wired_tmp가 이미 디스크에 저장돼 있을 수 있다(위 wired 저장
-    # 성공 경로) — 아래 job 등록이 예외를 던지면 이후의 try/finally(실행 구간)에
-    # 진입하지 못해 두 tmp 모두 정리되지 않는다. wired 저장 자체의 예외 가드와
+    # 이 시점에는 wired_tmp/wireless_tmps가 이미 디스크에 저장돼 있을 수 있다(위
+    # 저장 성공 경로) — 아래 job 등록이 예외를 던지면 이후의 try/finally(실행
+    # 구간)에 진입하지 못해 tmp들이 정리되지 않는다. 저장 자체의 예외 가드와
     # 같은 패턴으로 여기도 감싼다.
     try:
         with _jobs_lock:
@@ -215,12 +268,11 @@ async def upload_pcap(
                 "cancel": cancel_event,
                 "tmp": tmp_name,
                 "wired_tmp": wired_tmp,
+                "wireless_tmps": list(wireless_tmps),
             }
             _prune_jobs_locked()
     except Exception:
-        Path(tmp_name).unlink(missing_ok=True)
-        if wired_tmp:
-            Path(wired_tmp).unlink(missing_ok=True)
+        _cleanup_tmps(tmp_name, wired_tmp, *wireless_tmps)
         raise
 
     def progress_cb(msg, pct):
@@ -235,25 +287,40 @@ async def upload_pcap(
             time_end=time_end,
             mac_filter=mac_filter,
             ip_filter=ip_filter,
+            wireless_paths=wireless_tmps,
             wired_path=wired_tmp,
             cancel_event=cancel_event,
             progress_cb=progress_cb,
         )
 
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, _run)
     finally:
-        for p in (tmp_name, wired_tmp):
-            if p:
-                try:
-                    Path(p).unlink(missing_ok=True)
-                except OSError:
-                    # Windows: 백신/인덱서가 임시파일을 잠그면 삭제가 실패할 수 있음 — 분석 결과는 보존
-                    pass
+        # _cleanup_tmps가 경로별 OSError를 내부에서 자체 흡수하므로(Windows
+        # 백신/인덱서 잠금 등) 여기서 다시 감쌀 필요가 없다 — 감싸면 절대
+        # 실행되지 않는 except 블록과 함께 "밖에서 흡수해야 한다"는 허위
+        # 인상을 준다(PR #23 리뷰 7라운드 Finding B).
+        _cleanup_tmps(tmp_name, wired_tmp, *wireless_tmps)
         _set_progress(job_id, "완료", 100, active=False)
 
     if "error" in result:
+        # pipeline이 error_code를 명시했으면(예: 잘못된 시간 필터 문자열)
+        # 그 코드로 payload를 구성하고 400(클라이언트 입력 오류 — 사용자가
+        # 값을 정정하면 해결됨)을 반환한다. 명시가 없으면(추출 실패 등
+        # 서버/환경 쪽 문제로 간주) 기존처럼 일괄 NO_FRAMES(500)로 폴백한다
+        # — 그러지 않으면 "시간 값을 고치세요"가 정답인 상황에서도 사용자가
+        # "tshark/pcap 파일을 확인하라"는 엉뚱한 안내를 받는다(PR #23 리뷰
+        # 6라운드 Finding A).
+        error_code = result.get("error_code")
+        if error_code:
+            try:
+                payload = error_payload(ErrorCode(error_code))
+            except ValueError:
+                error_code = None
+                payload = error_payload(ErrorCode.NO_FRAMES)
+            payload["job_id"] = job_id
+            return JSONResponse(payload, status_code=400 if error_code else 500)
         payload = error_payload(ErrorCode.NO_FRAMES)
         payload["job_id"] = job_id
         return JSONResponse(payload, status_code=500)
@@ -263,14 +330,27 @@ async def upload_pcap(
         return JSONResponse(payload, status_code=499)
 
     result["pcap_name"] = name
-    # sources의 임시 파일명을 원본 업로드 파일명으로 치환
+    # sources의 임시 파일명을 업로드 순서(w1..wN) 기준 원본 파일명으로 치환.
+    # 파이프라인은 [file] + wireless_files 순서 그대로 role=="wireless" 항목을
+    # w1..wN으로 생성하므로(0건이어도 항목은 남는다) 개수는 항상 일치해야 한다.
+    # 불일치 시(방어적으로) 치환을 생략해 tmp 파일명이 그대로 노출되는 편이
+    # 잘못된 이름을 붙이는 것보다 안전하다.
+    all_wireless_names = [name] + wireless_names
+    wireless_sources = [
+        src for src in result.get("structured", {}).get("sources") or []
+        if src.get("role") == "wireless"
+    ]
+    if len(wireless_sources) == len(all_wireless_names):
+        for src, orig_name in zip(wireless_sources, all_wireless_names):
+            src["name"] = orig_name
     for src in result.get("structured", {}).get("sources") or []:
-        if src.get("role") == "wireless":
-            src["name"] = name
-        elif src.get("role") == "wired" and wired_name:
+        if src.get("role") == "wired" and wired_name:
             src["name"] = wired_name
+    pcap_names = list(all_wireless_names)
     if wired_name:
-        result["pcap_names"] = [name, wired_name]
+        pcap_names.append(wired_name)
+    if len(pcap_names) > 1:
+        result["pcap_names"] = pcap_names
     analysis_id = result["id"]
     data_dir = config.ensure_data_dir()
     result_path = data_dir / f"{analysis_id}.json"
