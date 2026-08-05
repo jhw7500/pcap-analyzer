@@ -1177,18 +1177,28 @@
             text: loss.map(e => escapeHtml(e.target) + ' LOSS'),
             hovertemplate: '%{text}<br>%{x}<extra></extra>',
         });
+        // 옵션은 무선 RTT 시계열과 미러링 — 유선이 기본 뷰이고 1만+ 포인트로
+        // 밀집하므로 zoom/pan이 오히려 더 필요하다 (PR #25 리뷰 2라운드).
         Plotly.newPlot('chart-ping-rtt', traces, {
             ...DARK,
-            xaxis: { gridcolor: '#374151' },
+            xaxis: { title: { text: '시간', font: { size: 12 } }, gridcolor: '#374151' },
             yaxis: { title: { text: 'RTT (ms)', font: { size: 12 } }, gridcolor: '#374151', rangemode: 'tozero' },
             legend: { orientation: 'h', x: 0, y: 1.12, font: { size: 12 } },
-        }, { responsive: true, displayModeBar: false });
+            margin: { t: 60, r: 20, b: 50, l: 60 },
+        }, {
+            responsive: true,
+            displayModeBar: true,
+            displaylogo: false,
+            modeBarButtonsToRemove: ['lasso2d', 'select2d'],
+        });
     }
 
     function renderPingHistWired() {
+        const histEl = document.getElementById('chart-ping-hist');
+        if (!histEl) return;
         const rtts = gtExchanges.filter(e => e.rtt_ms != null).map(e => e.rtt_ms);
-        if (!rtts.length) { Plotly.purge('chart-ping-hist'); document.getElementById('chart-ping-hist').innerHTML = '<p class="text-sm text-gray-500 py-8 text-center">응답이 없어 분포를 계산할 수 없습니다.</p>'; return; }
-        document.getElementById('chart-ping-hist').innerHTML = '';
+        if (!rtts.length) { Plotly.purge('chart-ping-hist'); histEl.innerHTML = '<p class="text-sm text-gray-500 py-8 text-center">응답이 없어 분포를 계산할 수 없습니다.</p>'; return; }
+        histEl.innerHTML = '';
         // 무선 히스토그램(renderPingHistWireless)과 동일한 롱테일 대응 — 이상치 1건만
         // 있어도 0~max 균등 bin에서는 본체 분포가 첫 막대로 붕괴한다. 표시 범위를
         // p99로 클립하고 bin을 세밀화해 본체를 펼치고, 잘린 이상치는 카운트로 안내한다.
@@ -1210,6 +1220,7 @@
             ...DARK,
             xaxis: { title: { text: 'RTT (ms)', font: { size: 12 } }, gridcolor: '#374151', range: [0, hi] },
             yaxis: { title: { text: '건수', font: { size: 12 } }, gridcolor: '#374151' },
+            margin: { t: 10, r: 10, b: 50, l: 50 },
             annotations,
         }, { responsive: true, displayModeBar: false });
     }
