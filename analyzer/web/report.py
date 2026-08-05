@@ -567,16 +567,8 @@ def _roaming_section(structured: Dict[str, Any]) -> List[str]:
 def _ping_section(structured: Dict[str, Any]) -> List[str]:
     """Ping/RTT 요약(응답수·Loss·평균·P95). 단방향 캡처는 avg/p95가 None이라 생략."""
     ping = structured.get("ping") or {}
-    # 측정 불가(ICMP 없음) 캡처 — '응답 0 · Loss 0%'는 무결점으로 오독되므로 N/A 명시
-    comp = (structured.get("diagnosis") or {}).get("component_scores") or {}
-    if "loss" in comp and comp.get("loss") is None:
-        return [
-            "## Ping / RTT",
-            "",
-            "- 측정 불가 — ICMP 트래픽 없음 (RTT/Loss 평가 대상 아님)",
-            "",
-        ]
     # 유선 확정 블록(스펙 2026-08-05-wired-rtt-primary §4) — GT 있으면 서두에.
+    # (측정 불가 분기 앞에서 계산해야 ICMP 없는 경우에도 GT가 손실되지 않음)
     gt = ping.get("ground_truth") or {}
     gt_lines: List[str] = []
     if isinstance(gt, dict) and isinstance(gt.get("total"), int) and gt["total"] > 0:
@@ -594,9 +586,17 @@ def _ping_section(structured: Dict[str, Any]) -> List[str]:
                 f"- 유선 손실 구간 {len(streaks)}곳 — 최장 {worst.get('count', 0)}건"
                 f"/{worst.get('duration_sec', 0)}초 ({_clean_inline(str(worst.get('target', '?')))})"
             )
+    # 측정 불가(ICMP 없음) 캡처 — '응답 0 · Loss 0%'는 무결점으로 오독되므로 N/A 명시
+    comp = (structured.get("diagnosis") or {}).get("component_scores") or {}
+    if "loss" in comp and comp.get("loss") is None:
+        na_line = "- 측정 불가 — ICMP 트래픽 없음 (RTT/Loss 평가 대상 아님)"
+        if gt_lines:
+            return ["## Ping / RTT", ""] + gt_lines + [
+                "- 무선 관측 (보조지표): 측정 불가 — ICMP 트래픽 없음", ""]
+        return ["## Ping / RTT", "", na_line, ""]
     stats = ping.get("stats")
     if not isinstance(stats, dict) or not stats:
-        return []
+        return ["## Ping / RTT", ""] + gt_lines + [""] if gt_lines else []
     parts = []
     if stats.get("count") is not None:
         parts.append(f"응답 {stats['count']:,}")
@@ -609,7 +609,7 @@ def _ping_section(structured: Dict[str, Any]) -> List[str]:
     if stats.get("p95") is not None:
         parts.append(f"P95 RTT {stats['p95']}ms")
     if not parts:
-        return []
+        return ["## Ping / RTT", ""] + gt_lines + [""] if gt_lines else []
     # GT 있으면: 유선 줄 + 무선 줄(보조지표 라벨). GT 없으면: 기존 경로(byte-identical)
     if gt_lines:
         wireless_line = f"- 무선 관측 (보조지표): {' · '.join(parts)}"

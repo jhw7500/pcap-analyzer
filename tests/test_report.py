@@ -681,6 +681,28 @@ def test_ping_section_without_ground_truth_unchanged():
     assert "응답 90" in text
 
 
+def test_ping_section_gt_only_without_stats():
+    """GT만 있고 wireless stats 없으면: 유선 확정 블록만 (무선 관측 없음)"""
+    structured = {"ping": {"ground_truth": {
+        "total": 100, "ok": 98, "ng": 2, "loss_pct": 2.0,
+        "rtt_stats": {"n": 98, "min_ms": 1.0, "avg_ms": 3.4, "max_ms": 50.0, "p95_ms": 9.8}}}}
+    text = "\n".join(_ping_section(structured))
+    assert "유선 확정" in text and "요청 100" in text
+    assert "무선 관측" not in text
+
+
+def test_ping_section_gt_with_unmeasurable_wireless():
+    """유선 확정 + 무선 측정 불가(ICMP 없음): 유선 블록 + 보조지표 N/A 줄"""
+    structured = {
+        "diagnosis": {"component_scores": {"loss": None}},
+        "ping": {"ground_truth": {"total": 100, "ok": 98, "ng": 2, "loss_pct": 2.0}},
+    }
+    text = "\n".join(_ping_section(structured))
+    assert "유선 확정" in text
+    assert "측정 불가" in text
+    assert "무선 관측 (보조지표)" in text
+
+
 def test_device_phy_section_table_and_min_sample():
     md = build_report_markdown(_result(structured={
         "system_stats": {
