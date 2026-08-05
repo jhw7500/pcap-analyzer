@@ -5,6 +5,7 @@ Frame -> 디버그 테이블 row 매핑이 정확히 8개 키
 올바른 값으로 노출하는지 검증한다. reason_code가 없으면 비어있음/None.
 """
 from analyzer.web.frame_table import FRAME_ROW_KEYS, frame_to_row
+from analyzer.web.evidence import build_debug_block
 from tests.conftest import make_frame
 
 
@@ -59,3 +60,28 @@ class TestFrameToRow:
         row = frame_to_row(make_frame(mcs="", rssi=""))
         assert row["mcs"] is None
         assert row["rssi"] is None
+
+
+class TestSourceBadge:
+    def test_default_excludes_source(self):
+        f = make_frame(source="w2")
+        assert "source" not in frame_to_row(f)
+
+    def test_include_source_adds_ninth_key(self):
+        f = make_frame(source="w2")
+        row = frame_to_row(f, include_source=True)
+        assert set(row) == set(FRAME_ROW_KEYS) | {"source"}
+        assert row["source"] == "w2"
+
+    def test_debug_block_rows_carry_source_only_with_sniffer_compare(self):
+        frames = [make_frame(number=1, source="w1"),
+                  make_frame(number=2, epoch=1000.5, source="w2")]
+        diag = {"diagnosis": {"issues": [{"frame_refs": [1, 2]}]}}
+
+        multi = build_debug_block(
+            {**diag, "sniffer_compare": {"tags": ["w1", "w2"]}},
+            frames, index=None, roles=None)
+        assert [r["source"] for r in multi["frames"]] == ["w1", "w2"]
+
+        single = build_debug_block(dict(diag), frames, index=None, roles=None)
+        assert all("source" not in r for r in single["frames"])
