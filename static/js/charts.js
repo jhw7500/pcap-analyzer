@@ -1186,12 +1186,28 @@
         const rtts = gtExchanges.filter(e => e.rtt_ms != null).map(e => e.rtt_ms);
         if (!rtts.length) { Plotly.purge('chart-ping-hist'); document.getElementById('chart-ping-hist').innerHTML = '<p class="text-sm text-gray-500 py-8 text-center">응답이 없어 분포를 계산할 수 없습니다.</p>'; return; }
         document.getElementById('chart-ping-hist').innerHTML = '';
+        // 무선 히스토그램(renderPingHistWireless)과 동일한 롱테일 대응 — 이상치 1건만
+        // 있어도 0~max 균등 bin에서는 본체 분포가 첫 막대로 붕괴한다. 표시 범위를
+        // p99로 클립하고 bin을 세밀화해 본체를 펼치고, 잘린 이상치는 카운트로 안내한다.
+        const sorted = [...rtts].sort((a, b) => a - b);
+        const p99 = sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.99))] : 1;
+        const hi = Math.max(p99, 1);                 // 표시 상한 (최소 1ms)
+        const outliers = rtts.filter(v => v > hi).length;
+        const maxRtt = sorted[sorted.length - 1];
+        const annotations = outliers > 0 ? [{
+            xref: 'paper', yref: 'paper', x: 1, y: 1, xanchor: 'right', yanchor: 'top',
+            text: `+${outliers.toLocaleString()}건 > ${hi.toFixed(1)}ms (최대 ${maxRtt.toFixed(1)}ms)`,
+            showarrow: false, font: { size: 10, color: '#9ca3af' },
+        }] : [];
         Plotly.newPlot('chart-ping-hist', [{
-            x: rtts, type: 'histogram', marker: { color: '#10b981' }, nbinsx: 50,
+            x: rtts, type: 'histogram',
+            xbins: { start: 0, end: hi, size: (hi / 40) || 0.1 },
+            marker: { color: '#10b981' },
         }], {
             ...DARK,
-            xaxis: { title: { text: 'RTT (ms)', font: { size: 12 } }, gridcolor: '#374151' },
+            xaxis: { title: { text: 'RTT (ms)', font: { size: 12 } }, gridcolor: '#374151', range: [0, hi] },
             yaxis: { title: { text: '건수', font: { size: 12 } }, gridcolor: '#374151' },
+            annotations,
         }, { responsive: true, displayModeBar: false });
     }
 

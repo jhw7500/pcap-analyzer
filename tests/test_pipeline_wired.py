@@ -12,6 +12,8 @@ GT_OK = {
     "streaks": [{"target": "10.0.0.2", "start_epoch": 1004.5,
                  "end_epoch": 1006.5, "count": 3, "duration_sec": 2.0}],
     "ng_epochs": [1004.5, 1005.5, 1006.5], "trailing_dropped": 0, "warnings": [],
+    "exchanges": [{"epoch": 1000.5, "target": "10.0.0.2", "rtt_ms": 1.5}],
+    "rtt_stats": {"n": 1, "min_ms": 1.5, "avg_ms": 1.5, "max_ms": 1.5, "p95_ms": 1.5},
 }
 
 
@@ -43,6 +45,7 @@ def test_wired_path_attaches_ground_truth_and_sources(monkeypatch):
     result = pipeline.run_analysis("wireless.pcapng", wired_path="wired.pcapng")
     ping = result["structured"]["ping"]
     assert ping["ground_truth"]["ng"] == 3
+    assert ping["ground_truth"]["exchanges"] and ping["ground_truth"]["rtt_stats"]["n"] == 1
     sources = result["structured"]["sources"]
     assert [s["role"] for s in sources] == ["wireless", "wired"]
     assert sources[0]["frame_count"] == 5
