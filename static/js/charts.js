@@ -92,6 +92,54 @@
         );
     }
 
+    /* ── 스니퍼 비교 카드 ── 다중 무선 병합 시(DATA.sniffer_compare)만 표시, 구버전 결과는 무동작 */
+    const sniffer = DATA.sniffer_compare;
+    const snifferCard = document.getElementById('sniffer-compare-card');
+    if (snifferCard && sniffer && Array.isArray(sniffer.tags) && sniffer.tags.length >= 2) {
+        snifferCard.classList.remove('hidden');
+        const tagNames = {};
+        (DATA.sources || []).forEach(s => { if (s.tag) tagNames[s.tag] = s.name; });
+        const label = t => tagNames[t] ? `${t} (${tagNames[t]})` : t;
+
+        /* 커버리지 분해 — dedup 그룹 기준 양쪽/단독 비율 (스니퍼 배치 평가 핵심 수치) */
+        const cov = sniffer.coverage || {};
+        const totalGroups = cov.groups_total || 0;
+        const pct = n => totalGroups ? (100 * n / totalGroups).toFixed(1) : '0.0';
+        const only = cov.only || {};
+        const parts = [`양쪽 포착 <span class="font-semibold text-white">${(cov.both || 0).toLocaleString()}</span>건 (${pct(cov.both || 0)}%)`]
+            .concat(sniffer.tags.filter(t => only[t]).map(t =>
+                `${escapeHtml(label(t))} 단독 <span class="font-semibold text-white">${only[t].toLocaleString()}</span>건 (${pct(only[t])}%)`));
+        document.getElementById('sniffer-coverage-line').innerHTML = parts.join(' · ');
+
+        /* 초당 시계열 3단: Frames/s · 평균 RSSI · Retry% — 소스별 trace */
+        const SRC_COLORS = { w1: '#3b82f6', w2: '#f59e0b', w3: '#10b981', w4: '#a855f7' };
+        const traces = [];
+        sniffer.tags.forEach(tag => {
+            const tl = (sniffer.series || {})[tag] || [];
+            const x = tl.map(p => new Date(p.epoch * 1000));
+            const color = SRC_COLORS[tag] || '#9ca3af';
+            const line = { color, width: 1.5 };
+            traces.push({ x, y: tl.map(p => p.frames), name: label(tag), legendgroup: tag,
+                          type: 'scatter', mode: 'lines', line, yaxis: 'y' });
+            traces.push({ x, y: tl.map(p => p.rssi_avg), name: label(tag), legendgroup: tag,
+                          showlegend: false, type: 'scatter', mode: 'lines', line,
+                          connectgaps: false, yaxis: 'y2' });
+            traces.push({ x, y: tl.map(p => p.frames ? +(100 * p.retry / p.frames).toFixed(1) : null),
+                          name: label(tag), legendgroup: tag, showlegend: false,
+                          type: 'scatter', mode: 'lines', line, connectgaps: false, yaxis: 'y3' });
+        });
+        Plotly.newPlot('sniffer-compare-chart', traces, {
+            ...DARK,
+            margin: { t: 10, r: 10, b: 30, l: 50 },
+            showlegend: true,
+            legend: { orientation: 'h', y: 1.08 },
+            xaxis: { anchor: 'y3', gridcolor: '#374151' },
+            yaxis: { domain: [0.72, 1.0], title: { text: 'Frames/s', font: { size: 10 } }, gridcolor: '#374151', rangemode: 'tozero' },
+            yaxis2: { domain: [0.38, 0.66], title: { text: '평균 RSSI (dBm)', font: { size: 10 } }, gridcolor: '#374151' },
+            yaxis3: { domain: [0.0, 0.3], title: { text: 'Retry %', font: { size: 10 } }, gridcolor: '#374151', rangemode: 'tozero' },
+        }, { responsive: true, displayModeBar: false });
+    }
+
     /* ── 802.11 카테고리 분류 ── 표준 type_subtype 기반 ── */
     function categorizeSubtype(sub) {
         const n = parseInt(sub, 10);
