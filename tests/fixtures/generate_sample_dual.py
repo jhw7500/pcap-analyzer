@@ -25,7 +25,7 @@ merge.py의 dedup 키((TA, seq, subtype, retry))가 A/B의 "같은 물리 프레
 from pathlib import Path
 
 from scapy.all import (  # type: ignore
-    RadioTap, Dot11, Dot11Beacon, Dot11Elt,
+    Ether, RadioTap, Dot11, Dot11Beacon, Dot11Elt,
     LLC, SNAP, IP, ICMP, Raw, wrpcap,
 )
 
@@ -150,14 +150,40 @@ def build():
     return packets_a, packets_b
 
 
+def build_wired(base_epoch: float):
+    """유선(EN10MB) ICMP 픽스처 — 유선 RTT 골든용 (스펙 2026-08-05 §6).
+
+    request 5건(seq 1..5) 중 seq=3만 무응답. RTT는 seq*1ms — 결정적이라
+    골든이 rtt_stats를 정확값으로 고정할 수 있다. 마지막 프레임은 seq=5의
+    reply라 trailing_dropped(캡처 끝 경계 드롭)가 발동하지 않는다.
+    """
+    frames = []
+    for i in range(1, 6):
+        t_req = base_epoch + i * 1.0
+        req = (Ether(src="aa:bb:cc:00:00:01", dst="aa:bb:cc:00:00:02")
+               / IP(src="10.0.0.1", dst="10.0.0.2") / ICMP(type=8, id=1, seq=i))
+        _stamp(req, t_req)
+        frames.append(req)
+        if i != 3:
+            rep = (Ether(src="aa:bb:cc:00:00:02", dst="aa:bb:cc:00:00:01")
+                   / IP(src="10.0.0.2", dst="10.0.0.1") / ICMP(type=0, id=1, seq=i))
+            _stamp(rep, t_req + i / 1000.0)  # RTT = i ms
+            frames.append(rep)
+    return frames
+
+
 def main():
     out_a = Path(__file__).parent / "sample_dual_a.pcap"
     out_b = Path(__file__).parent / "sample_dual_b.pcap"
+    out_wired = Path(__file__).parent / "sample_wired.pcap"
     packets_a, packets_b = build()
     wrpcap(str(out_a), packets_a)
     wrpcap(str(out_b), packets_b)
     print(f"Wrote {out_a} ({out_a.stat().st_size} bytes, {len(packets_a)} packets)")
     print(f"Wrote {out_b} ({out_b.stat().st_size} bytes, {len(packets_b)} packets)")
+    packets_wired = build_wired(BASE_EPOCH)
+    wrpcap(str(out_wired), packets_wired)
+    print(f"Wrote {out_wired} ({out_wired.stat().st_size} bytes, {len(packets_wired)} packets)")
 
 
 if __name__ == "__main__":
