@@ -576,6 +576,24 @@ def _ping_section(structured: Dict[str, Any]) -> List[str]:
             "- 측정 불가 — ICMP 트래픽 없음 (RTT/Loss 평가 대상 아님)",
             "",
         ]
+    # 유선 확정 블록(스펙 2026-08-05-wired-rtt-primary §4) — GT 있으면 서두에.
+    gt = ping.get("ground_truth") or {}
+    gt_lines: List[str] = []
+    if isinstance(gt, dict) and isinstance(gt.get("total"), int) and gt["total"] > 0:
+        gparts = [f"요청 {gt['total']:,}",
+                  f"손실 {gt.get('ng', 0):,}건 ({gt.get('loss_pct', 0.0)}%)"]
+        rs = gt.get("rtt_stats")
+        if isinstance(rs, dict):
+            gparts.append(f"평균 RTT {rs['avg_ms']}ms")
+            gparts.append(f"P95 RTT {rs['p95_ms']}ms")
+        gt_lines.append(f"- **유선 확정**: {' · '.join(gparts)}")
+        streaks = gt.get("streaks") or []
+        if streaks:
+            worst = max(streaks, key=lambda s: s.get("count", 0))
+            gt_lines.append(
+                f"- 유선 손실 구간 {len(streaks)}곳 — 최장 {worst.get('count', 0)}건"
+                f"/{worst.get('duration_sec', 0)}초 ({_clean_inline(str(worst.get('target', '?')))})"
+            )
     stats = ping.get("stats")
     if not isinstance(stats, dict) or not stats:
         return []
@@ -592,6 +610,10 @@ def _ping_section(structured: Dict[str, Any]) -> List[str]:
         parts.append(f"P95 RTT {stats['p95']}ms")
     if not parts:
         return []
+    # GT 있으면: 유선 줄 + 무선 줄(보조지표 라벨). GT 없으면: 기존 경로(byte-identical)
+    if gt_lines:
+        wireless_line = f"- 무선 관측 (보조지표): {' · '.join(parts)}"
+        return ["## Ping / RTT", ""] + gt_lines + [wireless_line, ""]
     return ["## Ping / RTT", "", f"- {' · '.join(parts)}", ""]
 
 

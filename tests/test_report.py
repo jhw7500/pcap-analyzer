@@ -7,6 +7,7 @@ from analyzer.web.report import (
     build_report_markdown,
     SIGNAL_TYPE_LABEL,
     _format_epoch,
+    _ping_section,
 )
 
 
@@ -647,6 +648,37 @@ def test_ping_section_null_guard_unidirectional():
 def test_ping_section_omitted_when_no_stats():
     md = build_report_markdown(_result(structured={"diagnosis": {}}))
     assert "## Ping / RTT" not in md
+
+
+def test_ping_section_with_ground_truth():
+    structured = {
+        "ping": {
+            "stats": {"count": 90, "loss_pct": 10.0, "loss_count": 10, "avg": 5.2, "p95": 9.9},
+            "ground_truth": {
+                "total": 100, "ok": 98, "ng": 2, "loss_pct": 2.0,
+                "rtt_stats": {"n": 98, "min_ms": 1.0, "avg_ms": 3.4, "max_ms": 50.0, "p95_ms": 9.8},
+                "streaks": [{"target": "10.0.0.2", "start_epoch": 1.0, "end_epoch": 2.0,
+                             "count": 2, "duration_sec": 1.0}],
+            },
+        },
+    }
+    lines = _ping_section(structured)
+    text = "\n".join(lines)
+    assert "유선 확정" in text and "요청 100" in text and "(2.0%)" in text
+    assert "평균 RTT 3.4ms" in text and "P95 RTT 9.8ms" in text
+    assert "손실 구간 1곳" in text
+    assert "무선 관측 (보조지표)" in text
+    # 유선 블록이 무선 줄보다 먼저
+    assert text.index("유선 확정") < text.index("무선 관측")
+
+
+def test_ping_section_without_ground_truth_unchanged():
+    structured = {"ping": {"stats": {"count": 90, "loss_pct": 10.0, "loss_count": 10,
+                                     "avg": 5.2, "p95": 9.9}}}
+    lines = _ping_section(structured)
+    text = "\n".join(lines)
+    assert "유선" not in text and "보조지표" not in text  # 기존 출력 형태 유지
+    assert "응답 90" in text
 
 
 def test_device_phy_section_table_and_min_sample():
