@@ -991,7 +991,9 @@
                 });
             }
             if (losses.length > 0) {
-                const maxRtt = pairs.length > 0 ? Math.max(...pairs.map(p => p.rtt_ms)) : 10;
+                // reduce 사용: 스프레드(Math.max(...arr))는 배열 전체가 인수 스택에
+                // 올라가 장시간 캡처(수만 페어)에서 RangeError 가능 (PR #25 리뷰).
+                const maxRtt = pairs.length > 0 ? pairs.reduce((m, p) => Math.max(m, p.rtt_ms), 0) : 10;
                 traces_ping.push({
                     x: losses.map(p => new Date(p.epoch * 1000)),
                     y: losses.map(() => maxRtt * 1.1),
@@ -1158,7 +1160,8 @@
     function renderPingRttWired() {
         const ok = gtExchanges.filter(e => e.rtt_ms != null);
         const loss = gtExchanges.filter(e => e.rtt_ms == null);
-        const maxRtt = ok.length ? Math.max(...ok.map(e => e.rtt_ms)) : 1;
+        // 유선 exchanges는 1만+ 건이 일상 규모 — 스프레드 대신 reduce (PR #25 리뷰).
+        const maxRtt = ok.length ? ok.reduce((m, e) => Math.max(m, e.rtt_ms), 0) : 1;
         const traces = [];
         if (ok.length) traces.push({
             x: ok.map(e => new Date(e.epoch * 1000)), y: ok.map(e => e.rtt_ms),
