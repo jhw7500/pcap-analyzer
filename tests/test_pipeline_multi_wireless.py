@@ -430,3 +430,36 @@ def test_wired_gt_composes_with_multi_wireless(monkeypatch):
     assert [s["role"] for s in sources] == ["wireless", "wireless", "wired"]
     assert result["structured"]["ping"]["ground_truth"]["ng"] == 3
     assert "merge" in result["structured"]
+
+
+def test_sniffer_compare_block_for_two_sources(monkeypatch):
+    """다중 무선이면 sniffer_compare가 생성되고, 소스별 시계열 합계는
+    그 소스의 raw 프레임 수와 일치하며, sources에 tag가 붙는다."""
+    frames_by_path = {FILE_W1: _w1_frames(), FILE_W2: _w2_frames()}
+    _patch_common(monkeypatch, dict(GT_OK), frames_by_path)
+
+    result = pipeline.run_analysis(FILE_W1, wireless_paths=[FILE_W2])
+
+    sc = result["structured"]["sniffer_compare"]
+    assert sc["tags"] == ["w1", "w2"]
+    assert sum(p["frames"] for p in sc["series"]["w1"]) == len(_w1_frames())
+    assert sum(p["frames"] for p in sc["series"]["w2"]) == len(_w2_frames())
+    cov = sc["coverage"]
+    assert cov["both"] + sum(cov["only"].values()) == cov["groups_total"]
+
+    wireless = [s for s in result["structured"]["sources"]
+                if s["role"] == "wireless"]
+    assert [s["tag"] for s in wireless] == ["w1", "w2"]
+
+
+def test_single_wireless_has_no_sniffer_compare_and_no_tag(monkeypatch):
+    """단일 무선은 스냅샷 불변 — sniffer_compare 키도 tag 키도 없다."""
+    frames_by_path = {FILE_W1: _w1_frames()}
+    _patch_common(monkeypatch, dict(GT_OK), frames_by_path)
+
+    result = pipeline.run_analysis(FILE_W1)
+
+    assert "sniffer_compare" not in result["structured"]
+    (src,) = [s for s in result["structured"]["sources"]
+              if s["role"] == "wireless"]
+    assert "tag" not in src

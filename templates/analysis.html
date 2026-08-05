@@ -90,6 +90,12 @@
 <!-- Overview 탭 -->
 <div class="tab-content" id="tab-overview">
     <div class="grid grid-cols-4 gap-4 mb-6" id="kpi-cards"></div>
+    <!-- 스니퍼 비교 (스펙 §5) — 다중 무선 병합 시에만 charts.js가 unhide -->
+    <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-6 hidden" id="sniffer-compare-card">
+        <h3 class="text-sm font-semibold text-gray-400 mb-1">스니퍼 비교</h3>
+        <p class="text-sm text-gray-300" id="sniffer-coverage-line"></p>
+        <div id="sniffer-compare-chart" class="mt-3" style="height:420px"></div>
+    </div>
     <div class="grid grid-cols-2 gap-4 mb-4">
         <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
             <h3 class="text-sm font-semibold text-gray-400 mb-2">프레임 종류 <span class="text-xs text-gray-500 font-normal">(관리 / 제어 / 데이터)</span></h3>
@@ -233,6 +239,7 @@
                         <th class="text-right py-2 px-1">RSSI</th>
                         <th class="text-left py-2 px-1">Reason</th>
                         <th class="text-left py-2 px-1">Seq</th>
+                        <th class="text-left py-2 px-1 hidden" id="debug-col-source">출처</th>
                     </tr>
                 </thead>
                 <tbody></tbody>

@@ -34,6 +34,7 @@ from .web.structured import (
     _structured_system_stats,
     _structured_diagnosis,
     _structured_merge,
+    _structured_sniffer_compare,
 )
 
 __all__ = [
@@ -48,6 +49,7 @@ __all__ = [
     "_structured_system_stats",
     "_structured_diagnosis",
     "_structured_merge",
+    "_structured_sniffer_compare",
 ]
 
 #: 프레임을 하나도 못 뽑았을 때(추출 실패 또는 시간 창 적용 후 0건) 공통 에러 메시지.
@@ -234,6 +236,10 @@ def run_analysis(
             "name": Path(path).name, "role": "wireless",
             "frame_count": len(file_frames), "warnings": [],
         }
+        if len(paths) > 1:
+            # tag는 프론트가 sniffer_compare/배지와 sources를 조인하는 키 —
+            # 단일 업로드 결과의 직렬화를 바꾸지 않도록 다중일 때만 싣는다.
+            src_entry["tag"] = tag
         if file_frames:
             per_source[tag] = file_frames
         else:
@@ -252,6 +258,7 @@ def run_analysis(
     # 소스(원래 1개 경로만 준 경우든, 나머지가 0건이라 걸러진 경우든)는 merge를
     # 아예 호출하지 않아 기존 파이프라인과 완전히 동일한 결과를 낸다(하위 호환).
     merge_summary: Optional[Dict[str, Any]] = None
+    sniffer_summary: Optional[Dict[str, Any]] = None
     # 다중 경로 입력 + 내용 필터(alignment_sources가 존재 — need_alignment_pass)면,
     # 생존 소스 수와 무관하게 항상 기준을 "w1"로 명시해 merge_captures를
     # 호출한다. mac_filter/ip_filter가 secondary에서만 매칭되면 w1(기준)이
@@ -310,6 +317,11 @@ def run_analysis(
         # sources 배열의 오프셋 필드(applied_offset_ms 등, 위)는 구조화 스키마가
         # 아니라 소스 메타데이터라 이 경계 밖 — pipeline에 남는다.
         merge_summary = _structured_merge(mr)
+        # 시계열은 사용자 요청 창(보정 epoch 기준)으로 잘라 나머지 결과와 같은
+        # 구간을 기술하게 한다(PR #24 Codex P2). 창 미지정이면 둘 다 None.
+        sniffer_summary = _structured_sniffer_compare(
+            mr, window_start_epoch, window_end_epoch
+        )
     else:
         (frames,) = per_source.values()
 
@@ -363,6 +375,8 @@ def run_analysis(
     structured: Dict[str, Any] = {}
     if merge_summary is not None:
         structured["merge"] = merge_summary
+    if sniffer_summary is not None:
+        structured["sniffer_compare"] = sniffer_summary
 
     _progress("시각화: 개요 데이터 생성 중...", 90)
     # AP 채널 맵은 프레임 전수 조사(O(N)) — overview/roaming이 재사용하도록 1회만 계산

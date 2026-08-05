@@ -13,6 +13,7 @@ from ..core.models import Frame
 
 # 디버그 테이블이 노출하는 정확히 8개의 컬럼 키.
 # (frame.number, timestamp, type/subtype, retry, MCS, RSSI, reason_code, seq)
+# 다중 무선 병합 시 frame_to_row의 include_source=True로 9번째 키 "source"(캡처 출처 태그)가 추가될 수 있다.
 FRAME_ROW_KEYS = (
     "number",
     "timestamp",
@@ -25,10 +26,10 @@ FRAME_ROW_KEYS = (
 )
 
 
-def frame_to_row(frame: Frame) -> Dict[str, Any]:
+def frame_to_row(frame: Frame, include_source: bool = False) -> Dict[str, Any]:
     """Frame을 디버그 테이블 row(dict)로 직렬화한다.
 
-    정확히 `FRAME_ROW_KEYS`의 8개 키만 노출한다:
+    기본 8개 키(`FRAME_ROW_KEYS`)를 항상 노출한다:
 
     - ``number``: stable tshark frame.number (행/근거의 canonical id)
     - ``timestamp``: 사람이 읽는 시각 문자열
@@ -38,9 +39,12 @@ def frame_to_row(frame: Frame) -> Dict[str, Any]:
     - ``rssi``: 첫 안테나 RSSI(dBm, int) 또는 None
     - ``reason_code``: Deauth/Disassoc 사유 코드(str). 없으면 None.
     - ``seq``: 802.11 시퀀스 번호(str)
+
+    `include_source=True`면 9번째 키 ``source``(캡처 출처 태그 w1/w2…)를 추가한다.
+    단일 pcap 직렬화를 바꾸지 않기 위해 기본은 8키다(YAGNI).
     """
     reason_code: Optional[str] = frame.reason_code or None
-    return {
+    row = {
         "number": frame.number,
         "timestamp": frame.timestamp,
         "type_subtype": f"{frame.frame_type}/{frame.subtype_name}",
@@ -50,3 +54,6 @@ def frame_to_row(frame: Frame) -> Dict[str, Any]:
         "reason_code": reason_code,
         "seq": frame.seq,
     }
+    if include_source:
+        row["source"] = frame.source
+    return row

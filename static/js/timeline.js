@@ -859,6 +859,17 @@
      *   time_window로 줌 + 해당 frame_refs를 표에서 하이라이트.
      * ════════════════════════════════════════════════════════════════ */
     const debugFrames = debug.frames || [];
+    /* 출처 배지(w1/w2) — 다중 무선 병합 행에만 source 키가 있다(구버전/단일은 컬럼 자체 미표시) */
+    const hasSource = debugFrames.some(r => r.source);
+    const srcTh = document.getElementById('debug-col-source');
+    if (srcTh && hasSource) srcTh.classList.remove('hidden');
+    const SRC_BADGE_CLS = {
+        w1: 'bg-blue-900/60 text-blue-300', w2: 'bg-amber-900/60 text-amber-300',
+        w3: 'bg-emerald-900/60 text-emerald-300', w4: 'bg-purple-900/60 text-purple-300',
+    };
+    const srcBadge = tag => tag
+        ? `<span class="px-1 rounded text-xs ${SRC_BADGE_CLS[tag] || 'bg-gray-700 text-gray-300'}">${escapeHtml(tag)}</span>`
+        : '';
     const tbody = document.querySelector('#debug-frames-table tbody');
     const countEl = document.getElementById('debug-frames-count');
     const startInput = document.getElementById('debug-range-start');
@@ -928,7 +939,7 @@
                 + (highlightSet.size ? ` · 증거 ${highlightSet.size}건` : '');
         }
         if (rows.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="8" class="text-gray-500 text-center py-6">선택 구간에 프레임이 없습니다.</td></tr>';
+            tbody.innerHTML = `<tr><td colspan="${hasSource ? 9 : 8}" class="text-gray-500 text-center py-6">선택 구간에 프레임이 없습니다.</td></tr>`;
             return;
         }
         tbody.innerHTML = rows.map(r => {
@@ -949,6 +960,7 @@
                 <td class="py-1 px-1 text-right ${rssi !== '' && rssi < -70 ? 'text-orange-400' : ''}">${rssi}</td>
                 <td class="py-1 px-1">${reason}</td>
                 <td class="py-1 px-1 text-gray-400">${escapeHtml(r.seq)}</td>
+                ${hasSource ? `<td class="py-1 px-1">${srcBadge(r.source)}</td>` : ''}
             </tr>`;
         }).join('');
     }

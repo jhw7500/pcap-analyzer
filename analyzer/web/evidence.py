@@ -449,9 +449,11 @@ def build_debug_block(
     # 행마다 epoch을, 장치 필터를 위해 ta_name/ra_name을 부가한다(표에는 렌더되지
     # 않는 보조 키). roles가 없으면(단위 테스트 등) 이름 해석 없이 raw MAC을 싣고,
     # roles가 있으면 mac_name으로 STA/AP 표시명(장치 드롭다운 값과 동일)으로 환원한다.
+    # 출처 배지(w1/w2)는 다중 무선 병합에서만 — 단일 pcap 직렬화 불변(스펙 §8).
+    include_source = bool(structured.get("sniffer_compare"))
     frame_rows: List[Dict[str, Any]] = []
     for f in ordered:
-        row = frame_to_row(f)
+        row = frame_to_row(f, include_source=include_source)
         row["epoch"] = f.epoch
         if roles is not None:
             row["ta_name"] = mac_name(f.ta, roles) if f.ta else ""

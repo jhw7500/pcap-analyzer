@@ -118,3 +118,29 @@ class TestGoldenDualCapture:
         assert rep.icmp_type == "8"
         assert rep.source == "w1"
         assert rep.ip_src == "192.168.1.100"
+
+
+def test_sniffer_compare_golden(result):
+    """스니퍼 비교 블록 — 시계열 합계는 소스 raw 수와, 커버리지 합은 dedup
+    그룹 총수와 정확히 일치해야 한다(뮤테이션 내성: 어느 한 쪽 집계가
+    바뀌면 즉시 깨진다)."""
+    sc = result["structured"]["sniffer_compare"]
+    assert sc["tags"] == ["w1", "w2"]
+
+    cov = sc["coverage"]
+    assert cov["groups_total"] == result["structured"]["merge"]["kept"]
+    assert cov["both"] + sum(cov["only"].values()) == cov["groups_total"]
+
+    by_tag = {s["tag"]: s for s in result["structured"]["sources"]
+              if s.get("tag")}
+    for tag in sc["tags"]:
+        assert sum(p["frames"] for p in sc["series"][tag]) \
+            == by_tag[tag]["frame_count"]
+
+    # ⑤ debug 행 출처 배지: 이 골든 픽스처는 네트워크 이상이 없어 diagnosis
+    # issue 0건 → debug["frames"]가 항상 빈다. 그 전제를 아래에서 단언으로
+    # 고정한다(죽은 조건부 분기 대신 — PR #24 claude 리뷰). 픽스처가 바뀌어
+    # 행이 생기면 이 단언이 깨지므로 그때 여기에 source 배지 검증을 추가하라.
+    # 배지 불변식 자체(키 존재 + 값 w1/w2 정확 일치)는 다음 테스트가 검증한다:
+    # tests/test_frame_table.py::TestSourceBadge::test_debug_block_rows_carry_source_only_with_sniffer_compare
+    assert result["structured"]["debug"]["frames"] == []
