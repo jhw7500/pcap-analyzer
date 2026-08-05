@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from analyzer.core import exping, wired_ping
+from analyzer.core.exping import Exchange
 
 #: 실경로(real capinfos subprocess) 테스트용 — scapy로 합성된 deterministic pcap.
 #: 생성 스크립트(tests/fixtures/generate_sample_basic.py)의 BASE_EPOCH=1700000000.0
@@ -28,15 +29,20 @@ def _local_epoch(s: str) -> float:
     return dt.datetime.strptime(s, "%Y-%m-%d %H:%M:%S").timestamp()
 
 
+#: 요청 3건 중 가운데 1건 무응답 픽스처 (test_counts_ok_ng_and_loss_pct와
+#: test_exchanges_and_rtt_stats_exposed에서 공유)
+_BODY_OK = (
+    "printf '100.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+    "printf '100.002\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+    "printf '101.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t2\\t\\n'\n"  # 무응답
+    "printf '102.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t3\\t\\n'\n"
+    "printf '102.003\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t3\\t\\n'\n"
+)
+
+
 def test_counts_ok_ng_and_loss_pct(tmp_path):
     """요청 3건 중 가운데 1건 무응답 → total 3 / ok 2 / ng 1 / 33.33%."""
-    body = (
-        "printf '100.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
-        "printf '100.002\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
-        "printf '101.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t2\\t\\n'\n"  # 무응답
-        "printf '102.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t3\\t\\n'\n"
-        "printf '102.003\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t3\\t\\n'\n"
-    )
+    body = _BODY_OK
     gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=_fake_tshark(tmp_path, body))
     assert "error" not in gt
     assert gt["total"] == 3 and gt["ok"] == 2 and gt["ng"] == 1
@@ -88,6 +94,7 @@ def test_trailing_unanswered_dropped_with_warning(tmp_path, monkeypatch):
     assert gt["total"] == 1 and gt["ng"] == 0
     assert gt["trailing_dropped"] == 1
     assert any("꼬리" in w for w in gt["warnings"])
+    assert len(gt["exchanges"]) == gt["total"]  # 꼬리 제외분은 exchanges에도 없다
 
 
 def test_wireless_capture_returns_error(tmp_path):
@@ -828,3 +835,65 @@ def test_boundary_cutoff_epoch_absent_without_time_end(tmp_path):
     gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=_fake_tshark(tmp_path, body))
     assert "error" not in gt
     assert "boundary_cutoff_epoch" not in gt
+
+
+# --------------------------------------------------------------------------
+# RTT 통계 및 exchange 노출 (Task 1)
+# --------------------------------------------------------------------------
+
+
+def test_rtt_stats_p95_boundaries():
+    """p95 = 정렬 후 ceil(0.95*n)-1 인덱스 (nearest-rank)."""
+    one = wired_ping._rtt_stats([Exchange(1.0, "t", 0.005)])
+    assert one == {"n": 1, "min_ms": 5.0, "avg_ms": 5.0, "max_ms": 5.0, "p95_ms": 5.0}
+
+    xs = [Exchange(float(i), "t", (i + 1) / 1000) for i in range(20)]  # 1..20ms
+    st = wired_ping._rtt_stats(xs)
+    assert st["n"] == 20
+    assert st["min_ms"] == 1.0 and st["max_ms"] == 20.0 and st["avg_ms"] == 10.5
+    assert st["p95_ms"] == 19.0  # ceil(0.95*20)-1 = idx 18 → 19ms
+
+
+def test_rtt_stats_none_when_no_answers():
+    """정직한 공백 — 응답이 하나도 없으면 통계 대신 None."""
+    assert wired_ping._rtt_stats([]) is None
+    assert wired_ping._rtt_stats([Exchange(1.0, "t", None)]) is None
+
+
+def test_exchanges_and_rtt_stats_exposed(tmp_path):
+    """GT dict에 exchange별 RTT가 노출되고 손실 집계와 모집단이 일치한다."""
+    # 기존 test_counts_ok_ng_and_loss_pct와 동일한 body 픽스처를 그대로 재사용한다.
+    body = _BODY_OK
+    gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=_fake_tshark(tmp_path, body))
+
+    assert len(gt["exchanges"]) == gt["total"]
+    answered = [e for e in gt["exchanges"] if e["rtt_ms"] is not None]
+    assert len(answered) == gt["ok"]
+    assert all(e["rtt_ms"] > 0 for e in answered)
+    assert all(set(e) == {"epoch", "target", "rtt_ms"} for e in gt["exchanges"])
+
+    rs = gt["rtt_stats"]
+    assert rs["n"] == gt["ok"]
+    assert rs["min_ms"] <= rs["avg_ms"] <= rs["max_ms"]
+    assert rs["min_ms"] <= rs["p95_ms"] <= rs["max_ms"]
+
+
+def test_all_unanswered_omits_rtt_stats(tmp_path, monkeypatch):
+    """전부 무응답이면 rtt_stats 키 자체가 없다 — capture_end 밖의 픽스처."""
+    # 응답이 전혀 없으면서 error가 발생하지 않는 경우: capture_end를
+    # 충분히 뒤에 둬서 all pending으로 인정하되, 일단 요청-응답 시간 내에
+    # 응답이 도착하지 않은 경우.
+    body = (
+        "printf '100.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        "printf '100.1\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t2\\t\\n'\n"
+        "printf '100.2\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t3\\t\\n'\n"
+    )
+    # capture_end=102.0 → threshold=101.0 → 세 요청이 모두 threshold 전에
+    # 있으므로 유효하지만 응답이 도착하지 않음
+    monkeypatch.setattr(wired_ping, "_detect_capture_end", lambda *a, **kw: 102.0)
+    gt = wired_ping.build_ground_truth("x.pcapng", tshark_path=_fake_tshark(tmp_path, body))
+    assert "error" not in gt
+    assert gt["total"] == 3 and gt["ng"] == 3 and gt["ok"] == 0
+    assert "rtt_stats" not in gt
+    assert len(gt["exchanges"]) == 3
+    assert all(e["rtt_ms"] is None for e in gt["exchanges"])

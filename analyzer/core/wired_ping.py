@@ -7,6 +7,7 @@
 sender 선정과 꼬리 무응답 판정은 EXPING 재구성(`exping.extract_exchanges`)과
 다르게 동작한다 — 이 모듈만의 규칙이니 각 함수 docstring에 근거를 남긴다.
 """
+import math
 import shutil
 import subprocess
 import time
@@ -25,6 +26,27 @@ MAX_NG_EPOCHS = 1000
 #: capinfos 실행 상한(초) — 이 안에서 0.2초 간격으로 취소를 폴링한다
 _CAPINFOS_TIMEOUT_SEC = 30
 _CAPINFOS_POLL_SEC = 0.2
+
+
+def _rtt_stats(exchanges: List["exping.Exchange"]) -> Optional[Dict[str, Any]]:
+    """응답 있는 exchange의 RTT 통계(ms). 응답 0건이면 None — 정직한 공백
+    원칙(스펙 §1): 0이나 가짜 값으로 채우면 '무손실·0ms'로 오독된다.
+
+    p95는 정렬 후 nearest-rank(ceil(0.95*n)-1 인덱스) — 외부 의존성 없이
+    n=1에서도 안전하다.
+    """
+    rtts = sorted(x.rtt for x in exchanges if x.rtt is not None)
+    if not rtts:
+        return None
+    n = len(rtts)
+    p95 = rtts[max(0, math.ceil(0.95 * n) - 1)]
+    return {
+        "n": n,
+        "min_ms": round(rtts[0] * 1000, 3),
+        "avg_ms": round(sum(rtts) / n * 1000, 3),
+        "max_ms": round(rtts[-1] * 1000, 3),
+        "p95_ms": round(p95 * 1000, 3),
+    }
 
 
 def _filter_exchanges(
@@ -543,6 +565,17 @@ def build_ground_truth(
         "trailing_dropped": dropped,
         "warnings": warnings,
     }
+    # 유선 RTT 1차 노출(스펙 2026-08-05-wired-rtt-primary §1): exchanges는
+    # 위 손실 집계와 정확히 같은 최종 모집단이다 — 시간창·필터·꼬리 제외가
+    # 모두 반영된 뒤의 리스트라 total == len(exchanges)가 항상 성립한다.
+    result["exchanges"] = [
+        {"epoch": x.time, "target": x.target,
+         "rtt_ms": round(x.rtt * 1000, 3) if x.rtt is not None else None}
+        for x in exchanges
+    ]
+    rtt_stats = _rtt_stats(exchanges)
+    if rtt_stats is not None:
+        result["rtt_stats"] = rtt_stats
     if time_end:
         # 13라운드의 경계 배제(_filter_exchanges: 응답 창이 time_end를 넘어갈
         # 여지가 있고 실제 응답도 경계 밖인 요청 제외)는 유선 GT에만 적용됐다 —
