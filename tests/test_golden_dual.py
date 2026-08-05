@@ -118,3 +118,28 @@ class TestGoldenDualCapture:
         assert rep.icmp_type == "8"
         assert rep.source == "w1"
         assert rep.ip_src == "192.168.1.100"
+
+
+def test_sniffer_compare_golden(result):
+    """스니퍼 비교 블록 — 시계열 합계는 소스 raw 수와, 커버리지 합은 dedup
+    그룹 총수와 정확히 일치해야 한다(뮤테이션 내성: 어느 한 쪽 집계가
+    바뀌면 즉시 깨진다)."""
+    sc = result["structured"]["sniffer_compare"]
+    assert sc["tags"] == ["w1", "w2"]
+
+    cov = sc["coverage"]
+    assert cov["groups_total"] == result["structured"]["merge"]["kept"]
+    assert cov["both"] + sum(cov["only"].values()) == cov["groups_total"]
+
+    by_tag = {s["tag"]: s for s in result["structured"]["sources"]
+              if s.get("tag")}
+    for tag in sc["tags"]:
+        assert sum(p["frames"] for p in sc["series"][tag]) \
+            == by_tag[tag]["frame_count"]
+
+    # debug 행 출처 배지 — 존재 시 반드시 실제 태그 집합 안에 있어야 한다.
+    # (진단 이슈가 없으면 debug.frames는 공) —뮤테이션 내성: frame_to_row의
+    # include_source 분기가 깨지면 source 값이 누락되거나 타문자열이 된다.
+    rows = result["structured"]["debug"]["frames"]
+    if rows:
+        assert all(r.get("source") in ("w1", "w2") for r in rows)
