@@ -1261,6 +1261,9 @@
     let currentPingSource = null;
 
     // RTT 손실 X 마커 클릭 → 전체 목록의 해당 행으로 점프 (스펙 §2).
+    let pingHighlightRow = null;   // 직전 하이라이트 행/타이머 — 연속 클릭 정리용
+    let pingHighlightTimer = null;
+
     function jumpToPingRow(attrName, idx) {
         const sel = document.getElementById('ping-filter-status');
         let needRender = false;
@@ -1278,8 +1281,16 @@
         const row = document.querySelector(`#ping-full-table tbody tr[${attrName}="${idx}"]`);
         if (!row) return;   // 탐색 실패 시 무동작 (throw 금지)
         row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        // 연속 클릭 시 이전 타이머가 새 하이라이트를 조기 제거하지 않도록
+        // 타이머·행을 추적해 정리한다 (PR #26 리뷰 LOW).
+        if (pingHighlightRow) pingHighlightRow.classList.remove('outline', 'outline-2', 'outline-yellow-400');
+        if (pingHighlightTimer) clearTimeout(pingHighlightTimer);
         row.classList.add('outline', 'outline-2', 'outline-yellow-400');
-        setTimeout(() => row.classList.remove('outline', 'outline-2', 'outline-yellow-400'), 2500);
+        pingHighlightRow = row;
+        pingHighlightTimer = setTimeout(() => {
+            row.classList.remove('outline', 'outline-2', 'outline-yellow-400');
+            pingHighlightRow = null; pingHighlightTimer = null;
+        }, 2500);
     }
 
     // newPlot이 노드를 재사용하므로 뷰 전환마다 재바인딩 필요 — 중복 리스너
@@ -1503,7 +1514,9 @@
             else renderPingFullTable();
         });
     });
-    if (fullList.length > 0) renderPingFullTable();
+    // 초기 전체 목록 렌더는 아래 srcToggle 초기화의 renderPingSource(...)가
+    // 소스에 맞게 1회 수행한다 — 여기서 선행 렌더하면 유선 경로에서 10k+행
+    // innerHTML을 두 번 쓰는 잉여 작업이 된다 (PR #26 리뷰).
 
     // 장치별 연속 실패 구간 표 (백엔드 ping.loss_streaks — 구버전 result엔 없어 빈 표+재분석 안내)
     const streakTbody = document.querySelector('#ping-streak-table tbody');
