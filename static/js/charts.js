@@ -836,6 +836,18 @@
     const fullList = ping.full_list || [];
     const pingStatsData = ping.stats || {};
 
+    // RTT 손실 X 클릭 시 전체 목록 행으로 점프하기 위한 인덱스 병행 보존.
+    // losses와 fullList는 analyzer/core/ping_matching.py에서 같은 loss entry를
+    // 동시에 append한 뒤 각각 독립적으로 epoch 기준 안정 정렬되므로, fullList를
+    // status로 필터링한 순서가 losses 배열의 순서와 정확히 일치한다. 길이가
+    // 어긋나면(구버전 result 등) 매핑을 신뢰할 수 없으므로 customdata를 비워
+    // 클릭 무동작으로 안전하게 폴백한다.
+    const lossFlIdx = fullList
+        .map((p, fi) => ({ p, fi }))
+        .filter(x => x.p.status === 'loss' || x.p.status === 'loss_gap')
+        .map(x => x.fi);
+    const lossCustomdata = lossFlIdx.length === losses.length ? lossFlIdx : undefined;
+
     /* 유선 ground truth 카드 — ping.ground_truth 있을 때만 (스펙 §4) */
     const gt = ping.ground_truth || null;
     const gtDiv = document.getElementById('ping-ground-truth');
@@ -949,6 +961,7 @@
                 name: 'LOSS (seq gap)',
                 marker: { color: '#ef4444', size: 12, symbol: 'x', line: { width: 2 } },
                 text: losses.map(p => 'Seq ' + p.seq + ' LOSS  ' + p.src + '→' + p.dst),
+                customdata: lossCustomdata,
                 hovertemplate: '%{text}<extra></extra>',
             }], {
                 ...DARK,
@@ -1001,6 +1014,7 @@
                     name: 'LOSS (미응답)',
                     marker: { color: '#ef4444', size: 10, symbol: 'x', line: { width: 2 } },
                     text: losses.map(p => 'Seq ' + p.seq + (p.status === 'loss_gap' ? ' LOSS (seq gap)  ' : ' LOSS  ' + (p.req_num != null ? '#' + p.req_num + '  ' : '')) + p.src + '\u2192' + p.dst),
+                    customdata: lossCustomdata,
                     hovertemplate: '%{text}<extra></extra>',
                 });
             }
@@ -1159,7 +1173,9 @@
 
     function renderPingRttWired() {
         const ok = gtExchanges.filter(e => e.rtt_ms != null);
-        const loss = gtExchanges.filter(e => e.rtt_ms == null);
+        // 클릭 시 전체 목록 행(data-ex-idx) 점프를 위해 gtExchanges 인덱스를
+        // 병행 보존 — indexOf 재탐색(O(n²))을 피한다.
+        const loss = gtExchanges.map((e, i) => ({ e, i })).filter(x => x.e.rtt_ms == null);
         // 유선 exchanges는 1만+ 건이 일상 규모 — 스프레드 대신 reduce (PR #25 리뷰).
         const maxRtt = ok.length ? ok.reduce((m, e) => Math.max(m, e.rtt_ms), 0) : 1;
         const traces = [];
@@ -1171,10 +1187,11 @@
             hovertemplate: '%{text}<br>RTT: %{y:.2f}ms<br>%{x}<extra></extra>',
         });
         if (loss.length) traces.push({
-            x: loss.map(e => new Date(e.epoch * 1000)), y: loss.map(() => maxRtt * 1.1),
+            x: loss.map(x => new Date(x.e.epoch * 1000)), y: loss.map(() => maxRtt * 1.1),
             type: 'scattergl', mode: 'markers', name: 'Loss (유선 확정)',
             marker: { color: '#ef4444', size: 10, symbol: 'x', line: { width: 2 } },
-            text: loss.map(e => escapeHtml(e.target) + ' LOSS'),
+            text: loss.map(x => escapeHtml(x.e.target) + ' LOSS'),
+            customdata: loss.map(x => x.i),
             hovertemplate: '%{text}<br>%{x}<extra></extra>',
         });
         // 옵션은 무선 RTT 시계열과 미러링 — 유선이 기본 뷰이고 1만+ 포인트로
@@ -1243,14 +1260,41 @@
 
     let currentPingSource = null;
 
+    // RTT 손실 X 마커 클릭 → 전체 목록의 해당 행으로 점프 (스펙 §2).
+    function jumpToPingRow(attrName, idx) {
+        const sel = document.getElementById('ping-filter-status');
+        if (sel && sel.value !== 'loss') {
+            sel.value = 'loss';
+            if (currentPingSource === 'wired') renderPingFullTableWired(); else renderPingFullTable();
+        }
+        const row = document.querySelector(`#ping-full-table tbody tr[${attrName}="${idx}"]`);
+        if (!row) return;   // 탐색 실패 시 무동작 (throw 금지)
+        row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        row.classList.add('outline', 'outline-2', 'outline-yellow-400');
+        setTimeout(() => row.classList.remove('outline', 'outline-2', 'outline-yellow-400'), 2500);
+    }
+
+    // newPlot이 노드를 재사용하므로 뷰 전환마다 재바인딩 필요 — 중복 리스너
+    // 방지를 위해 바인딩 전 기존 리스너를 제거한다.
+    function bindPingRttClick() {
+        const el = document.getElementById('chart-ping-rtt');
+        if (!el || !el.on) return;   // Plotly 미렌더(빈 상태 innerHTML 교체) 시 무동작
+        if (el.removeAllListeners) el.removeAllListeners('plotly_click');
+        el.on('plotly_click', ev => {
+            const pt = ev.points && ev.points[0];
+            if (!pt || pt.customdata == null) return;   // 손실 trace만 customdata 보유(응답 포인트는 무동작)
+            jumpToPingRow(currentPingSource === 'wired' ? 'data-ex-idx' : 'data-fl-idx', pt.customdata);
+        });
+    }
+
     function renderPingSource(src) {
         currentPingSource = src;
         const legend = document.getElementById('ping-rtt-legend');
         if (src === 'wired' && gtExchanges) {
-            renderPingKpiWired(); renderPingRttWired(); renderPingHistWired(); renderPingStatsWired();
+            renderPingKpiWired(); renderPingRttWired(); bindPingRttClick(); renderPingHistWired(); renderPingStatsWired();
             if (legend) legend.textContent = '(초록=응답, 빨강X=손실 — 유선 확정)';
         } else {
-            renderPingKpiWireless(); renderPingRttWireless(); renderPingHistWireless(); renderPingStatsWireless();
+            renderPingKpiWireless(); renderPingRttWireless(); bindPingRttClick(); renderPingHistWireless(); renderPingStatsWireless();
             if (legend) legend.textContent = '(초록=정상, 노랑=Retry, 빨강X=Loss)';
         }
         document.querySelectorAll('#ping-source-toggle button').forEach(b => {
@@ -1261,15 +1305,18 @@
         const flowWrap = document.getElementById('ping-filter-flow-wrap');
         const retryWrap = document.getElementById('ping-filter-retry-wrap');
         const obsDetailsEl = document.getElementById('ping-observations-details');
+        const streakSrcLabel = document.getElementById('ping-streak-src-label');
         if (src === 'wired' && gtExchanges) {
             renderPingStreaksWired();
             renderPingFullTableWired();
+            if (streakSrcLabel) streakSrcLabel.textContent = ' (유선 확정)';
             if (flowWrap) flowWrap.classList.add('hidden');
             if (retryWrap) retryWrap.classList.add('hidden');
             if (obsDetailsEl) obsDetailsEl.classList.add('hidden');
         } else {
             renderPingStreaksWireless();
             renderPingFullTable();
+            if (streakSrcLabel) streakSrcLabel.textContent = '';
             if (flowWrap) flowWrap.classList.remove('hidden');
             if (retryWrap) retryWrap.classList.remove('hidden');
             if (obsDetailsEl) obsDetailsEl.classList.remove('hidden');
