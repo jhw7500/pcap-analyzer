@@ -56,3 +56,16 @@ def test_device_bucket_stats_survive_invalid_and_huge_epochs():
     huge = [make_frame(number=1, epoch=0.0), make_frame(number=2, epoch=100_000_000.0)]
     entry2 = _device_entry_stats(huge, lambda f: True, "aa:bb", "STA")
     assert entry2["per_bucket"] == []  # range 팽창 차단 — 버킷 생략
+
+
+def test_retry_peak_scan_skips_invalid_epochs():
+    """retry peak zoom-in 경로도 finite_frames를 재사용한다 — 원본 재스캔 시
+    None epoch 비교 TypeError로 분석이 죽는다 (PR #27 Codex 3R)."""
+    from analyzer.web.structured import _device_entry_stats
+    # 한 버킷(1000~1009)에 60프레임 · retry 20(33%) → total>50, retry_pct>=10 충족.
+    ok = [make_frame(number=i, epoch=1000.0 + (i % 10) * 0.5, retry=(i < 20))
+          for i in range(60)]
+    bad = [make_frame(number=999, epoch=None)]
+    entry = _device_entry_stats(ok + bad, lambda f: True, "aa:bb", "STA")
+    assert entry["retry_peaks"], "peak 경로가 발동해야 회귀를 검증한다"
+    assert entry["per_bucket"][0]["total"] == 60

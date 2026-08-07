@@ -8,6 +8,7 @@ typora 등)로 PDF/HTML로 추가 변환 가능하도록 표준 GFM 사양 준�
 report.pdf도 같은 텍스트 기반 리포트를 공유한다. 차트가 필요하면 분석
 페이지를 브라우저에서 직접 인쇄. SVG/PNG inline은 후속 PR 후보로 남긴다.
 """
+import math
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List
@@ -109,7 +110,11 @@ def _throughput_stats(per_second: Any) -> Dict[str, Any]:
     # entry 수로 나누면 평균이 부풀려진다(PR #27 Codex P2). epoch이 없는
     # 구버전 entry가 섞이면 기존 방식(len)으로 폴백.
     epochs = [e.get("epoch") for e in entries]
-    if all(isinstance(x, (int, float)) for x in epochs):
+    # isinstance만으로는 NaN/Inf가 통과해 int()에서 죽는다 — isfinite까지 요구
+    # (PR #27 리뷰 3R; 직렬화된 외부 데이터 직접 호출 경로 방어).
+    if epochs and all(
+        isinstance(x, (int, float)) and math.isfinite(x) for x in epochs
+    ):
         duration = int(max(epochs) - min(epochs)) + 1
     else:
         duration = len(entries)

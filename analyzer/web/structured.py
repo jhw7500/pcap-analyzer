@@ -753,8 +753,10 @@ def _device_entry_stats(dev_frames, is_tx, mac: str, role: str) -> Dict[str, Any
                 break
             pk_start = pk["epoch"]
             pk_end = pk_start + bucket_size
+            # finite_frames 재사용 — 원본 dev_frames를 다시 스캔하면 손상
+            # epoch(None 비교 TypeError)이 peak 경로에서 되살아난다 (PR #27 Codex).
             pk_frames = [
-                f for f in dev_frames if pk_start <= f.epoch < pk_end
+                f for f in finite_frames if pk_start <= f.epoch < pk_end
             ]
             sub_buckets = []
             for sub_start in range(pk_start, pk_end):

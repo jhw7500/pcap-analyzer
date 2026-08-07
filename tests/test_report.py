@@ -814,3 +814,15 @@ def test_throughput_stats_sparse_timeline_uses_epoch_span():
     # 총 2MB × 8 / 1e6 / 10초(span 0~9) = 1.6 Mbps (entry 수 2로 나누면 8.0)
     assert tp["avg_mbps"] == 1.6
     assert tp["peak_mbps"] == 8.0
+
+
+def test_throughput_stats_nonfinite_epoch_falls_back():
+    """epoch에 NaN이 섞이면 span 계산 대신 entry 수 폴백 — int(nan) 크래시 방지
+    (PR #27 리뷰 3R)."""
+    from analyzer.web.report import _throughput_stats
+    per_second = {"timeline": [
+        {"epoch": float("nan"), "bytes": 1_000_000},
+        {"epoch": 5, "bytes": 1_000_000},
+    ]}
+    tp = _throughput_stats(per_second)
+    assert tp["avg_mbps"] == 8.0  # 분모 = entry 수 2 (폴백)
