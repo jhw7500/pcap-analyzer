@@ -76,7 +76,7 @@ def _structured_merge(mr: MergeResult) -> Dict[str, Any]:
 #: (PR #24 Gemini 리뷰 HIGH), 이보다 긴 구간은 관측된 초만 담는 희소
 #: 시계열로 폴백해 출력 크기를 프레임 수에 비례시킨다. 정상 스니퍼 배치
 #: 테스트(분~시간 단위)는 전부 zero-fill 경로를 탄다.
-_SNIFFER_FILL_MAX_SPAN_SEC = 6 * 3600
+_SNIFFER_FILL_MAX_SPAN_SEC = 6 * 3600  #: (_structured_per_second도 같은 상한을 공유한다 — 백로그 ③)
 
 
 def _structured_sniffer_compare(
@@ -556,34 +556,43 @@ def _structured_roaming(
 
 
 def _structured_per_second(frames: List[Frame]) -> Dict[str, Any]:
-    """초당 프레임 수 시계열."""
-    if not frames:
-        return {"timeline": []}
+    """초당 프레임 수 시계열.
 
-    sec_counts = Counter(int(f.epoch) for f in frames)
-    retry_counts = Counter(int(f.epoch) for f in frames if f.retry)
-    # throughput용 바이트 집계 — bytes는 전체(frame.len 합), data_bytes는 Data
-    # 타입 프레임만. Mbps 환산은 소비자(프론트/리포트)가 ×8/1e6으로 수행.
+    손상 epoch(None/NaN/Inf) 프레임은 집계에서 제외하고, zero-fill 구간이
+    _SNIFFER_FILL_MAX_SPAN_SEC를 넘으면 관측된 초만 담는 희소 timeline로
+    폴백한다 — _structured_sniffer_compare와 동일 방어(PR #24 리뷰에서
+    공통 이슈로 기록된 형제 함수 미러링, 백로그 ③).
+    """
+    sec_counts: "Counter[int]" = Counter()
+    retry_counts: "Counter[int]" = Counter()
     byte_counts: "Counter[int]" = Counter()
     data_byte_counts: "Counter[int]" = Counter()
     for f in frames:
+        if f.epoch is None or not math.isfinite(f.epoch):
+            continue
         sec = int(f.epoch)
+        sec_counts[sec] += 1
+        if f.retry:
+            retry_counts[sec] += 1
+        # throughput용 바이트 집계 — bytes는 전체(frame.len 합), data_bytes는
+        # Data 타입만. Mbps 환산은 소비자(프론트/리포트)가 ×8/1e6으로 수행.
         byte_counts[sec] += f.length
         if f.is_data:
             data_byte_counts[sec] += f.length
-    start = min(sec_counts)
-    end = max(sec_counts)
-    timeline = []
-    for sec in range(start, end + 1):
-        timeline.append(
-            {
-                "epoch": sec,
-                "total": sec_counts.get(sec, 0),
-                "retry": retry_counts.get(sec, 0),
-                "bytes": byte_counts.get(sec, 0),
-                "data_bytes": data_byte_counts.get(sec, 0),
-            }
-        )
+    if not sec_counts:
+        return {"timeline": []}
+    lo, hi = min(sec_counts), max(sec_counts)
+    secs = range(lo, hi + 1) if hi - lo <= _SNIFFER_FILL_MAX_SPAN_SEC else sorted(sec_counts)
+    timeline = [
+        {
+            "epoch": sec,
+            "total": sec_counts.get(sec, 0),
+            "retry": retry_counts.get(sec, 0),
+            "bytes": byte_counts.get(sec, 0),
+            "data_bytes": data_byte_counts.get(sec, 0),
+        }
+        for sec in secs
+    ]
     return {"timeline": timeline}
 
 
