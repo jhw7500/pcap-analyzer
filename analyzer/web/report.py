@@ -635,7 +635,9 @@ def _multi_wireless_section(structured: Dict[str, Any]) -> List[str]:
                          else f"오프셋 {off:+,.3f}ms ({_clean_inline(str(method))})")
         tag = s.get("tag")
         prefix = f"{_clean_inline(str(tag))} " if tag else ""
-        lines.append(f"- {prefix}`{_clean_inline(str(s.get('name', '?')))}` — {' · '.join(parts)}")
+        # 파일명은 backtick code span 내부라 _clean_code_span — _meta_section의
+        # pcap_name과 동일 관례 (백틱 포함 외부 입력이 span을 깨는 것 방지).
+        lines.append(f"- {prefix}`{_clean_code_span(s.get('name', '?'))}` — {' · '.join(parts)}")
     kept = merge.get("kept") or 0
     cov = merge.get("coverage") or {}
 
