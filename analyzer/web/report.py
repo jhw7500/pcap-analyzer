@@ -665,6 +665,8 @@ def _multi_wireless_section(structured: Dict[str, Any]) -> List[str]:
 
     cov_parts = [f"2개 이상 포착 {cov.get('both', 0):,}건({_pct(cov.get('both', 0))})"]
     for t, n in (cov.get("only") or {}).items():
+        if not isinstance(n, (int, float)):
+            continue  # 직렬화 외부 데이터 방어 — None 등이면 항목 생략 (PR #27 5R)
         cov_parts.append(f"{_clean_inline(str(t))} 단독 {n:,}건({_pct(n)})")
     lines.append(f"- 병합: 중복 제거 {merge.get('duplicates') or 0:,}건 · "
                  f"통합 {kept:,}건 — {' · '.join(cov_parts)}")

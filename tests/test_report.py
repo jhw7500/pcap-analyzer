@@ -856,3 +856,16 @@ def test_throughput_stats_trailing_nan_falls_back():
         {"epoch": float("nan"), "bytes": 1_000_000},
     ]}
     assert _throughput_stats(per_second)["avg_mbps"] == 8.0  # 분모 2 폴백
+
+
+def test_multi_wireless_section_skips_non_numeric_only_counts():
+    """only 커버리지의 비수치 값(None 등 직렬화 외부 데이터)은 항목 생략 —
+    format/_pct 크래시 방지 (PR #27 리뷰 5R)."""
+    structured = {
+        "merge": {"duplicates": 1, "kept": 10,
+                  "coverage": {"both": 5, "only": {"w1": None, "w2": 5}}},
+        "sources": [],
+    }
+    text = "\n".join(_multi_wireless_section(structured))
+    assert "w2 단독 5건" in text
+    assert "w1" not in text
