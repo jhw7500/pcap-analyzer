@@ -961,10 +961,15 @@
     function renderPingRttWireless() {
         const pingRttEl = document.getElementById('chart-ping-rtt');
         if (pingRttEl && pairs.length === 0 && losses.length === 0) {
+            // 이전 소스의 Plotly 인스턴스·expando(.on 등) 명시 해제 — 토글 왕복 리소스/stale 가드 정리 (백로그 ①)
+            Plotly.purge('chart-ping-rtt');
             pingRttEl.style.height = 'auto';
             pingRttEl.innerHTML = '<div class="text-center text-gray-500 text-sm py-12">매칭된 RTT 페어가 없습니다.<br><span class="text-xs text-gray-600">단방향 캡처(STA 다운링크만 보임)이거나 ICMP 트래픽이 없는 캡처</span></div>';
         } else if (pingRttEl && pairs.length === 0 && losses.length > 0) {
             // 단방향 캡처에서 seq gap loss만 있는 경우 — 마커만 표시
+            // 이전 소스의 Plotly 인스턴스·expando(.on 등) 명시 해제 — 토글 왕복 리소스/stale 가드 정리 (백로그 ①)
+            Plotly.purge('chart-ping-rtt');
+            pingRttEl.style.height = '400px';
             Plotly.newPlot('chart-ping-rtt', [{
                 x: losses.map(p => new Date(p.epoch * 1000)),
                 y: losses.map(() => 1),
@@ -1029,6 +1034,10 @@
                     hovertemplate: '%{text}<extra></extra>',
                 });
             }
+            // 빈 상태에서 복귀 시 높이 복원 (백로그 ①)
+            if (document.getElementById('chart-ping-rtt')) {
+                document.getElementById('chart-ping-rtt').style.height = '400px';
+            }
             Plotly.newPlot('chart-ping-rtt', traces_ping, {
                 ...DARK,
                 xaxis: { title: { text: '시간', font: { size: 12 } }, gridcolor: '#374151' },
@@ -1048,6 +1057,8 @@
     function renderPingHistWireless() {
         const pingHistEl = document.getElementById('chart-ping-hist');
         if (pingHistEl && pairs.length === 0) {
+            // 이전 소스의 Plotly 인스턴스·expando(.on 등) 명시 해제 — 토글 왕복 리소스/stale 가드 정리 (백로그 ①)
+            Plotly.purge('chart-ping-hist');
             pingHistEl.style.height = 'auto';
             pingHistEl.innerHTML = '<div class="text-center text-gray-500 text-sm py-12">RTT 데이터 없음</div>';
         }
@@ -1069,6 +1080,10 @@
                 text: `+${outliers.toLocaleString()}건 > ${hi.toFixed(1)}ms (최대 ${maxRtt.toFixed(1)}ms)`,
                 showarrow: false, font: { size: 10, color: '#9ca3af' },
             }] : [];
+            // 빈 상태에서 복귀 시 높이 복원 (백로그 ①)
+            if (document.getElementById('chart-ping-hist')) {
+                document.getElementById('chart-ping-hist').style.height = '300px';
+            }
             Plotly.newPlot('chart-ping-hist', [{
                 x: rtts, type: 'histogram',
                 xbins: { start: 0, end: hi, size: (hi / 40) || 0.1 },
@@ -1207,6 +1222,9 @@
         });
         // 옵션은 무선 RTT 시계열과 미러링 — 유선이 기본 뷰이고 1만+ 포인트로
         // 밀집하므로 zoom/pan이 오히려 더 필요하다 (PR #25 리뷰 2라운드).
+        // 빈 상태에서 복귀 시 높이 복원 (백로그 ①)
+        const el = document.getElementById('chart-ping-rtt');
+        if (el) el.style.height = '400px';
         Plotly.newPlot('chart-ping-rtt', traces, {
             ...DARK,
             xaxis: { title: { text: '시간', font: { size: 12 } }, gridcolor: '#374151' },
@@ -1240,6 +1258,8 @@
             text: `+${outliers.toLocaleString()}건 > ${hi.toFixed(1)}ms (최대 ${maxRtt.toFixed(1)}ms)`,
             showarrow: false, font: { size: 10, color: '#9ca3af' },
         }] : [];
+        // 빈 상태에서 복귀 시 높이 복원 (백로그 ①)
+        histEl.style.height = '300px';
         Plotly.newPlot('chart-ping-hist', [{
             x: rtts, type: 'histogram',
             xbins: { start: 0, end: hi, size: (hi / 40) || 0.1 },
