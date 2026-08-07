@@ -1,0 +1,21 @@
+# pcap-analyzer systemd user 서비스 유닛.
+# 등록:   systemctl --user enable --now /home/jhw/ai/opencode/projects/pcap-analyzer/pcap-analyzer.service
+# 해제:   systemctl --user disable --now pcap-analyzer
+# 수정 후: systemctl --user daemon-reload && systemctl --user restart pcap-analyzer
+# 부팅 자동시작(로그인 불필요): loginctl enable-linger <user>  (이 호스트는 설정 완료)
+[Unit]
+Description=pcap-analyzer WLAN 분석 대시보드 (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/jhw/ai/opencode/projects/pcap-analyzer
+ExecStart=/usr/bin/python3 /home/jhw/ai/opencode/projects/pcap-analyzer/app.py
+Environment=PCAP_DEV_RELOAD=false
+Environment=PCAP_HOST=0.0.0.0
+Environment=PCAP_PORT=8000
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

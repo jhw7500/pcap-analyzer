@@ -144,6 +144,17 @@ bash scripts/build-release.sh
 
 `dist/`에 OS별 압축 파일이 생성됨. 사용자용 설치 가이드는 `scripts/release-templates/INSTALL.md`(release 압축 안에서는 `docs/INSTALL.md`), 개발자용 빌드 옵션은 `docs/RELEASE.md` 참조.
 
+### 상시 서비스 등록 (Linux, systemd user 서비스)
+
+저장소 루트의 `pcap-analyzer.service`를 사용한다 — **파일 안의 절대 경로 2곳(`WorkingDirectory`, `ExecStart`)을 설치 경로에 맞게 수정한 뒤** 등록:
+
+```bash
+systemctl --user enable --now /절대/경로/pcap-analyzer.service   # 심볼릭 링크 등록 + 시작
+loginctl enable-linger $USER                                     # 부팅 자동시작 (로그인 불필요)
+```
+
+관리: `systemctl --user {status|restart} pcap-analyzer`, 로그: `journalctl --user -u pcap-analyzer -f`. 유닛 수정 후에는 `systemctl --user daemon-reload && systemctl --user restart pcap-analyzer`.
+
 ## 개발 모드 (LAN 원격 접속 테스트)
 
 호스트(Linux dev box)에서 코드 수정 + Windows PC 브라우저로 원격 접속 테스트하는 워크플로우는 `docs/DEV.md` 참조.
