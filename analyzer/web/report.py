@@ -644,7 +644,7 @@ def _multi_wireless_section(structured: Dict[str, Any]) -> List[str]:
     def _pct(n: int) -> str:
         return f"{100 * n / kept:.1f}%" if kept else "0%"
 
-    cov_parts = [f"양쪽 포착 {cov.get('both', 0):,}건({_pct(cov.get('both', 0))})"]
+    cov_parts = [f"2개 이상 포착 {cov.get('both', 0):,}건({_pct(cov.get('both', 0))})"]
     for t, n in (cov.get("only") or {}).items():
         cov_parts.append(f"{_clean_inline(str(t))} 단독 {n:,}건({_pct(n)})")
     lines.append(f"- 병합: 중복 제거 {merge.get('duplicates') or 0:,}건 · "

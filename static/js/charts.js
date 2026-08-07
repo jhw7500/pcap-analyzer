@@ -86,7 +86,7 @@
         kpiContainer.insertAdjacentHTML('afterend',
             `<div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-6">
                 <h3 class="text-sm font-semibold text-gray-400 mb-1">무선 병합</h3>
-                <p class="text-sm text-gray-300">중복 제거 <span class="font-semibold text-white">${mergeInfo.duplicates.toLocaleString()}</span>건 · 양쪽 포착 <span class="font-semibold text-white">${both.toLocaleString()}</span>건</p>
+                <p class="text-sm text-gray-300">중복 제거 <span class="font-semibold text-white">${mergeInfo.duplicates.toLocaleString()}</span>건 · 2개 이상 포착 <span class="font-semibold text-white">${both.toLocaleString()}</span>건</p>
                 ${onlyLine}
             </div>`
         );
@@ -106,7 +106,7 @@
         const totalGroups = cov.groups_total || 0;
         const pct = n => totalGroups ? (100 * n / totalGroups).toFixed(1) : '0.0';
         const only = cov.only || {};
-        const parts = [`양쪽 포착 <span class="font-semibold text-white">${(cov.both || 0).toLocaleString()}</span>건 (${pct(cov.both || 0)}%)`]
+        const parts = [`2개 이상 포착 <span class="font-semibold text-white">${(cov.both || 0).toLocaleString()}</span>건 (${pct(cov.both || 0)}%)`]
             .concat(sniffer.tags.filter(t => only[t]).map(t =>
                 `${escapeHtml(label(t))} 단독 <span class="font-semibold text-white">${only[t].toLocaleString()}</span>건 (${pct(only[t])}%)`));
         document.getElementById('sniffer-coverage-line').innerHTML = parts.join(' · ');

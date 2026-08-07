@@ -791,7 +791,7 @@ def test_multi_wireless_section_with_merge():
     assert "w1" in text and "a.pcapng" in text and "기준 시계" in text
     assert "w2" in text and "-183,510.362ms" in text and "(tsf)" in text
     assert "중복 제거 100건" in text and "통합 400건" in text
-    assert "양쪽 포착 100건(25.0%)" in text
+    assert "2개 이상 포착 100건(25.0%)" in text
     assert "w2 단독 180건(45.0%)" in text
     # wired 소스는 무선 목록에 나오지 않는다
     assert "wired.pcapng" not in text
