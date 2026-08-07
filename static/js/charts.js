@@ -1263,8 +1263,16 @@
     // RTT 손실 X 마커 클릭 → 전체 목록의 해당 행으로 점프 (스펙 §2).
     function jumpToPingRow(attrName, idx) {
         const sel = document.getElementById('ping-filter-status');
-        if (sel && sel.value !== 'loss') {
-            sel.value = 'loss';
+        let needRender = false;
+        if (sel && sel.value !== 'loss') { sel.value = 'loss'; needRender = true; }
+        // 무선 뷰의 flow/Retry 필터가 켜져 있으면 상태만 'loss'로 바꿔도 클릭한
+        // 손실 행이 계속 걸러져 점프가 조용히 무동작이 된다 — 클릭 내비는 항상
+        // 행을 보여줘야 하므로 함께 초기화한다 (PR #26 Codex P2 = 최종 리뷰 Minor 1).
+        if (currentPingSource !== 'wired') {
+            if (pingFlowSel && pingFlowSel.value !== '') { pingFlowSel.value = ''; needRender = true; }
+            if (pingRetryChk && pingRetryChk.checked) { pingRetryChk.checked = false; needRender = true; }
+        }
+        if (needRender) {
             if (currentPingSource === 'wired') renderPingFullTableWired(); else renderPingFullTable();
         }
         const row = document.querySelector(`#ping-full-table tbody tr[${attrName}="${idx}"]`);
