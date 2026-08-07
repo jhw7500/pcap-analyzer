@@ -1416,7 +1416,10 @@
     let wirelessFullTheadHtml = null;   // 최초 유선 전환 시 원본 백업
 
     function renderPingFullTableWired() {
-        if (!pingFullTable) return;
+        // gtExchanges 가드: 필터 change 리스너가 currentPingSource만 보고 이
+        // 함수를 부를 수 있어, 외부에서 'wired'가 잘못 활성화된 잠재 경로까지
+        // 소비자 측에서 봉인한다 (PR #26 리뷰 = 최종 리뷰 Minor 수렴).
+        if (!pingFullTable || !gtExchanges) return;
         const thead = document.getElementById('ping-full-thead');
         if (thead) {
             if (wirelessFullTheadHtml === null) wirelessFullTheadHtml = thead.innerHTML;
@@ -1442,7 +1445,7 @@
                 : '<span class="bg-green-900 text-green-300 px-1.5 py-0.5 rounded text-xs">OK</span>';
             return `<tr data-ex-idx="${idx}" class="border-b border-gray-700/30 ${isLoss ? 'text-red-400 bg-red-900/20' : ''} hover:bg-gray-700/30">
                 <td class="py-1 px-1">${i + 1}</td>
-                <td class="py-1 px-1">${new Date(e.epoch * 1000).toLocaleTimeString('en-GB')}.${String(Math.floor((e.epoch % 1) * 1000)).padStart(3, '0')}</td>
+                <td class="py-1 px-1">${escapeHtml(new Date(e.epoch * 1000).toLocaleTimeString('en-GB') + '.' + String(Math.floor((e.epoch % 1) * 1000)).padStart(3, '0'))}</td>
                 <td class="py-1 px-1 font-mono">${escapeHtml(String(e.target ?? '?'))}</td>
                 <td class="py-1 px-1 text-right font-mono">${isLoss ? '-' : e.rtt_ms.toFixed(2)}</td>
                 <td class="py-1 px-1">${badge}</td>
@@ -1563,7 +1566,7 @@
         const fmtE = e => (typeof e === 'number') ? new Date(e * 1000).toLocaleTimeString('en-GB') : '-';
         streakTbody.innerHTML = streaks.map(s => `<tr class="border-b border-gray-700/30 text-red-400 bg-red-900/10 hover:bg-gray-700/30">
             <td class="py-1 px-1 text-gray-200">${escapeHtml(String(s.target ?? '?'))}</td>
-            <td class="py-1 px-1">${fmtE(s.start_epoch)} ~ ${fmtE(s.end_epoch)}</td>
+            <td class="py-1 px-1">${escapeHtml(fmtE(s.start_epoch))} ~ ${escapeHtml(fmtE(s.end_epoch))}</td>
             <td class="py-1 px-1 text-right font-bold">${s.count ?? 0}건</td>
             <td class="py-1 px-1 text-right">${Number(s.duration_sec || 0).toFixed(1)}초</td>
             <td class="py-1 px-1 text-gray-600">—</td>
