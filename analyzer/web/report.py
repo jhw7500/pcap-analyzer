@@ -110,13 +110,14 @@ def _throughput_stats(per_second: Any) -> Dict[str, Any]:
     # entry 수로 나누면 평균이 부풀려진다(PR #27 Codex P2). epoch이 없는
     # 구버전 entry가 섞이면 기존 방식(len)으로 폴백.
     epochs = [e.get("epoch") for e in entries]
-    # isinstance만으로는 NaN/Inf가 통과해 int()에서 죽는다 — isfinite까지 요구
-    # (PR #27 리뷰 3R; 직렬화된 외부 데이터 직접 호출 경로 방어).
-    if epochs and all(
-        isinstance(x, (int, float)) and math.isfinite(x) for x in epochs
-    ):
-        duration = int(max(epochs) - min(epochs)) + 1
-    else:
+    # span 산술 전체를 try로 감싼다 — 개별 값 검증(isinstance/isfinite)으로는
+    # 이형 입력을 다 못 막는다: None 비교 TypeError, NaN 전파, ±1e308 차→inf,
+    # 초대형 int는 math.isfinite 자체가 OverflowError (PR #27 리뷰 3R·4R).
+    # 어떤 실패든 entry 수 폴백(zero-fill 가정) — 크래시 대신 보수적 값.
+    try:
+        span = max(epochs) - min(epochs)
+        duration = int(span) + 1 if math.isfinite(float(span)) else len(entries)
+    except (TypeError, ValueError, OverflowError):
         duration = len(entries)
     return {
         "avg_mbps": round(total * 8 / 1e6 / duration, 2) if duration else 0.0,

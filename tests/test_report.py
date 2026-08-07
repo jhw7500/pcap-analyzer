@@ -826,3 +826,22 @@ def test_throughput_stats_nonfinite_epoch_falls_back():
     ]}
     tp = _throughput_stats(per_second)
     assert tp["avg_mbps"] == 8.0  # 분모 = entry 수 2 (폴백)
+
+
+def test_throughput_stats_extreme_epochs_fall_back():
+    """유한하지만 극단적인 epoch(±1e308 차→inf, 초대형 int→isfinite OverflowError)도
+    entry 수 폴백 — span 산술 전체 try 방어 (PR #27 Codex 4R)."""
+    from analyzer.web.report import _throughput_stats
+    inf_span = {"timeline": [
+        {"epoch": -1e308, "bytes": 1_000_000},
+        {"epoch": 1e308, "bytes": 1_000_000},
+    ]}
+    assert _throughput_stats(inf_span)["avg_mbps"] == 8.0  # 분모 2 폴백
+
+    # 초대형 int는 파이썬 임의정밀도 차가 정확(5) — per-value isfinite를 안 쓰는
+    # 새 구조에서는 폴백이 아니라 올바른 span(6초)으로 정상 계산된다.
+    huge_int = {"timeline": [
+        {"epoch": 10**400, "bytes": 1_000_000},
+        {"epoch": 10**400 + 5, "bytes": 1_000_000},
+    ]}
+    assert _throughput_stats(huge_int)["avg_mbps"] == 2.67
