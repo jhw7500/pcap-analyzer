@@ -687,12 +687,13 @@ def _device_entry_stats(dev_frames, is_tx, mac: str, role: str) -> Dict[str, Any
     finite_frames = [
         f for f in dev_frames if f.epoch is not None and math.isfinite(f.epoch)
     ]
-    if finite_frames and (
-        int(finite_frames[-1].epoch) - int(finite_frames[0].epoch)
-        <= _SNIFFER_FILL_MAX_SPAN_SEC
-    ):
-        start_epoch = int(finite_frames[0].epoch)
-        end_epoch = int(finite_frames[-1].epoch)
+    # 경계는 위치([0]/[-1])가 아니라 min/max — dev_frames의 epoch 정렬 가정에
+    # 기대지 않는다 (PR #27 리뷰 4R; 정렬 입력에선 동일값이라 동작 불변).
+    _lo = min((f.epoch for f in finite_frames), default=None)
+    _hi = max((f.epoch for f in finite_frames), default=None)
+    if finite_frames and int(_hi) - int(_lo) <= _SNIFFER_FILL_MAX_SPAN_SEC:
+        start_epoch = int(_lo)
+        end_epoch = int(_hi)
         bucket_size = 10  # 10초 구간
         for bucket_start in range(start_epoch, end_epoch + 1, bucket_size):
             bucket_end = bucket_start + bucket_size

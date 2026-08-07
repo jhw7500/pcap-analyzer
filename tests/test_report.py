@@ -845,3 +845,14 @@ def test_throughput_stats_extreme_epochs_fall_back():
         {"epoch": 10**400 + 5, "bytes": 1_000_000},
     ]}
     assert _throughput_stats(huge_int)["avg_mbps"] == 2.67
+
+
+def test_throughput_stats_trailing_nan_falls_back():
+    """NaN이 리스트 꼬리에 있으면 max/min이 조용히 유효값을 남겨 span 0으로
+    과대계상되던 경로 — 사전 차단으로 entry 수 폴백 (PR #27 리뷰 4R)."""
+    from analyzer.web.report import _throughput_stats
+    per_second = {"timeline": [
+        {"epoch": 5, "bytes": 1_000_000},
+        {"epoch": float("nan"), "bytes": 1_000_000},
+    ]}
+    assert _throughput_stats(per_second)["avg_mbps"] == 8.0  # 분모 2 폴백

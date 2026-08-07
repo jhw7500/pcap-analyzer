@@ -115,6 +115,11 @@ def _throughput_stats(per_second: Any) -> Dict[str, Any]:
     # 초대형 int는 math.isfinite 자체가 OverflowError (PR #27 리뷰 3R·4R).
     # 어떤 실패든 entry 수 폴백(zero-fill 가정) — 크래시 대신 보수적 값.
     try:
+        # float NaN/Inf는 사전 차단 — max/min은 NaN 위치에 따라 조용히 잘못된
+        # 값을 남긴다(꼬리 NaN이면 span 0 → 과대계상, PR #27 리뷰 4R). int는
+        # 크기 무관 정확 산술이라 통과시킨다(초대형 int도 올바른 span — 4R 테스트).
+        if any(isinstance(x, float) and (x != x or math.isinf(x)) for x in epochs):
+            raise ValueError
         span = max(epochs) - min(epochs)
         duration = int(span) + 1 if math.isfinite(float(span)) else len(entries)
     except (TypeError, ValueError, OverflowError):
