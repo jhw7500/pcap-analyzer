@@ -7,6 +7,7 @@ from analyzer.web.report import (
     build_report_markdown,
     SIGNAL_TYPE_LABEL,
     _format_epoch,
+    _multi_wireless_section,
     _ping_section,
 )
 
@@ -771,3 +772,31 @@ def test_sta_diags_no_cliffs_when_structured_absent():
         ]},
     }))
     assert "신호 급락" not in md
+
+
+def test_multi_wireless_section_with_merge():
+    structured = {
+        "merge": {"window_ms": 50.0, "duplicates": 100, "kept": 400,
+                  "coverage": {"both": 100, "only": {"w1": 120, "w2": 180}}},
+        "sources": [
+            {"name": "a.pcapng", "role": "wireless", "frame_count": 220,
+             "tag": "w1", "applied_offset_ms": 0.0, "offset_method": "reference"},
+            {"name": "b.pcap", "role": "wireless", "frame_count": 280,
+             "tag": "w2", "applied_offset_ms": -183510.362, "offset_method": "tsf"},
+            {"name": "wired.pcapng", "role": "wired", "frame_count": None},
+        ],
+    }
+    text = "\n".join(_multi_wireless_section(structured))
+    assert "다중 무선 병합" in text
+    assert "w1" in text and "a.pcapng" in text and "기준 시계" in text
+    assert "w2" in text and "-183,510.362ms" in text and "(tsf)" in text
+    assert "중복 제거 100건" in text and "통합 400건" in text
+    assert "양쪽 포착 100건(25.0%)" in text
+    assert "w2 단독 180건(45.0%)" in text
+    # wired 소스는 무선 목록에 나오지 않는다
+    assert "wired.pcapng" not in text
+
+
+def test_multi_wireless_section_absent_without_merge():
+    assert _multi_wireless_section({}) == []
+    assert _multi_wireless_section({"sources": [{"role": "wireless", "name": "x"}]}) == []

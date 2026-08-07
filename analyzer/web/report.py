@@ -617,6 +617,40 @@ def _ping_section(structured: Dict[str, Any]) -> List[str]:
     return ["## Ping / RTT", "", f"- {' · '.join(parts)}", ""]
 
 
+def _multi_wireless_section(structured: Dict[str, Any]) -> List[str]:
+    """다중 무선 병합 요약 — structured["merge"]가 있을 때만 (단일 무선 report
+    출력 불변, 백로그 ④: Phase 2부터 report에 병합 맥락이 통째로 빠져 있었다)."""
+    merge = structured.get("merge")
+    if not isinstance(merge, dict) or not merge:
+        return []
+    lines = ["## 다중 무선 병합", ""]
+    for s in structured.get("sources") or []:
+        if not isinstance(s, dict) or s.get("role") != "wireless":
+            continue
+        parts = [f"{s.get('frame_count') or 0:,} 프레임"]
+        off = s.get("applied_offset_ms")
+        if isinstance(off, (int, float)):
+            method = s.get("offset_method") or ""
+            parts.append("기준 시계" if method == "reference"
+                         else f"오프셋 {off:+,.3f}ms ({_clean_inline(str(method))})")
+        tag = s.get("tag")
+        prefix = f"{_clean_inline(str(tag))} " if tag else ""
+        lines.append(f"- {prefix}`{_clean_inline(str(s.get('name', '?')))}` — {' · '.join(parts)}")
+    kept = merge.get("kept") or 0
+    cov = merge.get("coverage") or {}
+
+    def _pct(n: int) -> str:
+        return f"{100 * n / kept:.1f}%" if kept else "0%"
+
+    cov_parts = [f"양쪽 포착 {cov.get('both', 0):,}건({_pct(cov.get('both', 0))})"]
+    for t, n in (cov.get("only") or {}).items():
+        cov_parts.append(f"{_clean_inline(str(t))} 단독 {n:,}건({_pct(n)})")
+    lines.append(f"- 병합: 중복 제거 {merge.get('duplicates') or 0:,}건 · "
+                 f"통합 {kept:,}건 — {' · '.join(cov_parts)}")
+    lines.append("")
+    return lines
+
+
 def _device_phy_section(structured: Dict[str, Any]) -> List[str]:
     """네트워크 전체 PHY 분포 + PHY/MCS별 retry 핫스팟 표(표본>=30).
 
@@ -679,6 +713,7 @@ def build_report_markdown(result: Dict[str, Any]) -> str:
 
     out: List[str] = []
     out.extend(_meta_section(result))
+    out.extend(_multi_wireless_section(structured))
     # 두괄식 — 판정/최상위 문제를 제목 바로 아래에서 먼저 보여준다.
     out.extend(_summary_section(diagnosis))
     out.extend(_devices_section(structured))
