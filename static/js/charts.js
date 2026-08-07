@@ -1035,9 +1035,7 @@
                 });
             }
             // 빈 상태에서 복귀 시 높이 복원 (백로그 ①)
-            if (document.getElementById('chart-ping-rtt')) {
-                document.getElementById('chart-ping-rtt').style.height = '400px';
-            }
+            if (pingRttEl) pingRttEl.style.height = '400px';
             Plotly.newPlot('chart-ping-rtt', traces_ping, {
                 ...DARK,
                 xaxis: { title: { text: '시간', font: { size: 12 } }, gridcolor: '#374151' },
@@ -1081,9 +1079,7 @@
                 showarrow: false, font: { size: 10, color: '#9ca3af' },
             }] : [];
             // 빈 상태에서 복귀 시 높이 복원 (백로그 ①)
-            if (document.getElementById('chart-ping-hist')) {
-                document.getElementById('chart-ping-hist').style.height = '300px';
-            }
+            if (pingHistEl) pingHistEl.style.height = '300px';
             Plotly.newPlot('chart-ping-hist', [{
                 x: rtts, type: 'histogram',
                 xbins: { start: 0, end: hi, size: (hi / 40) || 0.1 },

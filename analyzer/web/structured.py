@@ -272,7 +272,9 @@ def _retry_per_sec(device_frames: List[Frame]) -> List[Dict[str, Any]]:
     """
     by_sec: Dict[int, Dict[str, int]] = defaultdict(lambda: {"retry": 0, "total": 0})
     for f in device_frames:
-        if f.epoch is None:  # epoch 없는 프레임이 build 전체를 깨지 않도록 방어.
+        # epoch 없는/비유한 프레임이 build 전체를 깨지 않도록 방어 —
+        # _structured_per_second와 동일 (int(nan)→ValueError, PR #27 리뷰).
+        if f.epoch is None or not math.isfinite(f.epoch):
             continue
         b = by_sec[int(f.epoch)]
         b["total"] += 1
@@ -677,14 +679,25 @@ def _device_entry_stats(dev_frames, is_tx, mac: str, role: str) -> Dict[str, Any
 
     per_bucket = []
     retry_peaks: list = []
-    if dev_frames:
-        start_epoch = int(dev_frames[0].epoch)
-        end_epoch = int(dev_frames[-1].epoch)
+    # 손상 epoch(None/NaN/Inf) 프레임은 버킷 계산에서 제외 — int() 예외와 비교
+    # TypeError 방어. span이 상한을 넘으면(먼 미래 epoch 등) 버킷 통계 자체를
+    # 생략한다(정직한 공백) — range(...,10) × 버킷별 전체 재스캔이 사실상 무한
+    # 루프가 되는 경로 차단 (_SNIFFER_FILL_MAX_SPAN_SEC 동일 원칙, PR #27 리뷰.
+    # O(span×frames) 구조 개선 자체는 백로그 ⑥에 남음).
+    finite_frames = [
+        f for f in dev_frames if f.epoch is not None and math.isfinite(f.epoch)
+    ]
+    if finite_frames and (
+        int(finite_frames[-1].epoch) - int(finite_frames[0].epoch)
+        <= _SNIFFER_FILL_MAX_SPAN_SEC
+    ):
+        start_epoch = int(finite_frames[0].epoch)
+        end_epoch = int(finite_frames[-1].epoch)
         bucket_size = 10  # 10초 구간
         for bucket_start in range(start_epoch, end_epoch + 1, bucket_size):
             bucket_end = bucket_start + bucket_size
             bucket_frames = [
-                f for f in dev_frames if bucket_start <= f.epoch < bucket_end
+                f for f in finite_frames if bucket_start <= f.epoch < bucket_end
             ]
             total = len(bucket_frames)
             retries = sum(1 for f in bucket_frames if f.retry)

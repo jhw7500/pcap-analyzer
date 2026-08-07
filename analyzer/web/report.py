@@ -96,15 +96,23 @@ def _throughput_stats(per_second: Any) -> Dict[str, Any]:
     timeline = per_second.get("timeline")
     if not isinstance(timeline, list) or not timeline:
         return {}
-    byte_vals = [
-        e.get("bytes")
-        for e in timeline
+    entries = [
+        e for e in timeline
         if isinstance(e, dict) and isinstance(e.get("bytes"), (int, float))
     ]
-    if not byte_vals:
+    if not entries:
         return {}
+    byte_vals = [e["bytes"] for e in entries]
     total = sum(byte_vals)
-    duration = len(byte_vals)  # timeline은 초당 1 entry (gap은 0으로 채워짐)
+    # duration은 epoch 경과 시간 기준 — zero-fill timeline에서는 len(entries)와
+    # 동일하지만(정상 캡처 출력 불변), 희소 폴백 timeline(6h+ span)에서는 관측
+    # entry 수로 나누면 평균이 부풀려진다(PR #27 Codex P2). epoch이 없는
+    # 구버전 entry가 섞이면 기존 방식(len)으로 폴백.
+    epochs = [e.get("epoch") for e in entries]
+    if all(isinstance(x, (int, float)) for x in epochs):
+        duration = int(max(epochs) - min(epochs)) + 1
+    else:
+        duration = len(entries)
     return {
         "avg_mbps": round(total * 8 / 1e6 / duration, 2) if duration else 0.0,
         "peak_mbps": round(max(byte_vals) * 8 / 1e6, 2),

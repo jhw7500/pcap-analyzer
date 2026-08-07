@@ -800,3 +800,17 @@ def test_multi_wireless_section_with_merge():
 def test_multi_wireless_section_absent_without_merge():
     assert _multi_wireless_section({}) == []
     assert _multi_wireless_section({"sources": [{"role": "wireless", "name": "x"}]}) == []
+
+
+def test_throughput_stats_sparse_timeline_uses_epoch_span():
+    """희소 timeline(6h+ 폴백)에서 평균 Mbps 분모는 entry 수가 아니라 epoch
+    경과 시간 — entry 수로 나누면 평균이 부풀려진다 (PR #27 Codex P2)."""
+    from analyzer.web.report import _throughput_stats
+    per_second = {"timeline": [
+        {"epoch": 0, "bytes": 1_000_000},
+        {"epoch": 9, "bytes": 1_000_000},
+    ]}
+    tp = _throughput_stats(per_second)
+    # 총 2MB × 8 / 1e6 / 10초(span 0~9) = 1.6 Mbps (entry 수 2로 나누면 8.0)
+    assert tp["avg_mbps"] == 1.6
+    assert tp["peak_mbps"] == 8.0
