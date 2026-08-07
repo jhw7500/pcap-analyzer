@@ -1241,7 +1241,10 @@
         <p class="text-xs text-gray-500 mt-2">판정은 유선 확정 기준. Retry·프레임 근거 해석은 무선 (관측) 뷰에서.</p>`;
     }
 
+    let currentPingSource = null;
+
     function renderPingSource(src) {
+        currentPingSource = src;
         const legend = document.getElementById('ping-rtt-legend');
         if (src === 'wired' && gtExchanges) {
             renderPingKpiWired(); renderPingRttWired(); renderPingHistWired(); renderPingStatsWired();
@@ -1255,16 +1258,22 @@
             b.classList.toggle('bg-blue-600', active); b.classList.toggle('text-white', active);
             b.classList.toggle('bg-gray-700', !active); b.classList.toggle('text-gray-300', !active);
         });
-    }
-
-    const srcToggle = document.getElementById('ping-source-toggle');
-    if (gtExchanges && srcToggle) {
-        srcToggle.classList.remove('hidden');
-        srcToggle.querySelectorAll('button').forEach(b =>
-            b.addEventListener('click', () => renderPingSource(b.dataset.src)));
-        renderPingSource('wired');
-    } else {
-        renderPingSource('wireless');
+        const flowWrap = document.getElementById('ping-filter-flow-wrap');
+        const retryWrap = document.getElementById('ping-filter-retry-wrap');
+        const obsDetailsEl = document.getElementById('ping-observations-details');
+        if (src === 'wired' && gtExchanges) {
+            renderPingStreaksWired();
+            renderPingFullTableWired();
+            if (flowWrap) flowWrap.classList.add('hidden');
+            if (retryWrap) retryWrap.classList.add('hidden');
+            if (obsDetailsEl) obsDetailsEl.classList.add('hidden');
+        } else {
+            renderPingStreaksWireless();
+            renderPingFullTable();
+            if (flowWrap) flowWrap.classList.remove('hidden');
+            if (retryWrap) retryWrap.classList.remove('hidden');
+            if (obsDetailsEl) obsDetailsEl.classList.remove('hidden');
+        }
     }
 
     // 관찰된 ICMP 프레임 (RTT 측정 불가, 단방향 캡처에서만)
@@ -1331,12 +1340,61 @@
     const pingRetryChk = document.getElementById('ping-filter-retry');
     const pingFullCount = document.getElementById('ping-full-count');
 
+    const WIRED_FULL_THEAD = `<tr class="text-gray-400 border-b border-gray-700">
+        <th class="text-left py-2 px-1">#</th>
+        <th class="text-left py-2 px-1">시각</th>
+        <th class="text-left py-2 px-1">Target</th>
+        <th class="text-right py-2 px-1">RTT (ms)</th>
+        <th class="text-left py-2 px-1">상태</th>
+    </tr>`;
+    let wirelessFullTheadHtml = null;   // 최초 유선 전환 시 원본 백업
+
+    function renderPingFullTableWired() {
+        if (!pingFullTable) return;
+        const thead = document.getElementById('ping-full-thead');
+        if (thead) {
+            if (wirelessFullTheadHtml === null) wirelessFullTheadHtml = thead.innerHTML;
+            thead.innerHTML = WIRED_FULL_THEAD;
+        }
+        const fStatus = pingStatusSel ? pingStatusSel.value : '';
+        const rows = [];
+        gtExchanges.forEach((e, idx) => {
+            const isLoss = e.rtt_ms == null;
+            if (fStatus === 'loss' && !isLoss) return;
+            if (fStatus === 'matched' && isLoss) return;
+            rows.push({ e, idx });
+        });
+        if (pingFullCount) pingFullCount.textContent = `${rows.length.toLocaleString()} / ${gtExchanges.length.toLocaleString()}건`;
+        if (!rows.length) {
+            pingFullTable.innerHTML = '<tr><td colspan="5" class="text-gray-500 text-center py-6">조건에 맞는 항목이 없습니다.</td></tr>';
+            return;
+        }
+        pingFullTable.innerHTML = rows.map(({ e, idx }, i) => {
+            const isLoss = e.rtt_ms == null;
+            const badge = isLoss
+                ? '<span class="bg-red-900 text-red-300 px-1.5 py-0.5 rounded text-xs font-bold">LOSS</span>'
+                : '<span class="bg-green-900 text-green-300 px-1.5 py-0.5 rounded text-xs">OK</span>';
+            return `<tr data-ex-idx="${idx}" class="border-b border-gray-700/30 ${isLoss ? 'text-red-400 bg-red-900/20' : ''} hover:bg-gray-700/30">
+                <td class="py-1 px-1">${i + 1}</td>
+                <td class="py-1 px-1">${new Date(e.epoch * 1000).toLocaleTimeString('en-GB')}.${String(Math.floor((e.epoch % 1) * 1000)).padStart(3, '0')}</td>
+                <td class="py-1 px-1 font-mono">${escapeHtml(String(e.target ?? '?'))}</td>
+                <td class="py-1 px-1 text-right font-mono">${isLoss ? '-' : e.rtt_ms.toFixed(2)}</td>
+                <td class="py-1 px-1">${badge}</td>
+            </tr>`;
+        }).join('');
+    }
+
     function renderPingFullTable() {
         if (!pingFullTable) return;
+        if (wirelessFullTheadHtml !== null) {
+            const thead = document.getElementById('ping-full-thead');
+            if (thead) thead.innerHTML = wirelessFullTheadHtml;
+            wirelessFullTheadHtml = null;
+        }
         const fStatus = pingStatusSel ? pingStatusSel.value : '';   // ''=전체 | matched | loss
         const fFlow = pingFlowSel ? pingFlowSel.value : '';         // ''=전체 | "src → dst"
         const fRetry = pingRetryChk ? pingRetryChk.checked : false;
-        const rows = fullList.filter(p => {
+        const rows = fullList.map((p, fi) => ({ p, fi })).filter(({ p }) => {
             // 손실은 loss + loss_gap(단방향 seq gap) 둘 다 포함.
             if (fStatus === 'loss' && !(p.status === 'loss' || p.status === 'loss_gap')) return false;
             if (fStatus === 'matched' && p.status !== 'matched') return false;
@@ -1349,7 +1407,7 @@
             pingFullTable.innerHTML = '<tr><td colspan="10" class="text-gray-500 text-center py-6">조건에 맞는 항목이 없습니다.</td></tr>';
             return;
         }
-        pingFullTable.innerHTML = rows.map((p, i) => {
+        pingFullTable.innerHTML = rows.map(({ p, fi }, i) => {
             const isLoss = p.status === 'loss' || p.status === 'loss_gap';
             const isGap = p.status === 'loss_gap';
             const rowClass = isLoss ? 'text-red-400 bg-red-900/20' : (p.has_retry ? 'text-yellow-400' : '');
@@ -1364,7 +1422,7 @@
             const reqStr = p.req_num != null ? '#' + p.req_num : '-';
             const replyStr = p.reply_num != null ? '#' + p.reply_num : '-';
             const replyTime = p.reply_time || '-';
-            return `<tr class="border-b border-gray-700/30 ${rowClass} hover:bg-gray-700/30">
+            return `<tr data-fl-idx="${fi}" class="border-b border-gray-700/30 ${rowClass} hover:bg-gray-700/30">
                 <td class="py-1 px-1">${i + 1}</td>
                 <td class="py-1 px-1">${p.seq || '-'}</td>
                 <td class="py-1 px-1">${statusBadge}</td>
@@ -1385,41 +1443,76 @@
             flows.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join(''));
     }
     [pingStatusSel, pingFlowSel, pingRetryChk].forEach(el => {
-        if (el) el.addEventListener('change', renderPingFullTable);
+        if (el) el.addEventListener('change', () => {
+            if (currentPingSource === 'wired') renderPingFullTableWired();
+            else renderPingFullTable();
+        });
     });
     if (fullList.length > 0) renderPingFullTable();
 
     // 장치별 연속 실패 구간 표 (백엔드 ping.loss_streaks — 구버전 result엔 없어 빈 표+재분석 안내)
     const streakTbody = document.querySelector('#ping-streak-table tbody');
-    if (streakTbody) {
-        const streaks = ping.loss_streaks || [];
-        const fmtT = (str, epoch) => str || (typeof epoch === 'number'
-            ? new Date(epoch * 1000).toLocaleTimeString('en-GB') : '-');
-        if (streaks.length === 0) {
-            const hint = ping.loss_streaks === undefined
-                ? '이 분석엔 장치별 구간 데이터가 없습니다 (재분석 시 표시)'
-                : '장치별 연속 실패 구간 없음 (산발적 발생)';
-            streakTbody.innerHTML = `<tr><td colspan="6" class="text-gray-500 text-center py-6">${hint}</td></tr>`;
-        } else {
-            streakTbody.innerHTML = streaks.map(s => {
-                const shown = s.frame_refs || [];
-                const refs = shown.map(n => '#' + n).join(' ');
-                // count(연속 총건)보다 표시된 근거가 적으면(20건 cap 또는 seq_gap=번호없음) 생략 수를 +N으로.
-                const moreN = Math.max(0, (s.count || 0) - shown.length);
-                const refsCell = (refs ? escapeHtml(refs) : '')
-                    + (moreN > 0 ? ` <span class="text-gray-600">…+${moreN}</span>` : '');
-                const seqRange = (s.first_seq != null && s.last_seq != null)
-                    ? `${escapeHtml(String(s.first_seq))} ~ ${escapeHtml(String(s.last_seq))}` : '-';
-                return `<tr class="border-b border-gray-700/30 text-red-400 bg-red-900/10 hover:bg-gray-700/30">
-                    <td class="py-1 px-1 text-gray-200">${escapeHtml(String(s.device ?? '?'))}</td>
-                    <td class="py-1 px-1">${escapeHtml(fmtT(s.start_time, s.start_epoch))} ~ ${escapeHtml(fmtT(s.end_time, s.end_epoch))}</td>
-                    <td class="py-1 px-1 text-right font-bold">${s.count}건</td>
-                    <td class="py-1 px-1 text-right">${Number(s.duration_sec || 0).toFixed(1)}초</td>
-                    <td class="py-1 px-1">${seqRange}</td>
-                    <td class="py-1 px-1 text-gray-400 truncate max-w-[220px]" title="${escapeHtml(refs)}">${refsCell || '-'}</td>
-                </tr>`;
-            }).join('');
+    function renderPingStreaksWireless() {
+        if (streakTbody) {
+            const streaks = ping.loss_streaks || [];
+            const fmtT = (str, epoch) => str || (typeof epoch === 'number'
+                ? new Date(epoch * 1000).toLocaleTimeString('en-GB') : '-');
+            if (streaks.length === 0) {
+                const hint = ping.loss_streaks === undefined
+                    ? '이 분석엔 장치별 구간 데이터가 없습니다 (재분석 시 표시)'
+                    : '장치별 연속 실패 구간 없음 (산발적 발생)';
+                streakTbody.innerHTML = `<tr><td colspan="6" class="text-gray-500 text-center py-6">${hint}</td></tr>`;
+            } else {
+                streakTbody.innerHTML = streaks.map(s => {
+                    const shown = s.frame_refs || [];
+                    const refs = shown.map(n => '#' + n).join(' ');
+                    // count(연속 총건)보다 표시된 근거가 적으면(20건 cap 또는 seq_gap=번호없음) 생략 수를 +N으로.
+                    const moreN = Math.max(0, (s.count || 0) - shown.length);
+                    const refsCell = (refs ? escapeHtml(refs) : '')
+                        + (moreN > 0 ? ` <span class="text-gray-600">…+${moreN}</span>` : '');
+                    const seqRange = (s.first_seq != null && s.last_seq != null)
+                        ? `${escapeHtml(String(s.first_seq))} ~ ${escapeHtml(String(s.last_seq))}` : '-';
+                    return `<tr class="border-b border-gray-700/30 text-red-400 bg-red-900/10 hover:bg-gray-700/30">
+                        <td class="py-1 px-1 text-gray-200">${escapeHtml(String(s.device ?? '?'))}</td>
+                        <td class="py-1 px-1">${escapeHtml(fmtT(s.start_time, s.start_epoch))} ~ ${escapeHtml(fmtT(s.end_time, s.end_epoch))}</td>
+                        <td class="py-1 px-1 text-right font-bold">${s.count}건</td>
+                        <td class="py-1 px-1 text-right">${Number(s.duration_sec || 0).toFixed(1)}초</td>
+                        <td class="py-1 px-1">${seqRange}</td>
+                        <td class="py-1 px-1 text-gray-400 truncate max-w-[220px]" title="${escapeHtml(refs)}">${refsCell || '-'}</td>
+                    </tr>`;
+                }).join('');
+            }
         }
+    }
+
+    function renderPingStreaksWired() {
+        if (!streakTbody) return;
+        const streaks = (gt && gt.streaks) || [];
+        if (!streaks.length) {
+            streakTbody.innerHTML = '<tr><td colspan="6" class="text-gray-500 text-center py-6">유선 연속 손실 구간 없음 (산발적 발생)</td></tr>';
+            return;
+        }
+        const fmtE = e => (typeof e === 'number') ? new Date(e * 1000).toLocaleTimeString('en-GB') : '-';
+        streakTbody.innerHTML = streaks.map(s => `<tr class="border-b border-gray-700/30 text-red-400 bg-red-900/10 hover:bg-gray-700/30">
+            <td class="py-1 px-1 text-gray-200">${escapeHtml(String(s.target ?? '?'))}</td>
+            <td class="py-1 px-1">${fmtE(s.start_epoch)} ~ ${fmtE(s.end_epoch)}</td>
+            <td class="py-1 px-1 text-right font-bold">${s.count ?? 0}건</td>
+            <td class="py-1 px-1 text-right">${Number(s.duration_sec || 0).toFixed(1)}초</td>
+            <td class="py-1 px-1 text-gray-600">—</td>
+            <td class="py-1 px-1 text-gray-600">—</td>
+        </tr>`).join('');
+    }
+
+    // 소스 토글 초기화 + 최초 렌더 — streak/전체 목록/관찰 ICMP 위젯이 모두
+    // 선언된 뒤에 실행해야 한다 (renderPingSource가 이들을 참조).
+    const srcToggle = document.getElementById('ping-source-toggle');
+    if (gtExchanges && srcToggle) {
+        srcToggle.classList.remove('hidden');
+        srcToggle.querySelectorAll('button').forEach(b =>
+            b.addEventListener('click', () => renderPingSource(b.dataset.src)));
+        renderPingSource('wired');
+    } else {
+        renderPingSource('wireless');
     }
 
     /* ── 종합 진단 — 고급 UI ── */
