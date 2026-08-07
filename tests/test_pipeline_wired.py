@@ -6,6 +6,9 @@ import config
 import analyzer.pipeline as pipeline
 from tests.conftest import make_frame, STA1, STA2, AP1
 
+# 주의: 이 mock은 "파이프라인 통과"만 검증한다 — 모집단 등식(total==len(exchanges)
+# 등)은 producer(build_ground_truth) 소관이라 여기선 일부러 맞추지 않는다.
+# 스키마 유효한 GT 예시로 복사하지 말 것 (PR #25 최종 재검증 관찰).
 GT_OK = {
     "total": 100, "ok": 97, "ng": 3, "loss_pct": 3.0, "sender": "10.0.0.1",
     "targets": {"10.0.0.2": {"total": 100, "ng": 3}},

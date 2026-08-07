@@ -7,6 +7,7 @@ from analyzer.web.report import (
     build_report_markdown,
     SIGNAL_TYPE_LABEL,
     _format_epoch,
+    _multi_wireless_section,
     _ping_section,
 )
 
@@ -771,3 +772,100 @@ def test_sta_diags_no_cliffs_when_structured_absent():
         ]},
     }))
     assert "신호 급락" not in md
+
+
+def test_multi_wireless_section_with_merge():
+    structured = {
+        "merge": {"window_ms": 50.0, "duplicates": 100, "kept": 400,
+                  "coverage": {"both": 100, "only": {"w1": 120, "w2": 180}}},
+        "sources": [
+            {"name": "a.pcapng", "role": "wireless", "frame_count": 220,
+             "tag": "w1", "applied_offset_ms": 0.0, "offset_method": "reference"},
+            {"name": "b.pcap", "role": "wireless", "frame_count": 280,
+             "tag": "w2", "applied_offset_ms": -183510.362, "offset_method": "tsf"},
+            {"name": "wired.pcapng", "role": "wired", "frame_count": None},
+        ],
+    }
+    text = "\n".join(_multi_wireless_section(structured))
+    assert "다중 무선 병합" in text
+    assert "w1" in text and "a.pcapng" in text and "기준 시계" in text
+    assert "w2" in text and "-183,510.362ms" in text and "(tsf)" in text
+    assert "중복 제거 100건" in text and "통합 400건" in text
+    assert "2개 이상 포착 100건(25.0%)" in text
+    assert "w2 단독 180건(45.0%)" in text
+    # wired 소스는 무선 목록에 나오지 않는다
+    assert "wired.pcapng" not in text
+
+
+def test_multi_wireless_section_absent_without_merge():
+    assert _multi_wireless_section({}) == []
+    assert _multi_wireless_section({"sources": [{"role": "wireless", "name": "x"}]}) == []
+
+
+def test_throughput_stats_sparse_timeline_uses_epoch_span():
+    """희소 timeline(6h+ 폴백)에서 평균 Mbps 분모는 entry 수가 아니라 epoch
+    경과 시간 — entry 수로 나누면 평균이 부풀려진다 (PR #27 Codex P2)."""
+    from analyzer.web.report import _throughput_stats
+    per_second = {"timeline": [
+        {"epoch": 0, "bytes": 1_000_000},
+        {"epoch": 9, "bytes": 1_000_000},
+    ]}
+    tp = _throughput_stats(per_second)
+    # 총 2MB × 8 / 1e6 / 10초(span 0~9) = 1.6 Mbps (entry 수 2로 나누면 8.0)
+    assert tp["avg_mbps"] == 1.6
+    assert tp["peak_mbps"] == 8.0
+
+
+def test_throughput_stats_nonfinite_epoch_falls_back():
+    """epoch에 NaN이 섞이면 span 계산 대신 entry 수 폴백 — int(nan) 크래시 방지
+    (PR #27 리뷰 3R)."""
+    from analyzer.web.report import _throughput_stats
+    per_second = {"timeline": [
+        {"epoch": float("nan"), "bytes": 1_000_000},
+        {"epoch": 5, "bytes": 1_000_000},
+    ]}
+    tp = _throughput_stats(per_second)
+    assert tp["avg_mbps"] == 8.0  # 분모 = entry 수 2 (폴백)
+
+
+def test_throughput_stats_extreme_epochs_fall_back():
+    """유한하지만 극단적인 epoch(±1e308 차→inf, 초대형 int→isfinite OverflowError)도
+    entry 수 폴백 — span 산술 전체 try 방어 (PR #27 Codex 4R)."""
+    from analyzer.web.report import _throughput_stats
+    inf_span = {"timeline": [
+        {"epoch": -1e308, "bytes": 1_000_000},
+        {"epoch": 1e308, "bytes": 1_000_000},
+    ]}
+    assert _throughput_stats(inf_span)["avg_mbps"] == 8.0  # 분모 2 폴백
+
+    # 초대형 int는 파이썬 임의정밀도 차가 정확(5) — per-value isfinite를 안 쓰는
+    # 새 구조에서는 폴백이 아니라 올바른 span(6초)으로 정상 계산된다.
+    huge_int = {"timeline": [
+        {"epoch": 10**400, "bytes": 1_000_000},
+        {"epoch": 10**400 + 5, "bytes": 1_000_000},
+    ]}
+    assert _throughput_stats(huge_int)["avg_mbps"] == 2.67
+
+
+def test_throughput_stats_trailing_nan_falls_back():
+    """NaN이 리스트 꼬리에 있으면 max/min이 조용히 유효값을 남겨 span 0으로
+    과대계상되던 경로 — 사전 차단으로 entry 수 폴백 (PR #27 리뷰 4R)."""
+    from analyzer.web.report import _throughput_stats
+    per_second = {"timeline": [
+        {"epoch": 5, "bytes": 1_000_000},
+        {"epoch": float("nan"), "bytes": 1_000_000},
+    ]}
+    assert _throughput_stats(per_second)["avg_mbps"] == 8.0  # 분모 2 폴백
+
+
+def test_multi_wireless_section_skips_non_numeric_only_counts():
+    """only 커버리지의 비수치 값(None 등 직렬화 외부 데이터)은 항목 생략 —
+    format/_pct 크래시 방지 (PR #27 리뷰 5R)."""
+    structured = {
+        "merge": {"duplicates": 1, "kept": 10,
+                  "coverage": {"both": 5, "only": {"w1": None, "w2": 5}}},
+        "sources": [],
+    }
+    text = "\n".join(_multi_wireless_section(structured))
+    assert "w2 단독 5건" in text
+    assert "w1" not in text

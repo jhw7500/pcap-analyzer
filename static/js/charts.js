@@ -86,7 +86,7 @@
         kpiContainer.insertAdjacentHTML('afterend',
             `<div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-6">
                 <h3 class="text-sm font-semibold text-gray-400 mb-1">무선 병합</h3>
-                <p class="text-sm text-gray-300">중복 제거 <span class="font-semibold text-white">${mergeInfo.duplicates.toLocaleString()}</span>건 · 양쪽 포착 <span class="font-semibold text-white">${both.toLocaleString()}</span>건</p>
+                <p class="text-sm text-gray-300">중복 제거 <span class="font-semibold text-white">${mergeInfo.duplicates.toLocaleString()}</span>건 · 2개 이상 포착 <span class="font-semibold text-white">${both.toLocaleString()}</span>건</p>
                 ${onlyLine}
             </div>`
         );
@@ -106,7 +106,7 @@
         const totalGroups = cov.groups_total || 0;
         const pct = n => totalGroups ? (100 * n / totalGroups).toFixed(1) : '0.0';
         const only = cov.only || {};
-        const parts = [`양쪽 포착 <span class="font-semibold text-white">${(cov.both || 0).toLocaleString()}</span>건 (${pct(cov.both || 0)}%)`]
+        const parts = [`2개 이상 포착 <span class="font-semibold text-white">${(cov.both || 0).toLocaleString()}</span>건 (${pct(cov.both || 0)}%)`]
             .concat(sniffer.tags.filter(t => only[t]).map(t =>
                 `${escapeHtml(label(t))} 단독 <span class="font-semibold text-white">${only[t].toLocaleString()}</span>건 (${pct(only[t])}%)`));
         document.getElementById('sniffer-coverage-line').innerHTML = parts.join(' · ');
@@ -961,10 +961,15 @@
     function renderPingRttWireless() {
         const pingRttEl = document.getElementById('chart-ping-rtt');
         if (pingRttEl && pairs.length === 0 && losses.length === 0) {
+            // 이전 소스의 Plotly 인스턴스·expando(.on 등) 명시 해제 — 토글 왕복 리소스/stale 가드 정리 (백로그 ①)
+            Plotly.purge('chart-ping-rtt');
             pingRttEl.style.height = 'auto';
             pingRttEl.innerHTML = '<div class="text-center text-gray-500 text-sm py-12">매칭된 RTT 페어가 없습니다.<br><span class="text-xs text-gray-600">단방향 캡처(STA 다운링크만 보임)이거나 ICMP 트래픽이 없는 캡처</span></div>';
         } else if (pingRttEl && pairs.length === 0 && losses.length > 0) {
             // 단방향 캡처에서 seq gap loss만 있는 경우 — 마커만 표시
+            // 이전 소스의 Plotly 인스턴스·expando(.on 등) 명시 해제 — 토글 왕복 리소스/stale 가드 정리 (백로그 ①)
+            Plotly.purge('chart-ping-rtt');
+            pingRttEl.style.height = '400px';
             Plotly.newPlot('chart-ping-rtt', [{
                 x: losses.map(p => new Date(p.epoch * 1000)),
                 y: losses.map(() => 1),
@@ -1029,6 +1034,8 @@
                     hovertemplate: '%{text}<extra></extra>',
                 });
             }
+            // 빈 상태에서 복귀 시 높이 복원 (백로그 ①)
+            if (pingRttEl) pingRttEl.style.height = '400px';
             Plotly.newPlot('chart-ping-rtt', traces_ping, {
                 ...DARK,
                 xaxis: { title: { text: '시간', font: { size: 12 } }, gridcolor: '#374151' },
@@ -1048,6 +1055,8 @@
     function renderPingHistWireless() {
         const pingHistEl = document.getElementById('chart-ping-hist');
         if (pingHistEl && pairs.length === 0) {
+            // 이전 소스의 Plotly 인스턴스·expando(.on 등) 명시 해제 — 토글 왕복 리소스/stale 가드 정리 (백로그 ①)
+            Plotly.purge('chart-ping-hist');
             pingHistEl.style.height = 'auto';
             pingHistEl.innerHTML = '<div class="text-center text-gray-500 text-sm py-12">RTT 데이터 없음</div>';
         }
@@ -1069,6 +1078,8 @@
                 text: `+${outliers.toLocaleString()}건 > ${hi.toFixed(1)}ms (최대 ${maxRtt.toFixed(1)}ms)`,
                 showarrow: false, font: { size: 10, color: '#9ca3af' },
             }] : [];
+            // 빈 상태에서 복귀 시 높이 복원 (백로그 ①)
+            if (pingHistEl) pingHistEl.style.height = '300px';
             Plotly.newPlot('chart-ping-hist', [{
                 x: rtts, type: 'histogram',
                 xbins: { start: 0, end: hi, size: (hi / 40) || 0.1 },
@@ -1207,6 +1218,9 @@
         });
         // 옵션은 무선 RTT 시계열과 미러링 — 유선이 기본 뷰이고 1만+ 포인트로
         // 밀집하므로 zoom/pan이 오히려 더 필요하다 (PR #25 리뷰 2라운드).
+        // 빈 상태에서 복귀 시 높이 복원 (백로그 ①)
+        const el = document.getElementById('chart-ping-rtt');
+        if (el) el.style.height = '400px';
         Plotly.newPlot('chart-ping-rtt', traces, {
             ...DARK,
             xaxis: { title: { text: '시간', font: { size: 12 } }, gridcolor: '#374151' },
@@ -1240,6 +1254,8 @@
             text: `+${outliers.toLocaleString()}건 > ${hi.toFixed(1)}ms (최대 ${maxRtt.toFixed(1)}ms)`,
             showarrow: false, font: { size: 10, color: '#9ca3af' },
         }] : [];
+        // 빈 상태에서 복귀 시 높이 복원 (백로그 ①)
+        histEl.style.height = '300px';
         Plotly.newPlot('chart-ping-hist', [{
             x: rtts, type: 'histogram',
             xbins: { start: 0, end: hi, size: (hi / 40) || 0.1 },
