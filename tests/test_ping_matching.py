@@ -68,3 +68,28 @@ class TestReplyMissingStillLoss:
         assert stats["reply_missing"] == 1
         loss_seqs = {e["seq"] for e in result["losses"]}
         assert "3" in loss_seqs
+
+
+class TestLossesFullListLockstep:
+    def test_losses_are_full_list_loss_subsequence_same_objects(self):
+        """losses == full_list의 loss 필터 부분수열 (동일 객체·동일 순서).
+
+        프론트 클릭 내비(static/js/charts.js)가 losses[i] ↔ full_list 인덱스
+        조인을 이 불변식(원자적 동시 append + 독립 안정 정렬)에 의존한다
+        (PR #26). 개수는 같고 순서만 어긋나는 변경은 프론트 가드를 통과해
+        조용한 오점프를 만들므로 여기서 순서·정체성까지 고정한다.
+        """
+        # 동률 epoch 손실 2건(seq 3, 4)을 포함해 안정 정렬 타이 케이스까지 커버.
+        frames = [
+            _req(1, 1000.0, 1), _reply(1, 1000.5, 2),
+            _req(3, 1002.0, 5),                # 손실 ①
+            _req(2, 1001.0, 3), _reply(2, 1001.5, 4),
+            _req(4, 1002.0, 6),                # 손실 ② — ①과 동일 epoch (타이)
+        ]
+        result = build_ping_matches(frames, {})
+        loss_sub = [e for e in result["full_list"]
+                    if e["status"] in ("loss", "loss_gap")]
+        assert len(result["losses"]) == 2
+        assert len(loss_sub) == len(result["losses"])
+        # 같은 순서의 같은 객체여야 한다 — 값 비교가 아니라 정체성 비교.
+        assert all(a is b for a, b in zip(loss_sub, result["losses"]))
