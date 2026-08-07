@@ -846,7 +846,18 @@
         .map((p, fi) => ({ p, fi }))
         .filter(x => x.p.status === 'loss' || x.p.status === 'loss_gap')
         .map(x => x.fi);
-    const lossCustomdata = lossFlIdx.length === losses.length ? lossFlIdx : undefined;
+    // 순서 이중 확인: losses ↔ full_list loss 부분수열의 lockstep 불변식
+    // (ping_matching.py — 동일 객체 원자적 append + 독립 안정 정렬, 회귀 테스트
+    // tests/test_ping_matching.py::TestLossesFullListLockstep로 고정)을 길이 +
+    // 양끝 필드 대조로 재확인한다. JSON 직렬화 후에는 두 배열 항목이 별개
+    // 객체라 참조 비교(===)는 항상 false — 반드시 필드로 비교해야 한다
+    // (PR #26 리뷰 3R 제안 코드의 정정). 불일치 시 클릭 내비만 조용히 비활성.
+    const lossOrderOk = lossFlIdx.length === losses.length && (losses.length === 0 || (
+        fullList[lossFlIdx[0]].epoch === losses[0].epoch
+        && String(fullList[lossFlIdx[0]].seq) === String(losses[0].seq)
+        && fullList[lossFlIdx[lossFlIdx.length - 1]].epoch === losses[losses.length - 1].epoch
+    ));
+    const lossCustomdata = lossOrderOk ? lossFlIdx : undefined;
 
     /* 유선 ground truth 카드 — ping.ground_truth 있을 때만 (스펙 §4) */
     const gt = ping.ground_truth || null;
@@ -1307,9 +1318,12 @@
     }
 
     function renderPingSource(src) {
-        currentPingSource = src;
+        // 게이트 봉인: gtExchanges 없는 'wired' 요청은 무선으로 정규화 —
+        // currentPingSource와 아래 모든 분기가 이 값 하나만 본다 (PR #26 리뷰 3R).
+        const isWired = src === 'wired' && !!gtExchanges;
+        currentPingSource = isWired ? 'wired' : 'wireless';
         const legend = document.getElementById('ping-rtt-legend');
-        if (src === 'wired' && gtExchanges) {
+        if (isWired) {
             renderPingKpiWired(); renderPingRttWired(); bindPingRttClick(); renderPingHistWired(); renderPingStatsWired();
             if (legend) legend.textContent = '(초록=응답, 빨강X=손실 — 유선 확정)';
         } else {
@@ -1325,7 +1339,7 @@
         const retryWrap = document.getElementById('ping-filter-retry-wrap');
         const obsDetailsEl = document.getElementById('ping-observations-details');
         const streakSrcLabel = document.getElementById('ping-streak-src-label');
-        if (src === 'wired' && gtExchanges) {
+        if (isWired) {
             renderPingStreaksWired();
             renderPingFullTableWired();
             if (streakSrcLabel) streakSrcLabel.textContent = ' (유선 확정)';
@@ -1567,7 +1581,7 @@
         streakTbody.innerHTML = streaks.map(s => `<tr class="border-b border-gray-700/30 text-red-400 bg-red-900/10 hover:bg-gray-700/30">
             <td class="py-1 px-1 text-gray-200">${escapeHtml(String(s.target ?? '?'))}</td>
             <td class="py-1 px-1">${escapeHtml(fmtE(s.start_epoch))} ~ ${escapeHtml(fmtE(s.end_epoch))}</td>
-            <td class="py-1 px-1 text-right font-bold">${s.count ?? 0}건</td>
+            <td class="py-1 px-1 text-right font-bold">${Number(s.count ?? 0)}건</td>
             <td class="py-1 px-1 text-right">${Number(s.duration_sec || 0).toFixed(1)}초</td>
             <td class="py-1 px-1 text-gray-600">—</td>
             <td class="py-1 px-1 text-gray-600">—</td>
