@@ -8,6 +8,7 @@ typora 등)로 PDF/HTML로 추가 변환 가능하도록 표준 GFM 사양 준�
 report.pdf도 같은 텍스트 기반 리포트를 공유한다. 차트가 필요하면 분석
 페이지를 브라우저에서 직접 인쇄. SVG/PNG inline은 후속 PR 후보로 남긴다.
 """
+import math
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List
@@ -96,15 +97,33 @@ def _throughput_stats(per_second: Any) -> Dict[str, Any]:
     timeline = per_second.get("timeline")
     if not isinstance(timeline, list) or not timeline:
         return {}
-    byte_vals = [
-        e.get("bytes")
-        for e in timeline
+    entries = [
+        e for e in timeline
         if isinstance(e, dict) and isinstance(e.get("bytes"), (int, float))
     ]
-    if not byte_vals:
+    if not entries:
         return {}
+    byte_vals = [e["bytes"] for e in entries]
     total = sum(byte_vals)
-    duration = len(byte_vals)  # timeline은 초당 1 entry (gap은 0으로 채워짐)
+    # duration은 epoch 경과 시간 기준 — zero-fill timeline에서는 len(entries)와
+    # 동일하지만(정상 캡처 출력 불변), 희소 폴백 timeline(6h+ span)에서는 관측
+    # entry 수로 나누면 평균이 부풀려진다(PR #27 Codex P2). epoch이 없는
+    # 구버전 entry가 섞이면 기존 방식(len)으로 폴백.
+    epochs = [e.get("epoch") for e in entries]
+    # span 산술 전체를 try로 감싼다 — 개별 값 검증(isinstance/isfinite)으로는
+    # 이형 입력을 다 못 막는다: None 비교 TypeError, NaN 전파, ±1e308 차→inf,
+    # 초대형 int는 math.isfinite 자체가 OverflowError (PR #27 리뷰 3R·4R).
+    # 어떤 실패든 entry 수 폴백(zero-fill 가정) — 크래시 대신 보수적 값.
+    try:
+        # float NaN/Inf는 사전 차단 — max/min은 NaN 위치에 따라 조용히 잘못된
+        # 값을 남긴다(꼬리 NaN이면 span 0 → 과대계상, PR #27 리뷰 4R). int는
+        # 크기 무관 정확 산술이라 통과시킨다(초대형 int도 올바른 span — 4R 테스트).
+        if any(isinstance(x, float) and (x != x or math.isinf(x)) for x in epochs):
+            raise ValueError
+        span = max(epochs) - min(epochs)
+        duration = int(span) + 1 if math.isfinite(float(span)) else len(entries)
+    except (TypeError, ValueError, OverflowError):
+        duration = len(entries)
     return {
         "avg_mbps": round(total * 8 / 1e6 / duration, 2) if duration else 0.0,
         "peak_mbps": round(max(byte_vals) * 8 / 1e6, 2),
@@ -617,6 +636,44 @@ def _ping_section(structured: Dict[str, Any]) -> List[str]:
     return ["## Ping / RTT", "", f"- {' · '.join(parts)}", ""]
 
 
+def _multi_wireless_section(structured: Dict[str, Any]) -> List[str]:
+    """다중 무선 병합 요약 — structured["merge"]가 있을 때만 (단일 무선 report
+    출력 불변, 백로그 ④: Phase 2부터 report에 병합 맥락이 통째로 빠져 있었다)."""
+    merge = structured.get("merge")
+    if not isinstance(merge, dict) or not merge:
+        return []
+    lines = ["## 다중 무선 병합", ""]
+    for s in structured.get("sources") or []:
+        if not isinstance(s, dict) or s.get("role") != "wireless":
+            continue
+        parts = [f"{s.get('frame_count') or 0:,} 프레임"]
+        off = s.get("applied_offset_ms")
+        if isinstance(off, (int, float)):
+            method = s.get("offset_method") or ""
+            parts.append("기준 시계" if method == "reference"
+                         else f"오프셋 {off:+,.3f}ms ({_clean_inline(str(method))})")
+        tag = s.get("tag")
+        prefix = f"{_clean_inline(str(tag))} " if tag else ""
+        # 파일명은 backtick code span 내부라 _clean_code_span — _meta_section의
+        # pcap_name과 동일 관례 (백틱 포함 외부 입력이 span을 깨는 것 방지).
+        lines.append(f"- {prefix}`{_clean_code_span(s.get('name', '?'))}` — {' · '.join(parts)}")
+    kept = merge.get("kept") or 0
+    cov = merge.get("coverage") or {}
+
+    def _pct(n: int) -> str:
+        return f"{100 * n / kept:.1f}%" if kept else "0%"
+
+    cov_parts = [f"2개 이상 포착 {cov.get('both', 0):,}건({_pct(cov.get('both', 0))})"]
+    for t, n in (cov.get("only") or {}).items():
+        if not isinstance(n, (int, float)):
+            continue  # 직렬화 외부 데이터 방어 — None 등이면 항목 생략 (PR #27 5R)
+        cov_parts.append(f"{_clean_inline(str(t))} 단독 {n:,}건({_pct(n)})")
+    lines.append(f"- 병합: 중복 제거 {merge.get('duplicates') or 0:,}건 · "
+                 f"통합 {kept:,}건 — {' · '.join(cov_parts)}")
+    lines.append("")
+    return lines
+
+
 def _device_phy_section(structured: Dict[str, Any]) -> List[str]:
     """네트워크 전체 PHY 분포 + PHY/MCS별 retry 핫스팟 표(표본>=30).
 
@@ -679,6 +736,7 @@ def build_report_markdown(result: Dict[str, Any]) -> str:
 
     out: List[str] = []
     out.extend(_meta_section(result))
+    out.extend(_multi_wireless_section(structured))
     # 두괄식 — 판정/최상위 문제를 제목 바로 아래에서 먼저 보여준다.
     out.extend(_summary_section(diagnosis))
     out.extend(_devices_section(structured))

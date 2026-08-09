@@ -76,7 +76,7 @@ def _structured_merge(mr: MergeResult) -> Dict[str, Any]:
 #: (PR #24 Gemini 리뷰 HIGH), 이보다 긴 구간은 관측된 초만 담는 희소
 #: 시계열로 폴백해 출력 크기를 프레임 수에 비례시킨다. 정상 스니퍼 배치
 #: 테스트(분~시간 단위)는 전부 zero-fill 경로를 탄다.
-_SNIFFER_FILL_MAX_SPAN_SEC = 6 * 3600
+_SNIFFER_FILL_MAX_SPAN_SEC = 6 * 3600  #: (_structured_per_second도 같은 상한을 공유한다 — 백로그 ③)
 
 
 def _structured_sniffer_compare(
@@ -272,7 +272,9 @@ def _retry_per_sec(device_frames: List[Frame]) -> List[Dict[str, Any]]:
     """
     by_sec: Dict[int, Dict[str, int]] = defaultdict(lambda: {"retry": 0, "total": 0})
     for f in device_frames:
-        if f.epoch is None:  # epoch 없는 프레임이 build 전체를 깨지 않도록 방어.
+        # epoch 없는/비유한 프레임이 build 전체를 깨지 않도록 방어 —
+        # _structured_per_second와 동일 (int(nan)→ValueError, PR #27 리뷰).
+        if f.epoch is None or not math.isfinite(f.epoch):
             continue
         b = by_sec[int(f.epoch)]
         b["total"] += 1
@@ -556,34 +558,43 @@ def _structured_roaming(
 
 
 def _structured_per_second(frames: List[Frame]) -> Dict[str, Any]:
-    """초당 프레임 수 시계열."""
-    if not frames:
-        return {"timeline": []}
+    """초당 프레임 수 시계열.
 
-    sec_counts = Counter(int(f.epoch) for f in frames)
-    retry_counts = Counter(int(f.epoch) for f in frames if f.retry)
-    # throughput용 바이트 집계 — bytes는 전체(frame.len 합), data_bytes는 Data
-    # 타입 프레임만. Mbps 환산은 소비자(프론트/리포트)가 ×8/1e6으로 수행.
+    손상 epoch(None/NaN/Inf) 프레임은 집계에서 제외하고, zero-fill 구간이
+    _SNIFFER_FILL_MAX_SPAN_SEC를 넘으면 관측된 초만 담는 희소 timeline로
+    폴백한다 — _structured_sniffer_compare와 동일 방어(PR #24 리뷰에서
+    공통 이슈로 기록된 형제 함수 미러링, 백로그 ③).
+    """
+    sec_counts: "Counter[int]" = Counter()
+    retry_counts: "Counter[int]" = Counter()
     byte_counts: "Counter[int]" = Counter()
     data_byte_counts: "Counter[int]" = Counter()
     for f in frames:
+        if f.epoch is None or not math.isfinite(f.epoch):
+            continue
         sec = int(f.epoch)
+        sec_counts[sec] += 1
+        if f.retry:
+            retry_counts[sec] += 1
+        # throughput용 바이트 집계 — bytes는 전체(frame.len 합), data_bytes는
+        # Data 타입만. Mbps 환산은 소비자(프론트/리포트)가 ×8/1e6으로 수행.
         byte_counts[sec] += f.length
         if f.is_data:
             data_byte_counts[sec] += f.length
-    start = min(sec_counts)
-    end = max(sec_counts)
-    timeline = []
-    for sec in range(start, end + 1):
-        timeline.append(
-            {
-                "epoch": sec,
-                "total": sec_counts.get(sec, 0),
-                "retry": retry_counts.get(sec, 0),
-                "bytes": byte_counts.get(sec, 0),
-                "data_bytes": data_byte_counts.get(sec, 0),
-            }
-        )
+    if not sec_counts:
+        return {"timeline": []}
+    lo, hi = min(sec_counts), max(sec_counts)
+    secs = range(lo, hi + 1) if hi - lo <= _SNIFFER_FILL_MAX_SPAN_SEC else sorted(sec_counts)
+    timeline = [
+        {
+            "epoch": sec,
+            "total": sec_counts.get(sec, 0),
+            "retry": retry_counts.get(sec, 0),
+            "bytes": byte_counts.get(sec, 0),
+            "data_bytes": data_byte_counts.get(sec, 0),
+        }
+        for sec in secs
+    ]
     return {"timeline": timeline}
 
 
@@ -668,14 +679,26 @@ def _device_entry_stats(dev_frames, is_tx, mac: str, role: str) -> Dict[str, Any
 
     per_bucket = []
     retry_peaks: list = []
-    if dev_frames:
-        start_epoch = int(dev_frames[0].epoch)
-        end_epoch = int(dev_frames[-1].epoch)
+    # 손상 epoch(None/NaN/Inf) 프레임은 버킷 계산에서 제외 — int() 예외와 비교
+    # TypeError 방어. span이 상한을 넘으면(먼 미래 epoch 등) 버킷 통계 자체를
+    # 생략한다(정직한 공백) — range(...,10) × 버킷별 전체 재스캔이 사실상 무한
+    # 루프가 되는 경로 차단 (_SNIFFER_FILL_MAX_SPAN_SEC 동일 원칙, PR #27 리뷰.
+    # O(span×frames) 구조 개선 자체는 백로그 ⑥에 남음).
+    finite_frames = [
+        f for f in dev_frames if f.epoch is not None and math.isfinite(f.epoch)
+    ]
+    # 경계는 위치([0]/[-1])가 아니라 min/max — dev_frames의 epoch 정렬 가정에
+    # 기대지 않는다 (PR #27 리뷰 4R; 정렬 입력에선 동일값이라 동작 불변).
+    _lo = min((f.epoch for f in finite_frames), default=None)
+    _hi = max((f.epoch for f in finite_frames), default=None)
+    if finite_frames and int(_hi) - int(_lo) <= _SNIFFER_FILL_MAX_SPAN_SEC:
+        start_epoch = int(_lo)
+        end_epoch = int(_hi)
         bucket_size = 10  # 10초 구간
         for bucket_start in range(start_epoch, end_epoch + 1, bucket_size):
             bucket_end = bucket_start + bucket_size
             bucket_frames = [
-                f for f in dev_frames if bucket_start <= f.epoch < bucket_end
+                f for f in finite_frames if bucket_start <= f.epoch < bucket_end
             ]
             total = len(bucket_frames)
             retries = sum(1 for f in bucket_frames if f.retry)
@@ -731,8 +754,10 @@ def _device_entry_stats(dev_frames, is_tx, mac: str, role: str) -> Dict[str, Any
                 break
             pk_start = pk["epoch"]
             pk_end = pk_start + bucket_size
+            # finite_frames 재사용 — 원본 dev_frames를 다시 스캔하면 손상
+            # epoch(None 비교 TypeError)이 peak 경로에서 되살아난다 (PR #27 Codex).
             pk_frames = [
-                f for f in dev_frames if pk_start <= f.epoch < pk_end
+                f for f in finite_frames if pk_start <= f.epoch < pk_end
             ]
             sub_buckets = []
             for sub_start in range(pk_start, pk_end):
