@@ -312,3 +312,43 @@ class TestTimezoneMismatch:
         off, matched, _ = estimate_offset(self._logs(2.74), self.PCAP)
         assert matched == len(self.PCAP)
         assert abs(off - (2.74 + 0.11)) < 0.02
+
+
+class TestScanPairedByCompletion:
+    """직전 스캔은 **완료** 시각으로 찾아야 한다.
+
+    시작 시각으로 찾으면 ROAM 명령 시점에 아직 진행 중이던 스캔이 "직전 스캔"으로
+    잡혀, 명령 이후 구간까지 포함한 duration이 붙는다(과대계상). 코드가 자기 주석
+    ("ROAM 명령 이전에 끝난 가장 가까운 스캔")과 어긋나 있었다.
+    """
+
+    #: 스캔 A는 ROAM 명령(08.975) 전에 끝나고(63ms), 스캔 B는 명령 **전에 시작해
+    #: 후에 끝난다**(1,600ms). 직전 스캔은 A여야 한다.
+    KERN = """
+    2026-07-23 08:50:07.854 kernel[alert][100.000000] wlan: mlan0 START SCAN
+    2026-07-23 08:50:07.917 kernel[warning][100.063000] wlan: SCAN COMPLETED: scanned AP count=2
+    2026-07-23 08:50:08.900 kernel[alert][101.046000] wlan: mlan0 START SCAN
+    2026-07-23 08:50:10.500 kernel[warning][102.646000] wlan: SCAN COMPLETED: scanned AP count=9
+    2026-07-23 08:50:09.040 kernel[alert][101.200000] bridge: wlan IPv4 updated = 192.168.0.21
+    """
+
+    def test_in_progress_scan_is_not_treated_as_previous(self, tmp_path):
+        st = parse_station_logs({
+            "wpa.log": _write(tmp_path, "wpa.log", WPA_ONE_ROAM),
+            "kern.log": _write(tmp_path, "kern.log", self.KERN),
+        }, name="1호기")
+        assert len(st.scans) == 2
+
+        class F:
+            def __init__(self, ta, ip_src):
+                self.ta, self.ip_src = ta, ip_src
+
+        roam_epoch = st.roams[0].cmd_epoch
+        frames = [F("00:50:43:18:fe:01", "192.168.0.21")] * 5
+        seqs = [{"sta": "00:50:43:18:fe:01", "auth_epoch": roam_epoch + 0.05,
+                 "assoc_epoch": roam_epoch + 0.06, "total_roam_ms": 25.0}]
+        binds = bind_stations([st], frames, {"00:50:43:18:fe:01": [roam_epoch + 0.05]})
+        assert attach_station_to_sequences(seqs, st, binds[0]) == 1
+
+        # 완료 기준이면 A(63ms). 시작 기준이면 아직 진행 중인 B(1,600ms)가 잡힌다.
+        assert round(seqs[0]["sta_log"]["scan_ms"]) == 63

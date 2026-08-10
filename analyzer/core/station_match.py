@@ -249,8 +249,12 @@ def attach_station_to_sequences(
     order = sorted(range(len(roams)), key=lambda i: roam_t[i])
     roam_t_sorted = [roam_t[i] for i in order]
 
-    scans = sorted(station.scans, key=lambda s: s.start_epoch)
-    scan_t = [s.start_epoch + binding.offset_sec for s in scans]
+    # **완료** 시각으로 정렬·탐색한다. 시작 시각으로 찾으면 ROAM 명령 시점에 아직
+    # 진행 중이던 스캔이 "직전 스캔"으로 잡혀, 명령 이후 구간까지 포함한 duration이
+    # 붙는다(과대계상). 겹치는 스캔이 있을 수 있어 시작 순서와 완료 순서가 다르므로
+    # 정렬 키도 완료 시각이어야 한다.
+    scans = sorted(station.scans, key=lambda s: s.done_epoch)
+    scan_t = [s.done_epoch + binding.offset_sec for s in scans]
 
     decisions = sorted(station.decisions, key=lambda d: d.epoch)
     dec_t = [d.epoch + binding.offset_sec for d in decisions]

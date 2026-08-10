@@ -121,7 +121,14 @@ def _analysis_card(result_path: Path) -> dict:
             }
         except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             pass   # 손상된 사이드카는 아래 본 파일 파싱으로 복구
-    full = json.loads(result_path.read_text(encoding="utf-8"))
+    try:
+        full = json.loads(result_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError, MemoryError):
+        # 호출부(index)도 앞의 세 가지는 잡지만 MemoryError는 통과시킨다 —
+        # 결과 하나가 33MB라 여유가 빠듯한 호스트에서 홈 화면 전체가 죽을 수 있다.
+        # 카드 하나를 물음표로 두는 편이 목록을 통째로 잃는 것보다 낫다.
+        return {"id": analysis_id, "pcap_name": "?",
+                "frame_count": 0, "analyzed_at": "?"}
     write_analysis_meta(analysis_id, full)
     return {
         "id": full.get("id", analysis_id),

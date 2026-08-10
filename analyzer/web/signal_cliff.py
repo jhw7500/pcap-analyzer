@@ -1,4 +1,5 @@
 """RSSI 급변(cliff) 탐지."""
+from bisect import bisect_right
 from typing import Any, Dict, Optional
 
 
@@ -76,13 +77,19 @@ def analyze_signal_cliffs(signal_data: Dict[str, Any]) -> Dict[str, Any]:
         # 절벽이 중복 계상된다. 그리고 이미 보고된 절벽 구간 **안**에 들어가는
         # 버킷은 건너뛴다 — 하강 도중의 버킷은 당연히 max-min이 크므로, 그대로
         # 세면 하나의 절벽을 구간 길이만큼 반복해서 세게 된다.
-        covered = [(c["epoch"], c["epoch"] + c["duration_sec"]) for c in cliffs]
+        # 위 루프는 절벽을 찾으면 끝 버킷까지 건너뛰므로(`i = j`) 보고된 구간들은
+        # 서로 겹치지 않고 시작 시각 오름차순이다 — 후보 하나만 bisect로 짚으면
+        # 포함 여부가 확정된다. 전수 비교(any)로 두면 버킷 7,200개 × 절벽 수천 건이라
+        # 2시간 캡처에서만 수천만 번 비교가 된다.
+        starts = [c["epoch"] for c in cliffs]
+        ends = [c["epoch"] + c["duration_sec"] for c in cliffs]
         for point in timeline:
             hi, lo = _drop_from(point), _drop_to(point)
             if hi is None or lo is None or hi - lo < 10:
                 continue
             ep = point["epoch"]
-            if any(start <= ep <= end for start, end in covered):
+            idx = bisect_right(starts, ep) - 1
+            if idx >= 0 and ends[idx] >= ep:
                 continue
             cliffs.append({
                 "epoch": ep,

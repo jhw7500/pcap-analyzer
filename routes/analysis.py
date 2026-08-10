@@ -72,6 +72,11 @@ def _read_result_cached(path) -> Optional[dict[str, Any]]:
         parsed = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError, OSError):
         return None
+    if parsed is None:
+        # 파일 내용이 리터럴 `null`인 경우. 캐시에 넣으면 `get(key)`가 주는 None을
+        # "키 없음"과 구분할 수 없어 매 요청이 재파싱을 탄다. 어차피 호출부가
+        # ANALYSIS_CORRUPTED로 처리할 값이라 캐시하지 않는다.
+        return None
     with _result_cache_lock:
         _result_cache[key] = parsed
         _result_cache.move_to_end(key)
