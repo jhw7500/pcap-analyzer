@@ -132,6 +132,21 @@ class TestRealMerge:
 @patch("routes.upload.config.detect_tshark", return_value="tshark")
 @patch("routes.upload.run_analysis")
 class TestUploadRoute:
+    @pytest.fixture(autouse=True)
+    def _stub_mergecap(self):
+        """mergecap **감지 결과**를 고정한다 — 이 클래스는 병합 오케스트레이션
+        (조각을 몇 번 어떤 인자로 합치는지, 실패를 어떻게 표면화하는지)을 보므로
+        호스트에 mergecap이 깔려 있는지에 결과가 달라지면 안 된다. 실제 병합은
+        각 테스트가 `merge_split_captures`를 patch해 대신한다.
+
+        고정하지 않으면 mergecap 없는 러너(CI)에서 라우트가 병합 호출 **전에**
+        MERGECAP_MISSING으로 끊겨, patch한 가짜 병합에 도달하지 못한다.
+        감지 부재 자체를 검증하는 테스트는 안쪽에서 다시 patch해 이 stub을 덮는다.
+        """
+        with patch("routes.upload.config.detect_mergecap",
+                   return_value="/usr/bin/mergecap"):
+            yield
+
     def test_single_file_does_not_invoke_mergecap(self, mock_run, _tshark,
                                                   tmp_path, monkeypatch):
         """조각 1개면 기존 경로 그대로 — mergecap을 부르지 않는다."""
