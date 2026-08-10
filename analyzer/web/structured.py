@@ -15,6 +15,8 @@ from ..core.ping_matching import (
     PING_MATCH_WINDOW_SEC,
     build_ping_matches,
     find_time_streaks,
+    ping_losses as _ping_losses,
+    ping_pairs as _ping_pairs,
 )
 from ..core.thresholds import (
     LOSS_DANGER_PCT,
@@ -291,6 +293,69 @@ def _retry_per_sec(device_frames: List[Frame]) -> List[Dict[str, Any]]:
     ]
 
 
+def _bucket_rssi_timeline(tx_frames: List[Frame]) -> List[Dict[str, Any]]:
+    """RSSI 샘플을 **1초 버킷**으로 집계한 시계열.
+
+    프레임당 1항목(원샘플)으로 내보내면 2시간·143만 프레임 캡처에서 이 필드
+    하나가 결과 JSON의 53MB를 차지했다. 프론트(timeline.js)는 어차피 장치당
+    RSSI_SCATTER_MAX(800)점으로 솎아 그리므로 그 전송량의 대부분이 버려졌다.
+
+    항목 스키마:
+        {"epoch": 초(int), "rssi": 버킷 평균(소수1), "rssi_min", "rssi_max",
+         "n": 샘플 수, "mcs": 버킷 최빈 MCS}
+
+    `epoch`/`rssi` 키와 그 의미("그 시점의 대표 RSSI")를 구버전 원샘플 항목과
+    똑같이 유지하는 게 핵심이다 — timeline.js, timeline_series.project_rssi_series,
+    signal_cliff, evidence의 축 계산이 구버전 결과와 신버전 결과를 분기 없이
+    그대로 읽는다 (메모리 serialized-result-backward-compat).
+
+    `rssi_min`/`rssi_max`를 함께 남기는 이유는 signal_cliff가 '5초 내 10dB 하락'을
+    판정할 때 버킷 평균만 보면 순간 급락을 놓치기 때문이다(그쪽 docstring 참조).
+
+    손상 epoch(None/NaN/Inf)은 제외한다 — int() 예외 방어
+    (_structured_per_second와 동일 원칙).
+    """
+    buckets: Dict[int, Dict[str, Any]] = {}
+    for f in tx_frames:
+        epoch = f.epoch
+        if epoch is None or not math.isfinite(epoch):
+            continue
+        rssi = f.rssi_first
+        if rssi is None:
+            continue
+        sec = int(epoch)
+        b = buckets.get(sec)
+        if b is None:
+            b = buckets[sec] = {
+                "sum": 0, "n": 0, "min": rssi, "max": rssi, "mcs": Counter(),
+            }
+        b["sum"] += rssi
+        b["n"] += 1
+        if rssi < b["min"]:
+            b["min"] = rssi
+        if rssi > b["max"]:
+            b["max"] = rssi
+        m = f.mcs_int
+        if m is not None:
+            b["mcs"][m] += 1
+
+    timeline: List[Dict[str, Any]] = []
+    for sec in sorted(buckets):
+        b = buckets[sec]
+        top_mcs = b["mcs"].most_common(1)
+        timeline.append(
+            {
+                "epoch": sec,
+                "rssi": round(b["sum"] / b["n"], 1),
+                "rssi_min": b["min"],
+                "rssi_max": b["max"],
+                "n": b["n"],
+                "mcs": top_mcs[0][0] if top_mcs else None,
+            }
+        )
+    return timeline
+
+
 def _structured_signal(
     frames: List[Frame], roles: Dict[str, Dict[str, Any]], index
 ) -> Dict[str, Any]:
@@ -313,10 +378,7 @@ def _structured_signal(
             device_frames = [f for f in frames if f.ta == mac]
         tx_frames = [f for f in device_frames if f.rssi_first is not None]
 
-        rssi_timeline = [
-            {"epoch": f.epoch, "rssi": f.rssi_first, "mcs": f.mcs_int}
-            for f in tx_frames
-        ]
+        rssi_timeline = _bucket_rssi_timeline(tx_frames)
         rssi_values = [f.rssi_first for f in tx_frames if f.rssi_first is not None]
         entry = {
             "mac": mac,
@@ -479,6 +541,16 @@ def _structured_ping(
     ping = build_ping_matches(frames, roles, PING_MATCH_WINDOW_SEC)
     ping["timeline"] = _ping_per_sec(ping.get("full_list", []))
     ping["loss_streaks"] = _ping_loss_streaks(ping.get("full_list", []))
+    # pairs/losses는 full_list와 **같은 entry 객체**를 담은 부분수열이라
+    # (build_ping_matches의 lockstep 불변식) 파이썬 메모리에선 참조 공유로
+    # 공짜지만, JSON에서는 full_list가 통째로 두 번 더 직렬화된다 — 2시간
+    # 캡처 실측에서 structured.ping 32.8MB의 절반이 이 중복이었다. 결과에서
+    # 빼고 소비자는 ping_pairs()/ping_losses()로 파생한다(status 필터가 곧
+    # 원래 부분수열이라 lockstep은 구성상 성립). 구버전 result에는 두 키가
+    # 남아 있고 헬퍼가 그때는 저장된 값을 그대로 쓴다 —
+    # serialized-result-backward-compat.
+    ping.pop("pairs", None)
+    ping.pop("losses", None)
     return ping
 
 
@@ -681,9 +753,8 @@ def _device_entry_stats(dev_frames, is_tx, mac: str, role: str) -> Dict[str, Any
     retry_peaks: list = []
     # 손상 epoch(None/NaN/Inf) 프레임은 버킷 계산에서 제외 — int() 예외와 비교
     # TypeError 방어. span이 상한을 넘으면(먼 미래 epoch 등) 버킷 통계 자체를
-    # 생략한다(정직한 공백) — range(...,10) × 버킷별 전체 재스캔이 사실상 무한
-    # 루프가 되는 경로 차단 (_SNIFFER_FILL_MAX_SPAN_SEC 동일 원칙, PR #27 리뷰.
-    # O(span×frames) 구조 개선 자체는 백로그 ⑥에 남음).
+    # 생략한다(정직한 공백) — 버킷 수 자체가 폭발하는 경로 차단
+    # (_SNIFFER_FILL_MAX_SPAN_SEC 동일 원칙, PR #27 리뷰).
     finite_frames = [
         f for f in dev_frames if f.epoch is not None and math.isfinite(f.epoch)
     ]
@@ -695,40 +766,78 @@ def _device_entry_stats(dev_frames, is_tx, mac: str, role: str) -> Dict[str, Any
         start_epoch = int(_lo)
         end_epoch = int(_hi)
         bucket_size = 10  # 10초 구간
-        for bucket_start in range(start_epoch, end_epoch + 1, bucket_size):
-            bucket_end = bucket_start + bucket_size
-            bucket_frames = [
-                f for f in finite_frames if bucket_start <= f.epoch < bucket_end
-            ]
-            total = len(bucket_frames)
-            retries = sum(1 for f in bucket_frames if f.retry)
+        bucket_count = (end_epoch - start_epoch) // bucket_size + 1
+        # 버킷별 집계를 **단일 패스**로 채운다 (백로그 ⑥). 이전 구현은 버킷마다
+        # finite_frames를 통째로 재스캔해 O(span/10 × frames)였다 — 2시간
+        # (719버킷)·143만 프레임 실측에서 장치별+전체 통계에만 315초가 들었다.
+        # 프레임마다 자기 버킷 인덱스를 한 번 계산해 누적하면 O(frames + 버킷수)로
+        # 같은 결과를 낸다. 누적 순서가 프레임 순서 그대로라 Counter 삽입 순서도
+        # 보존되어 most_common(5)의 동점 순서까지 이전과 동일하다.
+        agg: List[Optional[Dict[str, Any]]] = [None] * bucket_count
+        for f in finite_frames:
+            bi = int((f.epoch - start_epoch) // bucket_size)
+            if bi < 0 or bi >= bucket_count:
+                # 구 루프의 `bucket_start <= f.epoch < bucket_end`도 범위 밖
+                # 프레임(음수 epoch 등 int() 절삭 경계)은 어느 버킷에도 넣지
+                # 않았다 — 그 동작을 그대로 유지한다.
+                continue
+            b = agg[bi]
+            if b is None:
+                b = agg[bi] = {
+                    "total": 0, "retry": 0, "tx_total": 0,
+                    "phy_mcs": Counter(), "legacy": Counter(),
+                    "phy_mode": Counter(), "mcs_sum": 0, "mcs_n": 0,
+                }
+            b["total"] += 1
+            if f.retry:
+                b["retry"] += 1
             # bucket별 MCS / PHY 통계 (송신 프레임 기준)
-            bucket_tx = [f for f in bucket_frames if is_tx(f)]
-            phy_mcs_counts: "Counter[str]" = Counter()
-            legacy_counts: "Counter[str]" = Counter()
-            phy_mode_dist: "Counter[str]" = Counter()
-            mcs_sum, mcs_n = 0, 0
-            for f in bucket_tx:
-                phy = getattr(f, "mcs_phy", "") or ""
-                if phy in ("HT", "VHT", "HE", "EHT"):
-                    m = f.mcs_int
-                    if m is not None:
-                        phy_mcs_counts[f"{phy} MCS{m}"] += 1
-                        phy_mode_dist[phy] += 1
-                        mcs_sum += m
-                        mcs_n += 1
-                else:
-                    rate = (getattr(f, "data_rate", "") or "").split(",")[0].strip()
-                    if rate:
-                        legacy_counts[f"Legacy {rate}Mbps"] += 1
-                        phy_mode_dist["Legacy"] += 1
-            combined = phy_mcs_counts + legacy_counts
+            if not is_tx(f):
+                continue
+            b["tx_total"] += 1
+            phy = getattr(f, "mcs_phy", "") or ""
+            if phy in ("HT", "VHT", "HE", "EHT"):
+                m = f.mcs_int
+                if m is not None:
+                    b["phy_mcs"][f"{phy} MCS{m}"] += 1
+                    b["phy_mode"][phy] += 1
+                    b["mcs_sum"] += m
+                    b["mcs_n"] += 1
+            else:
+                rate = (getattr(f, "data_rate", "") or "").split(",")[0].strip()
+                if rate:
+                    b["legacy"][f"Legacy {rate}Mbps"] += 1
+                    b["phy_mode"]["Legacy"] += 1
+
+        for bi in range(bucket_count):
+            bucket_start = start_epoch + bi * bucket_size
+            b = agg[bi]
+            if b is None:
+                # 관측 프레임이 없는 구간 — 구 루프의 빈 버킷 출력과 동일.
+                per_bucket.append(
+                    {
+                        "epoch": bucket_start,
+                        "total": 0,
+                        "retry": 0,
+                        "retry_pct": 0,
+                        "mcs_breakdown": "",
+                        "avg_mcs": None,
+                        "legacy_pct": 0,
+                        "tx_total": 0,
+                        "phy_mode_dist": {},
+                    }
+                )
+                continue
+            total = b["total"]
+            retries = b["retry"]
+            combined = b["phy_mcs"] + b["legacy"]
             mcs_breakdown = ", ".join(
                 f"{k}×{v:,}" for k, v in combined.most_common(5)
             )
-            avg_mcs = round(mcs_sum / mcs_n, 1) if mcs_n else None
-            tx_total = len(bucket_tx)
-            legacy_n = sum(legacy_counts.values())
+            mcs_n = b["mcs_n"]
+            avg_mcs = round(b["mcs_sum"] / mcs_n, 1) if mcs_n else None
+            tx_total = b["tx_total"]
+            legacy_n = sum(b["legacy"].values())
             legacy_pct = round(legacy_n * 100 / tx_total, 1) if tx_total else 0
             per_bucket.append(
                 {
@@ -740,7 +849,7 @@ def _device_entry_stats(dev_frames, is_tx, mac: str, role: str) -> Dict[str, Any
                     "avg_mcs": avg_mcs,
                     "legacy_pct": legacy_pct,
                     "tx_total": tx_total,
-                    "phy_mode_dist": dict(phy_mode_dist),
+                    "phy_mode_dist": dict(b["phy_mode"]),
                 }
             )
 
@@ -1178,7 +1287,8 @@ def _structured_diagnosis(
     anomalies = structured.get("anomaly_frames", {})
 
     frames = frames or []
-    ping_losses = ping.get("losses", [])
+    # 결과 JSON에는 losses 키가 없다(full_list 중복이라 제거) — 헬퍼가 파생한다.
+    ping_loss_items = _ping_losses(ping)
 
     total_frames = ov.get("total_frames", 0)
     retry_pct = ov.get("retry_pct", 0)
@@ -1193,7 +1303,7 @@ def _structured_diagnosis(
     # 구버전 직렬화 result에는 req_total_raw 류 키가 없을 수 있어 pairs/losses
     # 존재 여부를 함께 본다.
     ping_available = bool(
-        ping.get("pairs") or ping_losses
+        _ping_pairs(ping) or ping_loss_items
         or ping_stats.get("req_total_raw") or ping_stats.get("reply_total_raw")
     )
 
@@ -1436,7 +1546,7 @@ def _structured_diagnosis(
             refs, window, signal_type="legacy_heavy",
         )
     if loss_pct > LOSS_DANGER_PCT:
-        refs, window = ev.ping_loss_evidence(ping_losses)
+        refs, window = ev.ping_loss_evidence(ping_loss_items)
         _add_net_issue(
             {
                 "severity": "high",
@@ -1480,7 +1590,7 @@ def _structured_diagnosis(
                 if isinstance(v, (int, float)):
                     dz_epochs.append(float(v))
         dz_window = ev._window(dz_epochs)
-        dz_refs, _ = ev.ping_loss_evidence(ping_losses)
+        dz_refs, _ = ev.ping_loss_evidence(ping_loss_items)
         if not dz_refs:
             # ping loss 근거가 없으면 로밍을 fallback으로 쓰되, refs와 window를
             # 함께 받아 일치시킨다. 로밍 프레임의 epoch은 지연 구간 window 밖일 수

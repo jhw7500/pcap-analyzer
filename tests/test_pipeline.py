@@ -13,6 +13,7 @@ from analyzer.pipeline import (
     _structured_diagnosis,
 )
 from analyzer.casefile_builder import build_casefile
+from analyzer.core.ping_matching import ping_losses, ping_pairs
 
 
 def _build(frames, roles=None):
@@ -81,8 +82,8 @@ class TestStructuredPing:
             ),
         ]
         result = _structured_ping(frames, SAMPLE_ROLES)
-        assert len(result["pairs"]) == 1
-        assert len(result["losses"]) == 0
+        assert len(ping_pairs(result)) == 1
+        assert len(ping_losses(result)) == 0
         assert result["stats"]["count"] == 1
 
     def test_unmeasurable_when_unidirectional(self):
@@ -101,8 +102,8 @@ class TestStructuredPing:
             ),
         ]
         result = _structured_ping(frames, SAMPLE_ROLES)
-        assert len(result["losses"]) == 0
-        assert len(result["pairs"]) == 0
+        assert len(ping_losses(result)) == 0
+        assert len(ping_pairs(result)) == 0
         assert result["stats"]["unmeasurable_count"] == 1
         assert result["stats"]["capture_mode"] == "unidirectional"
 
@@ -123,8 +124,8 @@ class TestStructuredPing:
             # seq=1에 대한 reply는 없음 → 확정 loss
         ]
         result = _structured_ping(frames, SAMPLE_ROLES)
-        assert len(result["losses"]) == 1
-        assert len(result["pairs"]) == 0
+        assert len(ping_losses(result)) == 1
+        assert len(ping_pairs(result)) == 0
         assert result["stats"]["capture_mode"] == "bidirectional"
 
     def test_bidi_reply_missing_is_confirmed_loss(self):
@@ -140,9 +141,9 @@ class TestStructuredPing:
         result = _structured_ping(frames, SAMPLE_ROLES)
         assert result["stats"]["reply_missing"] == 1  # seq=1
         assert result["stats"]["verified_cycle"] == 1  # seq=2
-        assert len(result["pairs"]) == 1  # seq=2 매칭됨
+        assert len(ping_pairs(result)) == 1  # seq=2 매칭됨
         # losses 에는 seq=1의 req entry가 들어가야 함
-        assert any(L["seq"] == "1" for L in result["losses"])
+        assert any(L["seq"] == "1" for L in ping_losses(result))
 
     def test_bidi_request_missing_is_capture_issue_not_loss(self):
         # reply(seq=1)만 보이고 같은 seq의 req가 없음 → 캡처 누락 (무선 OK)
@@ -172,9 +173,9 @@ class TestStructuredPing:
         ]
         result = _structured_ping(frames, SAMPLE_ROLES)
         assert result["stats"]["seq_gap_losses"] == 1
-        assert len(result["losses"]) == 1
-        assert result["losses"][0]["seq"] == "2"
-        assert result["losses"][0]["status"] == "loss_gap"
+        assert len(ping_losses(result)) == 1
+        assert ping_losses(result)[0]["seq"] == "2"
+        assert ping_losses(result)[0]["status"] == "loss_gap"
 
     def test_empty(self):
         result = _structured_ping([], SAMPLE_ROLES)
@@ -226,10 +227,10 @@ class TestStructuredPing:
             ),
         ]
         result = _structured_ping(frames, SAMPLE_ROLES)
-        assert len(result["pairs"]) == 2
-        assert len(result["losses"]) == 0
+        assert len(ping_pairs(result)) == 2
+        assert len(ping_losses(result)) == 0
         # RTT 차이 확인 (5ms, 10ms)
-        rtts = sorted(p["rtt_ms"] for p in result["pairs"])
+        rtts = sorted(p["rtt_ms"] for p in ping_pairs(result))
         assert rtts[0] == 5.0
         assert rtts[1] == 10.0
 
@@ -251,8 +252,8 @@ class TestStructuredPing:
             ),
         ]
         result = _structured_ping(frames, SAMPLE_ROLES)
-        assert len(result["pairs"]) == 0  # RTT 매칭은 윈도우 초과로 실패
-        assert len(result["losses"]) == 0  # 무선 손실 아님 (양쪽 다 관측됨)
+        assert len(ping_pairs(result)) == 0  # RTT 매칭은 윈도우 초과로 실패
+        assert len(ping_losses(result)) == 0  # 무선 손실 아님 (양쪽 다 관측됨)
         assert result["stats"]["verified_cycle"] == 1
         assert result["stats"]["reply_missing"] == 0
         assert result["stats"]["capture_mode"] == "bidirectional"
@@ -292,8 +293,8 @@ class TestStructuredPing:
             ),
         ]
         result = _structured_ping(frames, SAMPLE_ROLES)
-        assert len(result["pairs"]) == 1
-        assert result["pairs"][0]["reply_num"] == 2  # 첫 reply만
+        assert len(ping_pairs(result)) == 1
+        assert ping_pairs(result)[0]["reply_num"] == 2  # 첫 reply만
 
     def test_reply_without_request_ignored(self):
         # reply만 있고 대응 req 없음
@@ -310,8 +311,8 @@ class TestStructuredPing:
             ),
         ]
         result = _structured_ping(frames, SAMPLE_ROLES)
-        assert len(result["pairs"]) == 0
-        assert len(result["losses"]) == 0
+        assert len(ping_pairs(result)) == 0
+        assert len(ping_losses(result)) == 0
 
     def test_no_seq_uses_fifo_fallback(self):
         frames = [
@@ -337,8 +338,8 @@ class TestStructuredPing:
             ),
         ]
         result = _structured_ping(frames, SAMPLE_ROLES)
-        assert len(result["pairs"]) == 1
-        assert len(result["losses"]) == 0
+        assert len(ping_pairs(result)) == 1
+        assert len(ping_losses(result)) == 0
 
 
 class TestStructuredRoaming:
@@ -1098,8 +1099,8 @@ class TestCasefileBuilder:
         assert casefile["generator_version"] == "casefile-v1"
         assert casefile["incident_id"].startswith("test-analysis:")
         assert casefile["ping"]["full_list"] == structured_ping["full_list"]
-        assert casefile["ping"]["pairs"] == structured_ping["pairs"]
-        assert casefile["ping"]["losses"] == structured_ping["losses"]
+        assert casefile["ping"]["pairs"] == ping_pairs(structured_ping)
+        assert casefile["ping"]["losses"] == ping_losses(structured_ping)
 
     def test_casefile_requires_timeout_loss(self):
         frames = [

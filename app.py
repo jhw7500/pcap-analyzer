@@ -3,6 +3,7 @@ import os
 
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -14,6 +15,13 @@ from routes.settings import router as settings_router
 from routes.ai_review import router as ai_review_router
 
 app = FastAPI(title="WLAN Pcap Analyzer")
+
+# 분석 페이지는 structured 전체를 HTML에 인라인해 2시간 캡처에서 34MB 단일
+# 문서가 된다. 초당 시계열·ping 전수목록 같은 반복 구조라 압축률이 매우 높아
+# (실측 gzip -6 기준 1/10 수준) 원격 접속에서 전송량이 결정적으로 줄어든다.
+# compresslevel은 starlette 기본값 9 대신 6 — 34MB를 매 요청 압축하는 비용이
+# 응답 경로에 그대로 실리므로 비율 대비 CPU가 유리한 지점을 택했다.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")

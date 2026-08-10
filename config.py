@@ -11,7 +11,13 @@ DATA_DIR = Path(__file__).parent / "data" / "analyses"
 
 # 업로드 크기 제한 (bytes) — max_upload_size()를 호출하는 게 권장
 # 환경변수 PCAP_MAX_UPLOAD_MB 또는 config.local.json의 'max_upload_mb' 키로 오버라이드 가능.
-DEFAULT_MAX_UPLOAD_SIZE = 200 * 1024 * 1024  # 200MB (기본)
+#
+# 기본 1GB: 실측 기준 2시간 무선 모니터 캡처가 311MB(143만 프레임, 200 fps)라
+# 구 기본값 200MB로는 2시간짜리를 업로드 단계에서 거부했다. 유선 미러 캡처는
+# 같은 2시간이 133MB로 훨씬 가볍다. 4시간대까지 여유를 두되 무한은 아니다 —
+# 업로드는 임시 파일로 디스크에 한 벌 쓰이고 다중 무선은 파일별로 이 상한이
+# 각각 적용되므로(최대 4개), 디스크 여유가 적은 호스트는 이 값을 낮춰 잡는다.
+DEFAULT_MAX_UPLOAD_SIZE = 1024 * 1024 * 1024  # 1GB (기본)
 MAX_UPLOAD_SIZE = DEFAULT_MAX_UPLOAD_SIZE  # 하위호환 (직접 참조 자제)
 
 
@@ -69,6 +75,34 @@ def detect_tshark() -> Optional[str]:
 def ensure_data_dir() -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     return DATA_DIR
+
+
+#: 결과 JSON 옆에 두는 홈 화면용 경량 메타 사이드카의 접미사.
+#: 본 결과(`{id}.json`)와 같은 디렉터리에 살지만 `*.json` 목록에서는 반드시
+#: 걸러야 한다 — 그러지 않으면 사이드카 자체가 분석 결과로 잡힌다.
+ANALYSIS_META_SUFFIX = ".meta.json"
+
+
+def analysis_meta_path(analysis_id: str) -> Path:
+    """분석 id에 대한 메타 사이드카 경로.
+
+    홈 화면은 결과 목록에 id/pcap_name/frame_count/analyzed_at 4개 필드만 쓰는데,
+    이걸 위해 결과 JSON 전체(2시간 캡처는 33MB)를 파싱하면 저장 건수에 비례해
+    느려진다(실측 45건 847MB에서 8.6초). 저장 시점에 이 사이드카를 함께 써두고
+    홈은 그것만 읽는다.
+
+    경로 검증은 `safe_analysis_path`와 같은 규칙을 재사용한다 — 그 함수가 None을
+    주는 id(경로 탈출 등)에는 사이드카 경로도 만들지 않는다.
+    """
+    base = safe_analysis_path(analysis_id)
+    if base is None:
+        raise ValueError(f"잘못된 분석 id: {analysis_id!r}")
+    return base.with_suffix("").with_name(base.stem + ANALYSIS_META_SUFFIX)
+
+
+def is_analysis_meta(path: Path) -> bool:
+    """결과 목록 글롭에서 사이드카를 걸러내기 위한 판별."""
+    return path.name.endswith(ANALYSIS_META_SUFFIX)
 
 
 def max_upload_size() -> int:

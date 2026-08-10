@@ -25,7 +25,12 @@ class TestConfig:
         assert result is None or isinstance(result, str)
 
     def test_max_upload_size(self):
-        assert config.MAX_UPLOAD_SIZE == 200 * 1024 * 1024
+        # 2시간 무선 캡처 실측이 311MB라 구 기본값(200MB)으로는 업로드가 거부됐다.
+        assert config.MAX_UPLOAD_SIZE == 1024 * 1024 * 1024
+
+    def test_max_upload_size_accepts_two_hour_wireless_capture(self):
+        # 실측 회귀 고정: 2시간 무선 모니터 캡처 311MB(143만 프레임)가 통과해야 한다.
+        assert config.max_upload_size() >= 311 * 1024 * 1024
 
 
 class TestMaskSecret:

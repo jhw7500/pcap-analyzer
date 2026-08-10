@@ -120,16 +120,47 @@ class TestSignalCliffs:
         assert len(cliffs) >= 1
         assert cliffs[0]["drop_db"] >= 10
 
-    def test_moving_average_generated(self):
+    def test_moving_average_no_longer_emitted(self):
+        # moving_avg는 소비자가 0건인데 RSSI 샘플당 dict를 만들어 대용량 캡처
+        # 결과 JSON을 크게 부풀렸다 — 제거됐다.
         timeline = [{"epoch": 1000 + i * 0.1, "rssi": -55 + (i % 3), "mcs": 7} for i in range(25)]
         result = analyze_signal_cliffs({"stas": {"STA1": {"rssi_timeline": timeline}}})
-        assert len(result["STA1"]["moving_avg"]) > 0
+        assert "moving_avg" not in result["STA1"]
 
     def test_few_points_skipped(self):
         timeline = [{"epoch": 1000 + i, "rssi": -50, "mcs": 7} for i in range(5)]
         result = analyze_signal_cliffs({"stas": {"STA1": {"rssi_timeline": timeline}}})
         assert result["STA1"]["cliffs"] == []
-        assert result["STA1"]["moving_avg"] == []
+        assert "moving_avg" not in result["STA1"]
+
+    def test_bucketed_timeline_keeps_cliff_sensitivity(self):
+        # 1초 버킷 집계 시계열(structured._bucket_rssi_timeline 스키마)에서
+        # 버킷 평균은 완만해도 버킷 내 최저(rssi_min)로 급락이 잡혀야 한다 —
+        # 평균끼리만 비교하면 이 절벽은 통째로 사라진다(과소 탐지).
+        timeline = [
+            {"epoch": 1000 + i, "rssi": -50.0, "rssi_min": -51, "rssi_max": -49, "n": 100}
+            for i in range(12)
+        ]
+        # 다음 초에 순간 -70까지 떨어졌지만 그 초의 평균은 -52에 불과하다.
+        timeline.append(
+            {"epoch": 1012, "rssi": -52.0, "rssi_min": -70, "rssi_max": -50, "n": 100}
+        )
+        result = analyze_signal_cliffs({"stas": {"STA1": {"rssi_timeline": timeline}}})
+        cliffs = result["STA1"]["cliffs"]
+        assert len(cliffs) >= 1
+        assert cliffs[0]["rssi_after"] == -70
+        assert cliffs[0]["drop_db"] >= 10
+
+    def test_legacy_raw_sample_timeline_still_supported(self):
+        # 구버전 결과(rssi_min/rssi_max 없는 프레임당 원샘플)도 분기 없이 그대로
+        # 판정된다 — serialized-result-backward-compat.
+        timeline = [{"epoch": 1000 + i * 0.1, "rssi": -50, "mcs": 7} for i in range(15)]
+        timeline += [{"epoch": 1001.5 + i * 0.1, "rssi": -70, "mcs": 3} for i in range(10)]
+        result = analyze_signal_cliffs({"stas": {"STA1": {"rssi_timeline": timeline}}})
+        cliffs = result["STA1"]["cliffs"]
+        assert len(cliffs) >= 1
+        assert cliffs[0]["rssi_before"] == -50
+        assert cliffs[0]["rssi_after"] == -70
 
 
 class TestMcsHotspotEvidence:

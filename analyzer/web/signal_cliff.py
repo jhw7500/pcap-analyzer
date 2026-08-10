@@ -1,36 +1,55 @@
-"""RSSI 급변(cliff) 탐지 + 이동 평균."""
-from typing import Any, Dict
+"""RSSI 급변(cliff) 탐지."""
+from typing import Any, Dict, Optional
+
+
+def _drop_from(point: Dict[str, Any]) -> Optional[float]:
+    """cliff 판정의 '하락 전' 대표값 — 버킷 최대값(없으면 대표 rssi).
+
+    rssi_timeline은 1초 버킷 집계다(`structured._bucket_rssi_timeline`). 버킷
+    평균끼리 비교하면 1초 안에서 일어난 급락이 평균에 묻혀 사라진다. 버킷
+    최대 → 이후 버킷 최소를 비교해야 원샘플 시계열에서 '5초 내 임의의 두 샘플
+    간 10dB 하락'을 잡던 감도를 잃지 않는다(과소 탐지 = 실제 신호 절벽을
+    놓치는 것이므로 과다 탐지보다 위험하다).
+
+    구버전 결과(프레임당 원샘플)에는 rssi_max가 없어 rssi로 폴백한다 — 그 경우
+    값 자체가 원샘플이라 이전과 완전히 동일하게 판정된다.
+    """
+    value = point.get("rssi_max")
+    return point.get("rssi") if value is None else value
+
+
+def _drop_to(point: Dict[str, Any]) -> Optional[float]:
+    """cliff 판정의 '하락 후' 대표값 — 버킷 최소값(없으면 대표 rssi)."""
+    value = point.get("rssi_min")
+    return point.get("rssi") if value is None else value
 
 
 def analyze_signal_cliffs(signal_data: Dict[str, Any]) -> Dict[str, Any]:
-    """STA별 RSSI cliff 이벤트와 이동 평균을 계산한다."""
+    """STA별 RSSI cliff 이벤트를 계산한다.
+
+    이전에는 이동평균(`moving_avg`)도 함께 담았지만 프론트·리포트·AI 어디에서도
+    읽지 않으면서 RSSI 샘플당 dict를 하나씩 만들어, 2시간 캡처 결과 JSON에서만
+    26MB를 차지했다 — 소비자가 0건이라 제거했다(프론트 timeline.js는 이미 자체
+    구간 평균선을 만든다).
+    """
     result = {}
     for sta_name, sta_info in signal_data.get("stas", {}).items():
         timeline = sta_info.get("rssi_timeline", [])
         if len(timeline) < 10:
-            result[sta_name] = {"cliffs": [], "moving_avg": []}
+            result[sta_name] = {"cliffs": []}
             continue
-
-        # 이동 평균 (window=20)
-        window = 20
-        moving_avg = []
-        for i in range(len(timeline)):
-            start = max(0, i - window)
-            chunk = [p["rssi"] for p in timeline[start:i+1] if p.get("rssi") is not None]
-            if chunk:
-                moving_avg.append({"epoch": timeline[i]["epoch"], "rssi": sum(chunk) / len(chunk)})
 
         # Cliff 탐지: 5초 내 10dBm 이상 하락
         cliffs = []
         i = 0
         while i < len(timeline):
-            rssi_i = timeline[i].get("rssi")
+            rssi_i = _drop_from(timeline[i])
             if rssi_i is None:
                 i += 1
                 continue
             j = i + 1
             while j < len(timeline) and timeline[j]["epoch"] - timeline[i]["epoch"] <= 5.0:
-                rssi_j = timeline[j].get("rssi")
+                rssi_j = _drop_to(timeline[j])
                 if rssi_j is not None and rssi_i - rssi_j >= 10:
                     cliffs.append({
                         "epoch": timeline[i]["epoch"],
@@ -44,6 +63,6 @@ def analyze_signal_cliffs(signal_data: Dict[str, Any]) -> Dict[str, Any]:
                 j += 1
             i += 1
 
-        result[sta_name] = {"cliffs": cliffs, "moving_avg": moving_avg}
+        result[sta_name] = {"cliffs": cliffs}
 
     return result

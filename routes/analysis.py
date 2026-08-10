@@ -2,6 +2,7 @@
 
 import html
 import json
+from collections import OrderedDict
 from typing import Any, Optional, Tuple
 
 from fastapi import APIRouter, Request
@@ -30,14 +31,60 @@ router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 
 
+#: 파싱된 결과 캐시 — (경로, mtime_ns, size) → result dict. 2시간 캡처 결과는
+#: 33MB라 요청마다 json.loads가 0.3~0.8초씩 이벤트 루프를 잡는다. 분석 페이지
+#: 하나를 열면 페이지·report·casefile 등 같은 파일을 여러 번 읽으므로 소수만
+#: 캐시해도 체감이 크다.
+#:
+#: **계약: 캐시된 dict를 변형하지 말 것.** 같은 객체가 다음 요청에도 그대로
+#: 반환되므로 변형은 그 뒤 모든 응답을 오염시킨다. 현재 소비자(report,
+#: casefile, 템플릿)는 전부 읽기 전용이고, 파일을 다시 쓰는 경로
+#: (routes/ai_review.py)는 이 헬퍼를 쓰지 않고 자체 로드한다 — 그쪽이 파일을
+#: 갱신하면 mtime/size가 바뀌어 캐시 키가 자연히 무효화된다.
+_RESULT_CACHE_MAX = 2
+_result_cache: "OrderedDict[tuple, dict[str, Any]]" = OrderedDict()
+
+
+def _read_result_cached(path) -> Optional[dict[str, Any]]:
+    """경로의 결과 JSON을 파싱해 반환. mtime+size가 같으면 캐시를 재사용.
+
+    실패(손상/인코딩/IO)면 None — 호출부가 각자의 에러 코드로 변환한다.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    cached = _result_cache.get(key)
+    if cached is not None:
+        _result_cache.move_to_end(key)
+        return cached
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        return None
+    _result_cache[key] = parsed
+    _result_cache.move_to_end(key)
+    while len(_result_cache) > _RESULT_CACHE_MAX:
+        _result_cache.popitem(last=False)
+    return parsed
+
+
+def _invalidate_result_cache(path=None) -> None:
+    """캐시 비우기. path를 주면 그 경로 항목만, 없으면 전부."""
+    if path is None:
+        _result_cache.clear()
+        return
+    target = str(path)
+    for key in [k for k in _result_cache if k[0] == target]:
+        _result_cache.pop(key, None)
+
+
 def _load_result(analysis_id: str) -> Optional[dict[str, Any]]:
     path = config.safe_analysis_path(analysis_id)
     if path is None or not path.exists():
         return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-        return None
+    return _read_result_cached(path)
 
 
 def _load_result_checked(
@@ -52,12 +99,12 @@ def _load_result_checked(
         return None, JSONResponse(
             error_payload(ErrorCode.ANALYSIS_NOT_FOUND), status_code=404
         )
-    try:
-        return json.loads(path.read_text(encoding="utf-8")), None
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+    parsed = _read_result_cached(path)
+    if parsed is None:
         return None, JSONResponse(
             error_payload(ErrorCode.ANALYSIS_CORRUPTED), status_code=500
         )
+    return parsed, None
 
 
 def _safe_filename_id(analysis_id: str) -> str:
@@ -158,6 +205,9 @@ async def delete_analysis(analysis_id: str):
             error_payload(ErrorCode.ANALYSIS_NOT_FOUND), status_code=404
         )
     path.unlink()
+    # 결과 파일이 사라졌으니 파싱 캐시와 홈 화면용 메타 사이드카도 함께 정리한다.
+    _invalidate_result_cache(path)
+    config.analysis_meta_path(analysis_id).unlink(missing_ok=True)
     return JSONResponse({"status": "deleted"})
 
 

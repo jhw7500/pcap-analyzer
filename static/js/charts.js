@@ -830,10 +830,21 @@
     }
 
     /* ── Ping 분석 탭 ── */
+    /* 전수 목록·관찰 프레임 표의 페이지 크기(공용).
+       2시간 캡처는 전수 목록 41,667행 + 관찰 7,503행이라 한 번에 그리면 DOM이
+       60만 노드를 넘는다(실측) — 두 표 모두 이 크기로 나눠 그린다.
+       **선언 위치 주의**: 관찰 프레임 블록이 전수 목록 블록보다 앞에서
+       실행되므로 상수는 반드시 그보다 앞에 있어야 한다(const TDZ). */
+    const PING_PAGE_SIZE = 500;
     const ping = DATA.ping || {};
-    const pairs = ping.pairs || [];
-    const losses = ping.losses || [];
     const fullList = ping.full_list || [];
+    // pairs/losses는 full_list와 같은 entry를 담은 부분수열이라 결과 JSON에서
+    // 제거됐다(2시간 캡처에서 ping 32.8MB의 절반이 이 중복이었다 —
+    // analyzer/web/structured.py `_structured_ping`). 여기서 full_list를 status로
+    // 걸러 파생한다. 구버전 result에는 두 키가 남아 있으므로 있으면 그대로 쓴다.
+    const isLossStatus = s => s === 'loss' || s === 'loss_gap';
+    const pairs = ping.pairs || fullList.filter(p => p.status === 'matched');
+    const losses = ping.losses || fullList.filter(p => isLossStatus(p.status));
     const pingStatsData = ping.stats || {};
 
     // RTT 손실 X 클릭 시 전체 목록 행으로 점프하기 위한 인덱스 병행 보존.
@@ -1302,8 +1313,18 @@
             if (pingFlowSel && pingFlowSel.value !== '') { pingFlowSel.value = ''; needRender = true; }
             if (pingRetryChk && pingRetryChk.checked) { pingRetryChk.checked = false; needRender = true; }
         }
-        if (needRender) {
-            if (currentPingSource === 'wired') renderPingFullTableWired(); else renderPingFullTable();
+        if (needRender) renderCurrentPingTable();   // 필터 초기화분 먼저 반영
+        // 전수 목록은 페이지 단위로만 그려지므로(4만 행 DOM 방지) 대상 행이
+        // 현재 페이지 밖일 수 있다 — 그 행이 있는 페이지로 먼저 이동한다.
+        // pingRowsCache는 방금 렌더가 채운 "현재 필터 적용 행 목록"이고,
+        // 유선/무선이 각각 idx/fi 키로 원본 인덱스를 들고 있다.
+        const keyOf = currentPingSource === 'wired' ? (r => r.idx) : (r => r.fi);
+        const pos = pingRowsCache.findIndex(r => keyOf(r) === idx);
+        if (pos < 0) return;   // 현재 필터에서 사라진 행 — 무동작 (throw 금지)
+        const targetPage = Math.floor(pos / PING_PAGE_SIZE);
+        if (targetPage !== pingPage) {
+            pingPage = targetPage;
+            renderCurrentPingTable();
         }
         const row = document.querySelector(`#ping-full-table tbody tr[${attrName}="${idx}"]`);
         if (!row) return;   // 탐색 실패 시 무동작 (throw 금지)
@@ -1386,6 +1407,43 @@
         // 흐름 표시 정규화 — reply 프레임의 src/dst가 tshark multi-value(콤마 결합)로
         // 잡히면 첫 IP만 취해 흐름 라벨·옵션·필터를 하나로 합친다.
         const firstIp = ip => String(ip || '').split(',')[0].trim();
+        /* 전수 목록과 동일한 이유로 페이지 단위 렌더 — 2시간 캡처는 관찰
+           프레임만 7,503건이라 한 번에 그리면 그만큼 DOM이 늘어난다. */
+        const obsPager = document.getElementById('ping-obs-pager');
+        const obsPagePrev = document.getElementById('ping-obs-page-prev');
+        const obsPageNext = document.getElementById('ping-obs-page-next');
+        const obsPageLabel = document.getElementById('ping-obs-page-label');
+        const obsScroll = document.getElementById('ping-obs-scroll');
+        let obsPage = 0;
+        let obsRowsCache = [];
+
+        function obsPageCount() {
+            return Math.max(1, Math.ceil(obsRowsCache.length / PING_PAGE_SIZE));
+        }
+        function updateObsPager() {
+            if (!obsPager) return;
+            const total = obsRowsCache.length;
+            if (total <= PING_PAGE_SIZE) { obsPager.classList.add('hidden'); return; }
+            obsPager.classList.remove('hidden');
+            const from = obsPage * PING_PAGE_SIZE + 1;
+            const to = Math.min(total, (obsPage + 1) * PING_PAGE_SIZE);
+            if (obsPageLabel) {
+                obsPageLabel.textContent =
+                    `${from.toLocaleString()}–${to.toLocaleString()} (${obsPage + 1}/${obsPageCount()}쪽)`;
+            }
+            if (obsPagePrev) obsPagePrev.disabled = obsPage <= 0;
+            if (obsPageNext) obsPageNext.disabled = obsPage >= obsPageCount() - 1;
+        }
+        function moveObsPage(delta) {
+            const next = Math.min(Math.max(0, obsPage + delta), obsPageCount() - 1);
+            if (next === obsPage) return;
+            obsPage = next;
+            renderObsTable();
+            if (obsScroll) obsScroll.scrollTop = 0;
+        }
+        if (obsPagePrev) obsPagePrev.addEventListener('click', () => moveObsPage(-1));
+        if (obsPageNext) obsPageNext.addEventListener('click', () => moveObsPage(1));
+
         function renderObsTable() {
             if (!obsTable) return;
             const fDir = obsDirSel ? obsDirSel.value : '';      // ''=전체 | reply(응답) | request(요청)
@@ -1396,11 +1454,16 @@
                 return true;
             });
             if (obsFilterCount) obsFilterCount.textContent = `${rows.length.toLocaleString()} / ${observations.length.toLocaleString()}건`;
+            obsRowsCache = rows;
+            if (obsPage > obsPageCount() - 1) obsPage = obsPageCount() - 1;
+            updateObsPager();
             if (rows.length === 0) {
                 obsTable.innerHTML = '<tr><td colspan="9" class="text-gray-500 text-center py-6">조건에 맞는 항목이 없습니다.</td></tr>';
                 return;
             }
-            obsTable.innerHTML = rows.map((o, i) => {
+            const obsStart = obsPage * PING_PAGE_SIZE;
+            obsTable.innerHTML = rows.slice(obsStart, obsStart + PING_PAGE_SIZE).map((o, i0) => {
+                const i = obsStart + i0;   // 순번은 전체 기준 유지
                 const dirBadge = o.direction === 'request'
                     ? '<span class="bg-blue-900 text-blue-300 px-1.5 py-0.5 rounded text-xs">req</span>'
                     : '<span class="bg-purple-900 text-purple-300 px-1.5 py-0.5 rounded text-xs">reply</span>';
@@ -1423,7 +1486,7 @@
             obsFlowSel.insertAdjacentHTML('beforeend',
                 flows.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join(''));
         }
-        [obsDirSel, obsFlowSel].forEach(el => { if (el) el.addEventListener('change', renderObsTable); });
+        [obsDirSel, obsFlowSel].forEach(el => { if (el) el.addEventListener('change', () => { obsPage = 0; renderObsTable(); }); });
         renderObsTable();
     } else if (obsDetails) {
         obsDetails.style.display = 'none';
@@ -1435,6 +1498,58 @@
     const pingFlowSel = document.getElementById('ping-filter-flow');
     const pingRetryChk = document.getElementById('ping-filter-retry');
     const pingFullCount = document.getElementById('ping-full-count');
+    const pingPager = document.getElementById('ping-pager');
+    const pingPagePrev = document.getElementById('ping-page-prev');
+    const pingPageNext = document.getElementById('ping-page-next');
+    const pingPageLabel = document.getElementById('ping-page-label');
+    const pingScroll = document.getElementById('ping-full-scroll');
+
+    /* 전수 목록 페이지네이션.
+       2시간 캡처는 필터 없이 41,667행이라 한 번에 그리면 DOM 노드가 60만을
+       넘고(실측) 페이지 로드가 그만큼 느려진다. 화면에는 한 페이지만 그리고
+       나머지는 필요할 때 그린다. 손실 마커 클릭 내비(jumpToPingRow)는 대상
+       행이 속한 페이지로 먼저 이동한 뒤 스크롤한다. */
+    let pingPage = 0;               // 현재 페이지(0-base)
+    let pingRowsCache = [];         // 현재 필터가 적용된 행 목록(페이지 계산·점프용)
+
+    function pingPageCount() {
+        return Math.max(1, Math.ceil(pingRowsCache.length / PING_PAGE_SIZE));
+    }
+
+    function updatePingPager() {
+        if (!pingPager) return;
+        const total = pingRowsCache.length;
+        const pages = pingPageCount();
+        if (total <= PING_PAGE_SIZE) {
+            pingPager.classList.add('hidden');
+            return;
+        }
+        pingPager.classList.remove('hidden');
+        const from = pingPage * PING_PAGE_SIZE + 1;
+        const to = Math.min(total, (pingPage + 1) * PING_PAGE_SIZE);
+        if (pingPageLabel) {
+            pingPageLabel.textContent =
+                `${from.toLocaleString()}–${to.toLocaleString()} (${pingPage + 1}/${pages}쪽)`;
+        }
+        if (pingPagePrev) pingPagePrev.disabled = pingPage <= 0;
+        if (pingPageNext) pingPageNext.disabled = pingPage >= pages - 1;
+    }
+
+    function renderCurrentPingTable() {
+        if (currentPingSource === 'wired') renderPingFullTableWired();
+        else renderPingFullTable();
+    }
+
+    function movePingPage(delta) {
+        const next = Math.min(Math.max(0, pingPage + delta), pingPageCount() - 1);
+        if (next === pingPage) return;
+        pingPage = next;
+        renderCurrentPingTable();
+        if (pingScroll) pingScroll.scrollTop = 0;
+    }
+
+    if (pingPagePrev) pingPagePrev.addEventListener('click', () => movePingPage(-1));
+    if (pingPageNext) pingPageNext.addEventListener('click', () => movePingPage(1));
 
     const WIRED_FULL_THEAD = `<tr class="text-gray-400 border-b border-gray-700">
         <th class="text-left py-2 px-1">#</th>
@@ -1464,11 +1579,16 @@
             rows.push({ e, idx });
         });
         if (pingFullCount) pingFullCount.textContent = `${rows.length.toLocaleString()} / ${gtExchanges.length.toLocaleString()}건`;
+        pingRowsCache = rows;
+        if (pingPage > pingPageCount() - 1) pingPage = pingPageCount() - 1;
+        updatePingPager();
         if (!rows.length) {
             pingFullTable.innerHTML = '<tr><td colspan="5" class="text-gray-500 text-center py-6">조건에 맞는 항목이 없습니다.</td></tr>';
             return;
         }
-        pingFullTable.innerHTML = rows.map(({ e, idx }, i) => {
+        const pageStart = pingPage * PING_PAGE_SIZE;
+        pingFullTable.innerHTML = rows.slice(pageStart, pageStart + PING_PAGE_SIZE).map(({ e, idx }, i0) => {
+            const i = pageStart + i0;   // 표의 순번은 전체 기준을 유지
             const isLoss = e.rtt_ms == null;
             const badge = isLoss
                 ? '<span class="bg-red-900 text-red-300 px-1.5 py-0.5 rounded text-xs font-bold">LOSS</span>'
@@ -1502,11 +1622,16 @@
             return true;
         });
         if (pingFullCount) pingFullCount.textContent = `${rows.length.toLocaleString()} / ${fullList.length.toLocaleString()}건`;
+        pingRowsCache = rows;
+        if (pingPage > pingPageCount() - 1) pingPage = pingPageCount() - 1;
+        updatePingPager();
         if (rows.length === 0) {
             pingFullTable.innerHTML = '<tr><td colspan="10" class="text-gray-500 text-center py-6">조건에 맞는 항목이 없습니다.</td></tr>';
             return;
         }
-        pingFullTable.innerHTML = rows.map(({ p, fi }, i) => {
+        const pageStart = pingPage * PING_PAGE_SIZE;
+        pingFullTable.innerHTML = rows.slice(pageStart, pageStart + PING_PAGE_SIZE).map(({ p, fi }, i0) => {
+            const i = pageStart + i0;   // 표의 순번은 전체 기준을 유지
             const isLoss = p.status === 'loss' || p.status === 'loss_gap';
             const isGap = p.status === 'loss_gap';
             const rowClass = isLoss ? 'text-red-400 bg-red-900/20' : (p.has_retry ? 'text-yellow-400' : '');
@@ -1543,8 +1668,8 @@
     }
     [pingStatusSel, pingFlowSel, pingRetryChk].forEach(el => {
         if (el) el.addEventListener('change', () => {
-            if (currentPingSource === 'wired') renderPingFullTableWired();
-            else renderPingFullTable();
+            pingPage = 0;   // 필터가 바뀌면 행 집합이 달라진다 — 1쪽부터
+            renderCurrentPingTable();
         });
     });
     // 초기 전체 목록 렌더는 아래 srcToggle 초기화의 renderPingSource(...)가

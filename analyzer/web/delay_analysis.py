@@ -2,6 +2,8 @@
 import math
 from typing import Any, Dict, List
 
+from ..core.ping_matching import ping_losses, ping_pairs
+
 
 def _moving_avg_std(values: List[float], window: int = 10):
     """이동 평균과 표준편차를 계산한다. 각 인덱스마다 (avg, std) 튜플 리스트 반환."""
@@ -59,8 +61,10 @@ def analyze_delays(
     Returns:
         {"delay_zones": [...], "summary": {...}}
     """
-    pairs = ping_data.get("pairs", [])
-    losses = ping_data.get("losses", [])
+    # pairs/losses는 결과 JSON에서 빠져 있고(full_list 중복이라 제거됨) 헬퍼가
+    # full_list에서 파생한다. 구버전 result면 저장된 값을 그대로 쓴다.
+    pairs = ping_pairs(ping_data)
+    losses = ping_losses(ping_data)
     roaming_sequences = roaming_data.get("sequences", [])
     per_second_timeline = per_second_data.get("timeline", [])
 

@@ -67,20 +67,77 @@ def _prune_jobs_locked() -> None:
         _jobs.pop(jid, None)
 
 
+#: 홈 목록 카드에 쓰는 필드 — 사이드카에 담기는 것도 정확히 이 4개다.
+_META_FIELDS = ("id", "pcap_name", "frame_count", "analyzed_at")
+
+
+def write_analysis_meta(analysis_id: str, result: dict) -> None:
+    """결과 저장 직후 홈 화면용 경량 메타 사이드카를 쓴다.
+
+    실패해도 분석 자체는 성공이므로 조용히 넘어간다 — 사이드카가 없으면
+    `index()`가 본 파일을 파싱하는 폴백 경로를 타고 그때 다시 만든다.
+    """
+    try:
+        meta = {k: result.get(k) for k in _META_FIELDS}
+        meta["id"] = meta.get("id") or analysis_id
+        config.analysis_meta_path(analysis_id).write_text(
+            json.dumps(meta, ensure_ascii=False, default=str), encoding="utf-8"
+        )
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _analysis_card(result_path: Path) -> dict:
+    """결과 파일 하나에 대한 홈 목록 카드.
+
+    사이드카가 있으면 그것만 읽는다(수백 바이트). 없으면(구버전 결과) 본 파일을
+    한 번 파싱해 카드를 만들고 사이드카를 새로 써 다음부터는 빠른 경로를 탄다 —
+    2시간 캡처 결과는 33MB라 매 홈 로드에서 이걸 파싱하면 저장 건수에 비례해
+    느려진다(실측 45건 847MB에서 8.6초).
+    """
+    analysis_id = result_path.stem
+    try:
+        meta_path = config.analysis_meta_path(analysis_id)
+    except ValueError:
+        meta_path = None
+    if meta_path is not None and meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            return {
+                "id": meta.get("id") or analysis_id,
+                "pcap_name": meta.get("pcap_name") or "?",
+                "frame_count": meta.get("frame_count") or 0,
+                "analyzed_at": meta.get("analyzed_at") or "?",
+            }
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            pass   # 손상된 사이드카는 아래 본 파일 파싱으로 복구
+    full = json.loads(result_path.read_text(encoding="utf-8"))
+    write_analysis_meta(analysis_id, full)
+    return {
+        "id": full.get("id", analysis_id),
+        "pcap_name": full.get("pcap_name", "?"),
+        "frame_count": full.get("frame_count", 0),
+        "analyzed_at": full.get("analyzed_at", "?"),
+    }
+
+
 @router.get("/", response_class=HTMLResponse)
-async def index(request: Request):
+def index(request: Request):
+    """홈 화면.
+
+    `async def`가 아니라 `def`인 게 의도적이다 — 파일 I/O와 (폴백 시) json 파싱은
+    동기 blocking이라 이벤트 루프에서 돌리면 그동안 서버 전체가 멈춘다. 특히
+    json.loads는 GIL을 놓지 않아 같은 프로세스 threadpool에서 진행 중인 분석까지
+    굶긴다. FastAPI는 `def` 엔드포인트를 threadpool로 내보낸다.
+    """
     tshark = config.detect_tshark()
     data_dir = config.ensure_data_dir()
     analyses = []
     for f in sorted(data_dir.glob("*.json"), reverse=True):
+        if config.is_analysis_meta(f):
+            continue        # 사이드카는 분석 결과가 아니다
         try:
-            meta = json.loads(f.read_text(encoding="utf-8"))
-            analyses.append({
-                "id": meta.get("id", f.stem),
-                "pcap_name": meta.get("pcap_name", "?"),
-                "frame_count": meta.get("frame_count", 0),
-                "analyzed_at": meta.get("analyzed_at", "?"),
-            })
+            analyses.append(_analysis_card(f))
         except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             continue
     return templates.TemplateResponse(request, "index.html", {
@@ -355,6 +412,7 @@ async def upload_pcap(
     data_dir = config.ensure_data_dir()
     result_path = data_dir / f"{analysis_id}.json"
     result_path.write_text(json.dumps(result, ensure_ascii=False, default=str), encoding="utf-8")
+    write_analysis_meta(analysis_id, result)
 
     return JSONResponse({
         "id": analysis_id,

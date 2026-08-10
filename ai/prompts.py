@@ -9,6 +9,7 @@
 """
 from typing import Any
 
+from analyzer.core.ping_matching import ping_losses, ping_pairs
 from analyzer.core.thresholds import ROAM_GAP_DANGER_MS
 
 
@@ -161,8 +162,10 @@ def _build_roaming_section(roaming: dict) -> list:
 
 
 def _build_ping_section(ping: dict) -> list:
-    pairs = ping.get("pairs", []) or []
-    losses = ping.get("losses", []) or []
+    # 결과 JSON에는 pairs/losses가 없다(full_list 중복이라 제거) — 헬퍼가
+    # full_list에서 파생하고, 구버전 result면 저장된 값을 그대로 쓴다.
+    pairs = ping_pairs(ping) or []
+    losses = ping_losses(ping) or []
     total = len(pairs) + len(losses)
     if total == 0:
         # ICMP 자체가 없는 캡처 — 섹션을 통째로 생략하면 LLM이 RTT/Loss를
@@ -225,8 +228,9 @@ def _build_signal_section(signal: dict, cliffs: Any) -> list:
             f"- {name}: RSSI avg={avg} / min={minv} / max={maxv} dBm (n={_fmt_int(fc)})"
         )
     # signal_cliffs는 {STA명: {cliffs:[{epoch, rssi_before, rssi_after, drop_db,
-    # duration_sec}], moving_avg:[...]}} 구조(analyze_signal_cliffs)다. STA명을
-    # 외부 키로 붙여 평탄화하고 drop이 큰 순으로 상위 5건을 노출한다.
+    # duration_sec}]}} 구조(analyze_signal_cliffs)다. STA명을 외부 키로 붙여
+    # 평탄화하고 drop이 큰 순으로 상위 5건을 노출한다. (구버전 결과에는
+    # moving_avg 키가 함께 있지만 여기서도 어디서도 읽지 않는다 — 그래서 제거됐다.)
     cliff_items = []
     if isinstance(cliffs, dict):
         for sta_name, cd in cliffs.items():

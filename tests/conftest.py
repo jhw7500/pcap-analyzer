@@ -61,3 +61,22 @@ def sample_frames():
 def sample_index(sample_frames, sample_roles):
     """FrameIndex 인스턴스."""
     return FrameIndex(sample_frames, sample_roles)
+
+
+def remove_analysis_files(path):
+    """실제 data/analyses에 만든 테스트 결과와 **그 메타 사이드카**를 함께 지운다.
+
+    결과 저장 경로(routes/upload.write_analysis_meta)가 `{id}.json` 옆에
+    `{id}.meta.json`을 함께 쓰므로, 본 파일만 지우면 고아 사이드카가 실제
+    데이터 디렉터리에 남는다. 두 경로를 한 곳에서 정리해 누수를 막는다.
+    """
+    from pathlib import Path
+
+    import config as _config
+
+    path = Path(path)
+    path.unlink(missing_ok=True)
+    try:
+        _config.analysis_meta_path(path.stem).unlink(missing_ok=True)
+    except (ValueError, OSError):
+        pass
