@@ -30,6 +30,37 @@ _MAX_SPLIT_PARTS = 32
 _MAX_STATION_LOG_FILES = 60
 #: STA 로그 1개 파일 상한(bytes). 실측 wpa/kern/logger 각 0.4~0.6MB.
 _MAX_STATION_LOG_BYTES = 64 * 1024 * 1024
+#: 요청 하나가 임시 파일로 쓸 수 있는 **합계** 상한(bytes).
+#: 파일별 상한(max_upload_size)만 두면 관측점 5개(주 캡처·유선·추가 무선 3) ×
+#: 분할 조각 32개 × 1GB = 이론상 160GB가 한 요청에 들어온다. 실측 2시간 무선
+#: 3조각이 311MB, 유선 133MB라 8GB면 4시간대 다중 스니퍼도 넉넉하고 디스크
+#: 여유가 적은 호스트를 지켜준다.
+_MAX_REQUEST_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
+
+
+class _UploadBudget:
+    """한 요청이 임시 파일로 쓴 누적 바이트 — **파일 경계를 넘어** 합산한다.
+
+    개별 파일 상한은 파일 하나가 디스크를 삼키는 것만 막는다. 조각·다중 스니퍼로
+    파일 수가 늘어나는 경로에서는 합계를 봐야 한다.
+    """
+    __slots__ = ("used", "limit")
+
+    def __init__(self, limit=None) -> None:
+        # 기본값을 시그니처에 박으면 def 시점에 고정돼 테스트에서 상한을 낮출 수
+        # 없다 — 호출 시점에 모듈 상수를 읽는다.
+        self.used = 0
+        self.limit = _MAX_REQUEST_TOTAL_BYTES if limit is None else limit
+
+    def add(self, n: int) -> bool:
+        """n바이트를 더한다. 상한을 넘으면 False."""
+        self.used += n
+        return self.used <= self.limit
+
+    @property
+    def limit_gb(self) -> float:
+        return round(self.limit / (1024 ** 3), 1)
+
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
@@ -194,7 +225,7 @@ async def get_progress_latest():
         })
 
 
-async def _save_pcap_upload(file: UploadFile):
+async def _save_pcap_upload(file: UploadFile, budget=None):
     """업로드 파일 검증·임시 저장. 반환 (tmp_path, error_response) — 하나만 non-None.
 
     계약(PR #23 리뷰 8라운드 Finding B — 호출부가 재확인할 필요 없도록 명시):
@@ -229,6 +260,15 @@ async def _save_pcap_upload(file: UploadFile):
                 return None, JSONResponse(
                     error_payload(ErrorCode.FILE_TOO_LARGE, f"(상한 {limit_mb}MB)"),
                     status_code=413)
+            if budget is not None and not budget.add(len(chunk)):
+                tmp.close()
+                Path(tmp.name).unlink(missing_ok=True)
+                return None, JSONResponse(
+                    error_payload(
+                        ErrorCode.FILE_TOO_LARGE,
+                        f"(요청 합계 상한 {budget.limit_gb}GB — 조각·다중 스니퍼 합산)",
+                    ),
+                    status_code=413)
             tmp.write(chunk)
     except Exception:
         tmp.close()
@@ -241,7 +281,7 @@ async def _save_pcap_upload(file: UploadFile):
     return tmp.name, None
 
 
-async def _save_capture_group(files: List[UploadFile]):
+async def _save_capture_group(files: List[UploadFile], budget=None):
     """한 캡처를 이루는 파일들(분할 조각 1개 이상)을 저장하고 단일 경로로 만든다.
 
     반환 `(tmp_path, names, error_response)` — error가 non-None이면 tmp_path는
@@ -264,7 +304,7 @@ async def _save_capture_group(files: List[UploadFile]):
     tmps: List[str] = []
     names: List[str] = []
     for f in files:
-        tmp, err = await _save_pcap_upload(f)
+        tmp, err = await _save_pcap_upload(f, budget)
         if err is not None:
             _cleanup_tmps(*tmps)
             return None, [], err
@@ -323,7 +363,7 @@ def _cleanup_tmps(*paths: str) -> None:
             pass
 
 
-async def _save_station_logs(files: List[UploadFile]):
+async def _save_station_logs(files: List[UploadFile], budget=None):
     """호기별 STA 로그 세트를 임시 저장하고 파이프라인 입력 형태로 만든다.
 
     브라우저 디렉터리 업로드는 파일명만 보내므로, 클라이언트가 FormData의 filename
@@ -364,6 +404,16 @@ async def _save_station_logs(files: List[UploadFile]):
                 if not chunk:
                     break
                 total += len(chunk)
+                if budget is not None and not budget.add(len(chunk)):
+                    tmp.close()
+                    _cleanup_tmps(tmp.name, *tmps)
+                    return None, [], JSONResponse(
+                        error_payload(
+                            ErrorCode.FILE_TOO_LARGE,
+                            f"(요청 합계 상한 {budget.limit_gb}GB)",
+                        ),
+                        status_code=413,
+                    )
                 if total > _MAX_STATION_LOG_BYTES:
                     tmp.close()
                     _cleanup_tmps(tmp.name, *tmps)
@@ -419,10 +469,12 @@ async def upload_pcap(
     if 1 + len(valid_wireless_files) > _MAX_WIRELESS_FILES:
         return JSONResponse(error_payload(ErrorCode.TOO_MANY_FILES), status_code=400)
 
+    # 한 요청이 임시 파일로 쓰는 총량을 조각·관측점·STA 로그에 걸쳐 합산한다.
+    budget = _UploadBudget()
     primary_files = [f for f in file if f is not None and (f.filename or "")]
     if not primary_files:
         return JSONResponse(error_payload(ErrorCode.EMPTY_FILE), status_code=400)
-    tmp_name, primary_names, err = await _save_capture_group(primary_files)
+    tmp_name, primary_names, err = await _save_capture_group(primary_files, budget)
     if err is not None:
         return err
     name = merged_display_name(primary_names)
@@ -432,7 +484,7 @@ async def upload_pcap(
     wireless_names: List[str] = []
     for wf in valid_wireless_files:
         try:
-            wtmp, werr = await _save_pcap_upload(wf)
+            wtmp, werr = await _save_pcap_upload(wf, budget)
         except Exception:
             _cleanup_tmps(tmp_name, *wireless_tmps)
             raise
@@ -451,7 +503,7 @@ async def upload_pcap(
     wired_files = [f for f in (wired_file or []) if f is not None and (f.filename or "")]
     if wired_files:
         try:
-            wired_tmp, wired_names, werr = await _save_capture_group(wired_files)
+            wired_tmp, wired_names, werr = await _save_capture_group(wired_files, budget)
         except Exception:
             _cleanup_tmps(tmp_name, *wireless_tmps)
             raise
@@ -468,7 +520,7 @@ async def upload_pcap(
     ]
     if valid_station_files:
         try:
-            station_entries, station_tmps, serr = await _save_station_logs(valid_station_files)
+            station_entries, station_tmps, serr = await _save_station_logs(valid_station_files, budget)
         except Exception:
             _cleanup_tmps(tmp_name, wired_tmp, *wireless_tmps)
             raise

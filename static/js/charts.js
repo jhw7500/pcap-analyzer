@@ -547,10 +547,14 @@
                 const med = arr => { const v = arr.slice().sort((a, b) => a - b); return v[Math.floor(v.length / 2)]; };
                 const p = med(paired.map(s => s.total_roam_ms));
                 const t = med(paired.map(s => s.sta_log.total_ms));
+                /* 체감 로밍 중앙값이 0이면 비율이 Infinity/NaN으로 찍힌다. 로그 스탬프
+                   정밀도가 ms라 극단적으로 짧은 로밍에서 0이 나올 수 있다 — 값을
+                   지어내지 않고 '측정불가'로 둔다. */
+                const outsidePct = t > 0 ? ((1 - p / t) * 100).toFixed(1) + '%' : '측정불가';
                 note = `<p class="mt-2 text-gray-400">같은 로밍 ${paired.length.toLocaleString()}건 대조 —
                     pcap 전파구간 <span class="text-gray-200">${p.toFixed(1)}ms</span> vs
                     STA 체감 <span class="text-sky-300">${t.toFixed(1)}ms</span>.
-                    <span class="text-gray-200">${((1 - p / t) * 100).toFixed(1)}%</span>가 전파에 나타나지 않는 구간
+                    <span class="text-gray-200">${outsidePct}</span>가 전파에 나타나지 않는 구간
                     (스캔·로밍 판단·드라이버 처리·키 설치).</p>
                     <p class="text-gray-500 mt-1">스캔은 ROAM 명령보다 약 1초 앞서 끝나는 별개 이벤트라 로밍 소요에 합산하지 않는다.
                     개별 로밍의 세부 구간은 로그 스탬프 정밀도(±20ms대)를 넘어서므로 분포로만 표기한다.</p>`;

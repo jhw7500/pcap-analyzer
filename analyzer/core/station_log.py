@@ -322,6 +322,15 @@ def parse_logger_log(path: str) -> List[RoamDecision]:
         if km:
             last_cand = km
             continue
+        if _LOG_SKIP.search(ln.msg):
+            # 로밍을 하지 않기로 한 줄("Roam skipped" / "No suitable roam candidate").
+            # 보류 중인 조건·후보는 **이 판단에서 소진됐다** — 남겨두면 다음 실제
+            # 로밍에 남의 근거가 붙는다(실측 로그에서 호기당 스킵 6/18/4건,
+            # 그 때문에 낡은 근거가 붙을 수 있는 로밍이 3/9/2건이었다).
+            # 앵커를 소비 후 폐기하는 로밍 짝짓기와 같은 규칙이다.
+            last_cond = None
+            last_cand = None
+            continue
         rm = _LOG_ROAMING.search(ln.msg)
         if rm:
             frm, to = rm.group("from").lower(), rm.group("to").lower()

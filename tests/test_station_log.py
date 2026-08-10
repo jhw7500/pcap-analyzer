@@ -378,3 +378,45 @@ class TestScanPairedByCompletion:
 
         # 완료 기준이면 A(63ms). 시작 기준이면 아직 진행 중인 B(1,600ms)가 잡힌다.
         assert round(seqs[0]["sta_log"]["scan_ms"]) == 63
+
+
+class TestSkippedRoamClearsPendingEvidence:
+    """로밍을 **하지 않기로 한** 줄에서도 보류 근거를 비워야 한다.
+
+    `_LOG_SKIP`("Roam skipped" / "No suitable roam candidate")이 정의만 되고
+    쓰이지 않아, 스킵된 판단의 condition·candidate가 남아 **다음 실제 로밍**에
+    붙었다. 실측 로그에서 스킵이 호기당 6/18/4건, 그로 인해 낡은 근거가 붙을 수
+    있는 로밍이 3/9/2건이었다. 앵커를 소비 후 폐기하는 규칙과 같은 문제다.
+    """
+
+    LOG = """
+    2026-07-23 08:50:08.940 ROAM[info] [wifi_roam.py:2263] [mlan0] roaming condition: -67 < -65 (base=-65, trend=stable)
+    2026-07-23 08:50:08.960 ROAM[info] [wifi_roam.py:2382] [mlan0] Roam candidate: 00:80:4c:e1:09:cc, rssi=-51dB (diff=16dB), load=0.0%, reason=RSSI diff: 16dB, score=160.0
+    2026-07-23 08:50:08.970 ROAM[info] [wifi_roam.py:2390] [mlan0] No suitable roam candidate
+    2026-07-23 08:50:26.128 ROAM[warning] [wifi_roam.py:2401] [mlan0] Roaming: 00:80:4c:e1:09:cc → 00:80:4c:e1:09:cb
+    """
+
+    def test_pending_evidence_is_dropped_on_skip(self, tmp_path):
+        ds = parse_logger_log(_write(tmp_path, "logger.log", self.LOG))
+        assert len(ds) == 1
+        d = ds[0]
+        # 스킵된 판단의 근거가 이 로밍에 붙으면 안 된다.
+        assert d.trigger_rssi is None and d.trigger_th is None
+        assert d.score is None and not d.reason
+
+    def test_roam_skipped_variant_also_clears(self, tmp_path):
+        log = self.LOG.replace("No suitable roam candidate", "Roam skipped: better AP not found")
+        ds = parse_logger_log(_write(tmp_path, "logger.log", log))
+        assert len(ds) == 1
+        assert ds[0].trigger_rssi is None and ds[0].score is None
+
+    def test_normal_roam_still_gets_its_own_evidence(self, tmp_path):
+        """스킵 처리가 정상 경로를 망가뜨리지 않는지 — 근거는 그대로 붙어야 한다."""
+        # 스킵 줄만 통째로 뺀다(들여쓰기까지) — 부분 문자열을 지우면 남은 공백이
+        # 다음 줄에 붙어 dedent가 어긋나고 파서가 그 줄을 통째로 놓친다.
+        log = "\n".join(
+            ln for ln in self.LOG.splitlines() if "No suitable roam candidate" not in ln
+        )
+        ds = parse_logger_log(_write(tmp_path, "logger.log", log))
+        assert len(ds) == 1
+        assert ds[0].trigger_rssi == -67 and ds[0].score == 160.0

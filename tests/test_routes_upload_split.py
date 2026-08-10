@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from analyzer.core.split_merge import merge_split_captures, merged_display_name
 from app import app
+from routes import upload as upload_module
 
 client = TestClient(app)
 
@@ -254,8 +255,8 @@ class TestUploadRoute:
         saved_paths = []
         real_save = __import__("routes.upload", fromlist=["_save_pcap_upload"])._save_pcap_upload
 
-        async def tracking_save(f):
-            path, err = await real_save(f)
+        async def tracking_save(f, budget=None):
+            path, err = await real_save(f, budget)
             if path:
                 saved_paths.append(path)
             return path, err
@@ -313,3 +314,77 @@ class TestMergeOffEventLoop:
             ])
         assert resp.status_code == 200, resp.text
         assert on_loop == [False], "mergecap이 이벤트 루프를 점유했다"
+
+
+@patch("routes.upload.config.detect_tshark", return_value="tshark")
+@patch("routes.upload.run_analysis")
+class TestRequestTotalBudget:
+    """파일별 상한만으로는 한 요청의 디스크 사용량을 못 막는다.
+
+    관측점 5개(주 캡처·유선·추가 무선 3) × 분할 조각 32개 × 파일 상한 1GB =
+    이론상 160GB가 한 요청에 들어온다. 조각마다 따로 검사하면 전부 통과한다.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _stub_mergecap(self):
+        with patch("routes.upload.config.detect_mergecap",
+                   return_value="/usr/bin/mergecap"):
+            yield
+
+    def test_sum_across_parts_is_capped(self, mock_run, _tshark, tmp_path, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+        mock_run.side_effect = _ok_result
+        # 조각 하나하나는 파일 상한을 한참 밑돌지만 합계는 넘는다.
+        monkeypatch.setattr(upload_module, "_MAX_REQUEST_TOTAL_BYTES", 3 * 1024)
+        blob = PCAP_MAGIC + b"\x00" * 2048
+
+        resp = client.post("/api/upload", files=[
+            ("file", ("a.pcapng", blob, "application/octet-stream")),
+            ("file", ("b.pcapng", blob, "application/octet-stream")),
+        ])
+        assert resp.status_code == 413, resp.text
+        assert "요청 합계 상한" in resp.json()["error"]
+
+    def test_within_budget_still_passes(self, mock_run, _tshark, tmp_path, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+        mock_run.side_effect = _ok_result
+        monkeypatch.setattr(upload_module, "_MAX_REQUEST_TOTAL_BYTES", 1024 * 1024)
+
+        def fake_merge(paths, out_path, mergecap_path=None):
+            Path(out_path).write_bytes(PCAP_MAGIC)
+            return True, ""
+
+        with patch("routes.upload.merge_split_captures", side_effect=fake_merge):
+            resp = client.post("/api/upload", files=[
+                ("file", ("a.pcapng", PCAP_MAGIC, "application/octet-stream")),
+                ("file", ("b.pcapng", PCAP_MAGIC, "application/octet-stream")),
+            ])
+        assert resp.status_code == 200, resp.text
+
+    def test_rejected_request_leaves_no_temp_files(self, mock_run, _tshark,
+                                                   tmp_path, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+        mock_run.side_effect = _ok_result
+        monkeypatch.setattr(upload_module, "_MAX_REQUEST_TOTAL_BYTES", 3 * 1024)
+        blob = PCAP_MAGIC + b"\x00" * 2048
+
+        saved = []
+        real_save = upload_module._save_pcap_upload
+
+        async def tracking(f, budget=None):
+            path, err = await real_save(f, budget)
+            if path:
+                saved.append(path)
+            return path, err
+
+        with patch("routes.upload._save_pcap_upload", side_effect=tracking):
+            resp = client.post("/api/upload", files=[
+                ("file", ("a.pcapng", blob, "application/octet-stream")),
+                ("file", ("b.pcapng", blob, "application/octet-stream")),
+            ])
+        assert resp.status_code == 413
+        assert saved, "첫 조각은 저장됐어야 이 테스트가 의미를 갖는다"
+        assert not [p for p in saved if Path(p).exists()], "거부 후 임시파일이 남았다"

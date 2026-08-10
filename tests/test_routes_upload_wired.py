@@ -71,11 +71,11 @@ def test_wired_save_exception_cleans_up_primary_tmp(_tshark):
     captured = {}
     call_count = {"n": 0}
 
-    async def fake_save(file):
+    async def fake_save(file, budget=None):
         call_count["n"] += 1
         if call_count["n"] == 1:
             # 무선(첫 번째) 호출은 실제 헬퍼로 위임해 실제 tmp 경로를 확보
-            tmp_name, err = await original_save(file)
+            tmp_name, err = await original_save(file, budget)
             captured["primary_tmp"] = tmp_name
             return tmp_name, err
         raise RuntimeError("wired 저장 중 I/O 예외 시뮬레이션")
@@ -101,9 +101,9 @@ def test_job_registration_exception_cleans_up_both_tmp(_tshark):
     captured = {}
     call_count = {"n": 0}
 
-    async def capturing_save(file):
+    async def capturing_save(file, budget=None):
         call_count["n"] += 1
-        tmp_name, err = await original_save(file)
+        tmp_name, err = await original_save(file, budget)
         captured["primary_tmp" if call_count["n"] == 1 else "wired_tmp"] = tmp_name
         return tmp_name, err
 
