@@ -150,3 +150,33 @@ class TestPairsLossesDerivation:
         d = {"full_list": [{"status": "loss_gap"}, {"status": "matched"}]}
         assert ping_losses(d) == [{"status": "loss_gap"}]
         assert ping_pairs(d) == [{"status": "matched"}]
+
+
+class TestStatusVocabularyIsShared:
+    """`status` 어휘는 생성부와 파생부가 **같은 상수**를 써야 한다.
+
+    pairs/losses는 결과 JSON에서 빠지고 full_list의 status로 파생되므로
+    (`ping_pairs`/`ping_losses`), 생성부가 리터럴을 쓰면 한쪽만 바뀌었을 때
+    **예외도 로그도 없이 빈 목록**이 된다 — ping 근거가 통째로 사라진다.
+    """
+
+    def test_producer_uses_the_shared_constants(self):
+        import inspect
+
+        from analyzer.core import ping_matching as pm
+
+        src = inspect.getsource(pm.build_ping_matches)
+        src += inspect.getsource(pm._entry_from_frame)
+        for literal in ('"matched"', "'matched'", '"loss"', "'loss'"):
+            assert literal not in src, f"생성부에 리터럴 {literal}이 남아 있다"
+
+    def test_renaming_the_constant_is_caught(self):
+        """상수를 바꾸면 파생이 즉시 어긋나는지 — 계약이 살아 있는지 확인."""
+        from unittest.mock import patch
+
+        from analyzer.core import ping_matching as pm
+
+        ping = {"full_list": [{"status": pm.MATCHED_STATUS}, {"status": pm.LOSS_STATUS}]}
+        assert len(pm.ping_pairs(ping)) == 1
+        with patch.object(pm, "MATCHED_STATUS", "renamed"):
+            assert pm.ping_pairs(ping) == []

@@ -266,7 +266,8 @@ async def _save_pcap_upload(file: UploadFile, budget=None):
                 return None, JSONResponse(
                     error_payload(
                         ErrorCode.FILE_TOO_LARGE,
-                        f"(요청 합계 상한 {budget.limit_gb}GB — 조각·다중 스니퍼 합산)",
+                        f"(요청 합계 상한 {budget.limit_gb}GB — "
+                        f"pcap 조각·다중 스니퍼·STA 로그 합산)",
                     ),
                     status_code=413)
             tmp.write(chunk)
@@ -410,7 +411,8 @@ async def _save_station_logs(files: List[UploadFile], budget=None):
                     return None, [], JSONResponse(
                         error_payload(
                             ErrorCode.FILE_TOO_LARGE,
-                            f"(요청 합계 상한 {budget.limit_gb}GB)",
+                            f"(요청 합계 상한 {budget.limit_gb}GB — "
+                            f"pcap 조각·다중 스니퍼·STA 로그 합산)",
                         ),
                         status_code=413,
                     )

@@ -255,8 +255,18 @@ class SequenceInfo:
 
     @property
     def is_slow(self) -> bool:
-        """느린 로밍 여부. **판정 불가면 False** — slow_basis로 구분할 것."""
+        """느린 로밍 여부. **판정 불가면 False** — `is_undecided`로 구분할 것."""
         return classify_slow(self.total_roam_ms, self.gap_ms)[0]
+
+    @property
+    def is_undecided(self) -> bool:
+        """느림/정상을 **판정할 수 없는** 로밍(전체 소요도 gap도 근거가 안 됨).
+
+        `not seq.is_slow`를 "정상 로밍"으로 읽으면 판정 불가가 정상에 섞인다 —
+        건강도 분모 오염과 같은 실수다. 정상만 세려면
+        `not seq.is_slow and not seq.is_undecided`.
+        """
+        return classify_slow(self.total_roam_ms, self.gap_ms)[1] is None
 
 
 @dataclass

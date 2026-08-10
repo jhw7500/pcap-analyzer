@@ -128,6 +128,17 @@ def _flow_key_for_reply_swapped(f: Frame) -> Tuple[str, str, str]:
     return (f.ip_dst, f.ip_src, f.icmp_ident)
 
 
+#: full_list entry의 `status` 어휘 — **생성부와 파생부가 함께 쓰는 단일 정의**.
+#: pairs/losses는 결과 JSON에서 빠지고 이 status로 full_list에서 파생되므로
+#: (ping_pairs/ping_losses), 생성부가 리터럴을 쓰면 한쪽만 바뀌었을 때 조용히
+#: 빈 목록이 된다 — 예외도 로그도 없이 ping 근거가 통째로 사라진다.
+MATCHED_STATUS = "matched"
+LOSS_STATUS = "loss"
+LOSS_GAP_STATUS = "loss_gap"
+LOSS_STATUSES = (LOSS_STATUS, LOSS_GAP_STATUS)
+OBSERVED_STATUS = "observed"
+
+
 def _entry_from_frame(
     f: Frame,
     roles: Dict[str, Dict[str, Any]],
@@ -243,7 +254,7 @@ def build_ping_matches(
             if match is not None:
                 matched_req_ids.add(id(req))
                 matched_reply_ids.add(id(match))
-                entry = _entry_from_frame(req, roles, "matched", reply=match)
+                entry = _entry_from_frame(req, roles, MATCHED_STATUS, reply=match)
                 full_list.append(entry)
                 pairs.append(entry)
 
@@ -284,7 +295,7 @@ def build_ping_matches(
             # 확정 무선 손실 후보: req는 보였는데 같은 seq의 reply가 캡처 어디에도 없음
             for req in reqs:
                 if req.icmp_seq in reply_missing_set and id(req) not in matched_req_ids:
-                    entry = _entry_from_frame(req, roles, "loss")
+                    entry = _entry_from_frame(req, roles, LOSS_STATUS)
                     full_list.append(entry)
                     losses.append(entry)
 
@@ -417,7 +428,7 @@ def _observation_entry(
     direction: "request" (echo request만 캡처) | "reply" (echo reply만 캡처)
     """
     return {
-        "status": "observed",
+        "status": OBSERVED_STATUS,
         "direction": direction,
         "icmp_type": f.icmp_type,  # "8"=request, "0"=reply
         "seq": f.icmp_seq,
@@ -460,7 +471,7 @@ def _record_phantom_loss(
             anchor = f
     entry = {
         "seq": str(missing_seq),
-        "status": "loss_gap",
+        "status": LOSS_GAP_STATUS,
         "epoch": anchor.epoch,
         "rtt_ms": None,
         "req_num": None,
@@ -482,11 +493,6 @@ def _record_phantom_loss(
     full_list.append(entry)
     losses.append(entry)
 
-
-#: full_list entry의 status 어휘 — pairs/losses를 파생할 때 쓰는 단일 정의.
-#: build_ping_matches가 entry를 만들 때 쓰는 값과 반드시 같아야 한다.
-MATCHED_STATUS = "matched"
-LOSS_STATUSES = ("loss", "loss_gap")
 
 
 def ping_pairs(ping: Dict[str, Any]) -> List[Dict[str, Any]]:
