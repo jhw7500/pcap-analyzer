@@ -16,6 +16,7 @@ import config
 from analyzer.core.pcap_magic import has_valid_pcap_magic
 from analyzer.errors import ErrorCode, error_payload
 from analyzer.core.split_merge import merge_split_captures, merged_display_name
+from analyzer.core.station_log import STATION_LOG_FILES
 from analyzer.pipeline import run_analysis
 
 _UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB
@@ -24,6 +25,10 @@ _MAX_WIRELESS_FILES = 4  # 무선 **캡처(관측점)** 수: 기본(file) 1개 +
 #: 한 캡처를 이루는 분할 조각 수 상한. 조각마다 max_upload_size가 따로
 #: 적용되므로 이 값은 디스크 폭주를 막는 상한이다(2시간 무선 캡처가 실측 3조각).
 _MAX_SPLIT_PARTS = 32
+#: STA 로그 세트 상한 — 호기(STA) 수 × 파일 3개. 넉넉히 잡되 무제한은 아니다.
+_MAX_STATION_LOG_FILES = 60
+#: STA 로그 1개 파일 상한(bytes). 실측 wpa/kern/logger 각 0.4~0.6MB.
+_MAX_STATION_LOG_BYTES = 64 * 1024 * 1024
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
@@ -302,6 +307,74 @@ def _cleanup_tmps(*paths: str) -> None:
             pass
 
 
+async def _save_station_logs(files: List[UploadFile]):
+    """호기별 STA 로그 세트를 임시 저장하고 파이프라인 입력 형태로 만든다.
+
+    브라우저 디렉터리 업로드는 파일명만 보내므로, 클라이언트가 FormData의 filename
+    자리에 `webkitRelativePath`(예: ``1호기/wpa.log``)를 넣어 보낸다. 여기서 그
+    **디렉터리 부분을 호기 이름으로** 쓰고 basename으로 로그 종류를 판별한다.
+
+    반환 `(entries, tmp_paths, error)` — entries는
+    ``[{"name": "1호기", "files": {"wpa.log": 경로, ...}}, ...]``.
+    STATION_LOG_FILES에 없는 파일은 **조용히 무시**한다(폴더째 올리면 cpu/stat 등
+    관심 없는 로그가 대량으로 딸려온다).
+    """
+    if len(files) > _MAX_STATION_LOG_FILES:
+        return None, [], JSONResponse(
+            error_payload(
+                ErrorCode.TOO_MANY_FILES,
+                f"(STA 로그는 최대 {_MAX_STATION_LOG_FILES}개)",
+            ),
+            status_code=400,
+        )
+    grouped: dict = {}
+    tmps: List[str] = []
+    for f in files:
+        raw = (f.filename or "").replace("\\", "/")
+        if not raw:
+            continue
+        parts = [p for p in raw.split("/") if p not in ("", ".", "..")]
+        if not parts:
+            continue
+        base = parts[-1]
+        if base not in STATION_LOG_FILES:
+            continue        # 관심 없는 로그(cpu/stat/...)는 무시
+        station = parts[-2] if len(parts) >= 2 else "station"
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=f"-{base}")
+        total = 0
+        try:
+            while True:
+                chunk = await f.read(_UPLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _MAX_STATION_LOG_BYTES:
+                    tmp.close()
+                    _cleanup_tmps(tmp.name, *tmps)
+                    limit_mb = _MAX_STATION_LOG_BYTES // (1024 * 1024)
+                    return None, [], JSONResponse(
+                        error_payload(
+                            ErrorCode.FILE_TOO_LARGE,
+                            f"(STA 로그 {base} — 상한 {limit_mb}MB)",
+                        ),
+                        status_code=413,
+                    )
+                tmp.write(chunk)
+        except Exception:
+            tmp.close()
+            _cleanup_tmps(tmp.name, *tmps)
+            raise
+        tmp.close()
+        if total == 0:
+            Path(tmp.name).unlink(missing_ok=True)
+            continue
+        tmps.append(tmp.name)
+        grouped.setdefault(station, {})[base] = tmp.name
+
+    entries = [{"name": k, "files": v} for k, v in sorted(grouped.items())]
+    return entries, tmps, None
+
+
 @router.post("/api/upload")
 async def upload_pcap(
     # file / wired_file 은 **하나의 캡처를 이루는 분할 조각들**을 받는다(1개면
@@ -311,6 +384,8 @@ async def upload_pcap(
     file: List[UploadFile] = File(...),
     wireless_files: List[UploadFile] = File([]),
     wired_file: List[UploadFile] = File([]),
+    # STA 로그 세트 — 파일명에 `<호기>/<파일>` 상대경로가 들어온다.
+    station_log_files: List[UploadFile] = File([]),
     ssid: str = Form(""),
     passphrase: str = Form(""),
     mac_filter: str = Form(""),
@@ -370,6 +445,21 @@ async def upload_pcap(
             return werr
         wired_name = merged_display_name(wired_names)
 
+    station_entries: List[dict] = []
+    station_tmps: List[str] = []
+    valid_station_files = [
+        f for f in (station_log_files or []) if f is not None and (f.filename or "")
+    ]
+    if valid_station_files:
+        try:
+            station_entries, station_tmps, serr = await _save_station_logs(valid_station_files)
+        except Exception:
+            _cleanup_tmps(tmp_name, wired_tmp, *wireless_tmps)
+            raise
+        if serr is not None:
+            _cleanup_tmps(tmp_name, wired_tmp, *wireless_tmps)
+            return serr
+
     # 클라이언트가 미리 만든 job_id를 우선 사용(본인 job만 폴링/취소하기 위함).
     # 미제공·형식오류·이미 active한 id와 충돌하면 서버가 uuid를 생성한다.
     job_id = _sanitize_job_id(client_job_id)
@@ -392,10 +482,11 @@ async def upload_pcap(
                 "tmp": tmp_name,
                 "wired_tmp": wired_tmp,
                 "wireless_tmps": list(wireless_tmps),
+                "station_tmps": list(station_tmps),
             }
             _prune_jobs_locked()
     except Exception:
-        _cleanup_tmps(tmp_name, wired_tmp, *wireless_tmps)
+        _cleanup_tmps(tmp_name, wired_tmp, *wireless_tmps, *station_tmps)
         raise
 
     def progress_cb(msg, pct):
@@ -412,6 +503,7 @@ async def upload_pcap(
             ip_filter=ip_filter,
             wireless_paths=wireless_tmps,
             wired_path=wired_tmp,
+            station_logs=station_entries,
             cancel_event=cancel_event,
             progress_cb=progress_cb,
         )
@@ -424,7 +516,7 @@ async def upload_pcap(
         # 백신/인덱서 잠금 등) 여기서 다시 감쌀 필요가 없다 — 감싸면 절대
         # 실행되지 않는 except 블록과 함께 "밖에서 흡수해야 한다"는 허위
         # 인상을 준다(PR #23 리뷰 7라운드 Finding B).
-        _cleanup_tmps(tmp_name, wired_tmp, *wireless_tmps)
+        _cleanup_tmps(tmp_name, wired_tmp, *wireless_tmps, *station_tmps)
         _set_progress(job_id, "완료", 100, active=False)
 
     if "error" in result:

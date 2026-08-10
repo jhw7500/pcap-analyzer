@@ -349,7 +349,11 @@
     const allShapes = [];
     const seqs = roaming.sequences || [];
     seqs.forEach(s => {
-        const t = epochToDate(s.auth_epoch);
+        // auth_epoch은 그 로밍의 Auth가 캡처에 없으면 null(gap 측정 불가)이다.
+        // Assoc 시각은 항상 알므로 그걸로 폴백해야 로밍 표시가 사라지지 않는다.
+        const roamEpoch = typeof s.auth_epoch === 'number' ? s.auth_epoch : s.assoc_epoch;
+        if (typeof roamEpoch !== 'number') return;
+        const t = epochToDate(roamEpoch);
         allShapes.push({
             _kind: 'roaming',
             type: 'line', x0: t, x1: t, y0: 0, y1: 1, yref: 'paper',

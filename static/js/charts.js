@@ -388,20 +388,76 @@
         // AP 라벨: 로밍 전 AP(prev_ap_name) → 로밍 후 AP(ap_name). 직전 AP가 없으면
         // (최초 연결 또는 재분석 전 데이터) 후 AP만 표시.
         const roamAp = s => (s.prev_ap_name ? `${s.prev_ap_name} → ${s.ap_name}` : s.ap_name);
-        Plotly.newPlot('chart-roaming-gap', [{
-            type: 'bar',
-            x: seqs.map((_, i) => i + 1),
-            y: seqs.map(s => s.gap_ms),
-            marker: {
-                color: seqs.map(s => s.is_slow ? '#ef4444' : '#3b82f6'),
+        /* gap_ms는 null(측정 불가)일 수 있다 — 그 로밍의 Auth 프레임이 캡처에
+           없어 시작 시각을 모르는 경우다. 0으로 찍으면 "지연 없음"으로 오독되므로
+           막대를 그리지 않고(null) hover에 사유를 노출한다. */
+        const gapMeasured = s => typeof s.gap_ms === 'number';
+        const missingText = s => {
+            const labels = s.missing_labels || [];
+            return labels.length ? labels.join(', ') + ' 미포착' : 'Auth 프레임 미포착';
+        };
+        /* 로밍을 **구간별 누적 막대**로 그린다. gap_ms(Auth→Reassoc)만 그리면
+           로밍 비용이 실제의 1/5로 보인다 — 실측 중앙값 기준 전체 25.1ms 중
+           gap은 5.3ms이고 나머지 대부분이 4-way다.
+           중간 구간(Reassoc 요청 → 4-way 시작)은 total에서 나머지를 빼서 얻는다.
+           total이 없으면(4-way 미포착) gap만 그린다. */
+        const xs = seqs.map((_, i) => i + 1);
+        const label = seqs.map(s => s.sta_name + ': ' + roamAp(s));
+        const segGap = seqs.map(s => gapMeasured(s) ? s.gap_ms : null);
+        const segWait = seqs.map(s => {
+            if (!gapMeasured(s) || typeof s.total_roam_ms !== 'number'
+                || typeof s.four_way_ms !== 'number') return null;
+            return Math.max(0, s.total_roam_ms - s.gap_ms - s.four_way_ms);
+        });
+        const segFour = seqs.map(s => typeof s.four_way_ms === 'number' ? s.four_way_ms : null);
+        const hoverOf = s => gapMeasured(s)
+            ? ((s.gap_ms).toFixed(1) + 'ms' + (s.gap_basis === 'auth_response' ? ' (하한)' : '')
+               + (typeof s.total_roam_ms === 'number' ? ' · 전체 ' + s.total_roam_ms.toFixed(1) + 'ms' : ''))
+            : ('측정불가 — ' + missingText(s));
+        /* STA 로그가 있으면 '체감 로밍 전체'를 **배경 영역**으로 깔고 그 안에 pcap
+           구간 막대를 그린다. 누적(stack)이 아니라 **중첩**인 게 핵심 —
+           pcap 전파구간은 STA 체감 로밍의 부분집합이지 옆에 붙는 별개 구간이
+           아니다(실측: 전체 97ms 안에 pcap 25ms가 들어간다).
+           스캔은 여기 넣지 않는다 — ROAM 명령보다 1,044ms 앞서 끝나는 별개
+           이벤트라 같은 막대에 쌓으면 로밍이 그만큼 더 걸린 것처럼 보인다. */
+        const staTotals = seqs.map(s => (s.sta_log && typeof s.sta_log.total_ms === 'number')
+            ? s.sta_log.total_ms : null);
+        const hasStaLog = staTotals.some(v => v !== null);
+        const roamTraces = [];
+        if (hasStaLog) {
+            roamTraces.push({
+                type: 'scatter', mode: 'none', name: 'STA 체감 로밍 전체',
+                x: xs, y: staTotals, fill: 'tozeroy',
+                fillcolor: 'rgba(148,163,184,0.22)',
+                hovertemplate: 'STA 체감 %{y:.1f}ms<extra></extra>',
+            });
+        }
+        roamTraces.push(
+            {
+                type: 'bar', name: 'Auth→Reassoc', x: xs, y: segGap,
+                marker: { color: seqs.map(s => s.is_slow ? '#ef4444' : '#3b82f6') },
+                text: label, customdata: seqs.map(hoverOf),
+                hovertemplate: '%{text}<br>Auth→Reassoc %{y:.1f}ms<br>%{customdata}<extra></extra>',
             },
-            text: seqs.map(s => s.sta_name + ': ' + roamAp(s)),
-            hovertemplate: '%{text}<br>%{y:.1f}ms<extra></extra>',
-        }], {
+            {
+                type: 'bar', name: 'Reassoc→4-way 시작', x: xs, y: segWait,
+                marker: { color: '#8b5cf6' }, text: label,
+                hovertemplate: '%{text}<br>연결 대기 %{y:.1f}ms<extra></extra>',
+            },
+            {
+                type: 'bar', name: '4-way', x: xs, y: segFour,
+                marker: { color: '#22c55e' }, text: label,
+                hovertemplate: '%{text}<br>4-way %{y:.1f}ms<extra></extra>',
+            },
+        );
+        Plotly.newPlot('chart-roaming-gap', roamTraces, {
+            barmode: 'stack',
+            showlegend: true,
+            legend: { orientation: 'h', y: 1.12, font: { color: '#9ca3af', size: 10 } },
             ...DARK,
             dragmode: 'zoom',
             xaxis: { title: '\ub85c\ubc0d \uc2dc\ud000\uc2a4 #' },
-            yaxis: { title: 'Auth\u2192Assoc Gap (ms)' },
+            yaxis: { title: hasStaLog ? '\ub85c\ubc0d \uc18c\uc694 (ms) — \ud68c\uc0c9=STA \uccb4\uac10 \uc804\uccb4, \uc0c9=pcap \uad6c\uac04' : '\ub85c\ubc0d \uc18c\uc694 (ms) — \uad6c\uac04 \ub204\uc801' },
             shapes: [{
                 type: 'line', x0: 0, x1: seqs.length + 1, y0: 100, y1: 100,
                 line: { color: '#ef4444', dash: 'dash', width: 1 },
@@ -424,17 +480,92 @@
                 return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${ms}`;
             };
             // 4-way(ms): 구버전 JSON엔 four_way_ms 키가 없음 — null/undefined 모두 '-'
+            // gap 셀: 측정 불가면 숫자 대신 사유를 보여준다. 여기서 s.gap_ms를
+            // 그대로 toFixed하면 null에서 TypeError로 표 전체가 렌더되지 않는다.
+            const gapCell = s => {
+                if (gapMeasured(s)) {
+                    const lower = s.gap_basis === 'auth_response'
+                        ? ` <span class="text-amber-400" title="${escapeHtml(s.gap_note || '')}">(하한)</span>`
+                        : '';
+                    return s.gap_ms.toFixed(1) + lower;
+                }
+                return `<span class="text-gray-500" title="${escapeHtml(s.gap_note || '')}">측정불가</span>`
+                     + `<span class="block text-[10px] text-gray-600">${escapeHtml(missingText(s))}</span>`;
+            };
             rTable.innerHTML = seqs.map((s, i) =>
                 `<tr class="border-b border-gray-700/50 ${s.is_slow ? 'text-red-400' : ''}">
                     <td class="py-1">${i + 1}</td>
-                    <td class="py-1 font-mono text-xs">${fmtTime(s.auth_epoch)}</td>
+                    <td class="py-1 font-mono text-xs">${typeof s.auth_epoch === 'number' ? fmtTime(s.auth_epoch) : (typeof s.assoc_epoch === 'number' ? fmtTime(s.assoc_epoch) : '-')}</td>
                     <td class="py-1 font-mono text-xs">${s.sta_name}</td>
                     <td class="py-1 font-mono text-xs">${roamAp(s)}</td>
-                    <td class="py-1 text-right">${s.gap_ms.toFixed(1)}</td>
+                    <td class="py-1 text-right">${gapCell(s)}</td>
                     <td class="py-1 text-right">${typeof s.four_way_ms === 'number' ? s.four_way_ms.toFixed(1) : '-'}</td>
+                    <td class="py-1 text-right font-semibold">${typeof s.total_roam_ms === 'number'
+                        ? s.total_roam_ms.toFixed(1)
+                        : `<span class="text-gray-500 font-normal" title="${escapeHtml(s.total_note || '')}">-</span>`}</td>
+                    <td class="py-1 text-right">${(s.sta_log && typeof s.sta_log.total_ms === 'number')
+                        ? `<span class="text-sky-300 font-semibold" title="${escapeHtml(
+                              'ROAM 명령 → CONNECTED · 출처 ' + (s.sta_log.source || '') +
+                              (s.sta_log.reason ? ' · 사유 ' + s.sta_log.reason : '') +
+                              (typeof s.sta_log.scan_ms === 'number' ? ' · 직전 스캔 ' + s.sta_log.scan_ms + 'ms' : '') +
+                              ' · 정렬 잔차 ' + s.sta_log.residual_ms + 'ms')}">${s.sta_log.total_ms.toFixed(1)}</span>`
+                        : '<span class="text-gray-600">-</span>'}</td>
                     <td class="py-1">${s.assoc_type}</td>
                 </tr>`
             ).join('');
+        }
+
+        /* STA 로그 상관 요약 — 어느 로그가 어느 STA에 붙었는지, 그리고 pcap이
+           못 보는 비중이 얼마인지. 개별 로밍의 세부 구간(드라이버 20ms 등)은
+           로그 스탬프 정밀도(±20ms대)를 넘어서므로 분포로만 낸다. */
+        const stCard = document.getElementById('station-log-card');
+        const stBody = document.getElementById('station-log-body');
+        const stInfo = DATA.station_logs;
+        if (stCard && stBody && stInfo && (stInfo.stations || []).length) {
+            const rows = stInfo.stations.map(st => {
+                const warn = (st.warnings || []).length
+                    ? `<div class="text-yellow-400 mt-0.5">${st.warnings.map(escapeHtml).join('<br>')}</div>` : '';
+                const matched = st.sta_name
+                    ? `<span class="text-sky-300">${escapeHtml(st.sta_name)}</span>
+                       <span class="text-gray-500">(${escapeHtml(st.match_method === 'ip' ? 'IP 매칭' : '시각 상관')})</span>`
+                    : '<span class="text-yellow-400">매칭 실패</span>';
+                return `<tr class="border-b border-gray-700/40">
+                    <td class="py-1 pr-3">${escapeHtml(st.name)}</td>
+                    <td class="py-1 pr-3 font-mono">${escapeHtml(st.sta_ip || '-')}</td>
+                    <td class="py-1 pr-3">${matched}${warn}</td>
+                    <td class="py-1 pr-3 text-right">${st.attached}/${st.roam_total}</td>
+                    <td class="py-1 pr-3 text-right">${st.total_ms_p50 ?? '-'}</td>
+                    <td class="py-1 pr-3 text-right">${st.scan_ms_p50 ?? '-'}</td>
+                    <td class="py-1 text-right text-gray-500">${st.residual_mad_ms ?? '-'}</td>
+                </tr>`;
+            }).join('');
+            // pcap이 못 보는 비중 — 같은 로밍끼리 대조한 중앙값 기준.
+            const paired = seqs.filter(s => s.sta_log && typeof s.sta_log.total_ms === 'number'
+                                            && typeof s.total_roam_ms === 'number');
+            let note = '';
+            if (paired.length) {
+                const med = arr => { const v = arr.slice().sort((a, b) => a - b); return v[Math.floor(v.length / 2)]; };
+                const p = med(paired.map(s => s.total_roam_ms));
+                const t = med(paired.map(s => s.sta_log.total_ms));
+                note = `<p class="mt-2 text-gray-400">같은 로밍 ${paired.length.toLocaleString()}건 대조 —
+                    pcap 전파구간 <span class="text-gray-200">${p.toFixed(1)}ms</span> vs
+                    STA 체감 <span class="text-sky-300">${t.toFixed(1)}ms</span>.
+                    <span class="text-gray-200">${((1 - p / t) * 100).toFixed(1)}%</span>가 전파에 나타나지 않는 구간
+                    (스캔·로밍 판단·드라이버 처리·키 설치).</p>
+                    <p class="text-gray-500 mt-1">스캔은 ROAM 명령보다 약 1초 앞서 끝나는 별개 이벤트라 로밍 소요에 합산하지 않는다.
+                    개별 로밍의 세부 구간은 로그 스탬프 정밀도(±20ms대)를 넘어서므로 분포로만 표기한다.</p>`;
+            }
+            stBody.innerHTML = `<table class="w-full">
+                <thead class="text-gray-400"><tr>
+                    <th class="text-left py-1 pr-3">로그</th>
+                    <th class="text-left py-1 pr-3">STA IP</th>
+                    <th class="text-left py-1 pr-3">매칭된 STA</th>
+                    <th class="text-right py-1 pr-3">부착/로밍</th>
+                    <th class="text-right py-1 pr-3">체감 p50</th>
+                    <th class="text-right py-1 pr-3">스캔 p50</th>
+                    <th class="text-right py-1">정렬 MAD</th>
+                </tr></thead><tbody>${rows}</tbody></table>${note}`;
+            stCard.classList.remove('hidden');
         }
     }
 
@@ -1959,7 +2090,10 @@
                 <div class="space-y-1.5 mb-3">
                     ${miniBar('Retry', scores.retry || 0)}
                     ${miniBar('RSSI', scores.rssi || 0)}
-                    ${miniBar('\ub85c\ubc0d', scores.roaming || 0)}
+                    ${typeof scores.roaming === 'number'
+                        ? miniBar('\ub85c\ubc0d', scores.roaming)
+                        : `<div class="flex items-center gap-2 text-xs"><span class="w-12 text-gray-400">\ub85c\ubc0d</span>
+                             <span class="text-gray-500" title="\uc774 STA\uc758 \ub85c\ubc0d\uc774 \uc804\ubd80 \ud310\uc815 \ubd88\uac00(4-way \ubbf8\ud3ec\ucc29)">\uce21\uc815\ubd88\uac00</span></div>`}
                 </div>
                 <div class="grid grid-cols-2 gap-1 text-xs text-gray-400 mb-3">
                     <div>Retry: ${m.retry_pct || 0}%</div>

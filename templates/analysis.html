@@ -256,14 +256,20 @@
     </div>
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
         <h3 class="text-sm font-semibold text-gray-400 mb-2">로밍 이벤트 상세</h3>
+        <div id="station-log-card" class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4 hidden">
+            <h3 class="text-sm font-semibold text-gray-300 mb-2">STA 로그 상관</h3>
+            <div id="station-log-body" class="text-xs text-gray-300"></div>
+        </div>
         <table class="w-full text-sm" id="roaming-table">
             <thead class="text-gray-400 border-b border-gray-700">
                 <tr><th class="text-left py-2">#</th>
                     <th class="text-left py-2">시각 (Auth)</th>
                     <th class="text-left py-2">STA</th>
                     <th class="text-left py-2">AP (이전→이후)</th>
-                    <th class="text-right py-2">Gap(ms)</th>
-                    <th class="text-right py-2">4-way(ms)</th>
+                    <th class="text-right py-2" title="Auth 요청 → Reassoc 요청 구간만">Gap(ms)</th>
+                    <th class="text-right py-2" title="EAPOL 4-way 핸드셰이크 소요">4-way(ms)</th>
+                    <th class="text-right py-2" title="Auth 요청 → 4-way 완료 (pcap이 보는 전부)">pcap(ms)</th>
+                    <th class="text-right py-2" title="STA 로그 기준 ROAM 명령 → CONNECTED (전파 밖 포함)">STA 체감(ms)</th>
                     <th class="text-left py-2">Type</th></tr>
             </thead>
             <tbody></tbody>

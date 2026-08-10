@@ -361,6 +361,13 @@ def _sta_diags_section(
             v = metrics.get(k)
             if v is not None:
                 m_parts.append(f"{label} {v}{unit}")
+                # "느린 로밍 0회"는 판정 자체가 안 된 경우에도 정상처럼 읽힌다 —
+                # 실제 분모(판정된 로밍 수)를 바로 옆에 병기한다.
+                if k == "slow_roaming":
+                    total_r = metrics.get("roaming_count")
+                    meas = metrics.get("roaming_measurable")
+                    if isinstance(meas, int) and isinstance(total_r, int) and meas < total_r:
+                        m_parts[-1] += f" (판정 {meas}/{total_r}회)"
         if m_parts:
             lines.append(f"- 메트릭: {' · '.join(m_parts)}")
         # 신호 급락(cliff) — 타임라인에만 있던 RSSI 급강하 이벤트를 리포트에 노출.
@@ -552,18 +559,31 @@ def _roaming_section(structured: Dict[str, Any]) -> List[str]:
     if not isinstance(seqs, list) or not seqs:
         return []
     lines = ["## 로밍 (BSS Transition)", ""]
-    lines.append("| # | 시각(Auth) | STA | AP (이전→이후) | Gap(ms) | 4-way(ms) | 밴드 전환 |")
-    lines.append("|---|---|---|---|---|---|---|")
+    # Gap은 Auth→Reassoc 구간만이라 로밍 전체 소요와 다르다 — 둘 다 싣는다.
+    lines.append(
+        "| # | 시각(Auth) | STA | AP (이전→이후) | Gap(ms) | 4-way(ms) | 전체(ms) | 밴드 전환 |"
+    )
+    lines.append("|---|---|---|---|---|---|---|---|")
     for i, s in enumerate(seqs[:20], start=1):
         if not isinstance(s, dict):
             continue
-        ts = _format_epoch(s.get("auth_epoch")) or "?"
+        # 측정 불가면 auth_epoch이 없다 — Assoc 시각으로 대체해 행이 "?"가 되지 않게.
+        ts = _format_epoch(s.get("auth_epoch")) or _format_epoch(s.get("assoc_epoch")) or "?"
         sta = _clean_cell(s.get("sta_name") or s.get("sta") or "?")
         ap_to = _clean_cell(s.get("ap_name") or s.get("ap") or "?")
         prev = s.get("prev_ap_name") or ""
         ap_str = f"{_clean_cell(prev)} → {ap_to}" if prev else ap_to
         gap = s.get("gap_ms")
-        gap_str = f"{gap}" if gap is not None else "-"
+        if isinstance(gap, (int, float)):
+            gap_str = f"{gap}"
+            # AP 응답 기준으로 잰 하한값이면 그 사실을 숨기지 않는다.
+            if s.get("gap_basis") == "auth_response":
+                gap_str += " (하한)"
+        else:
+            # 무엇이 없어서 못 쟀는지 함께 적는다 — "-"만 두면 지연이 없었던 것처럼 읽힌다.
+            missing = s.get("missing_labels") or []
+            miss_str = ", ".join(str(m) for m in missing) if missing else "Auth 프레임"
+            gap_str = f"측정불가 ({miss_str} 미포착)"
         fw = s.get("four_way_ms")
         fw_str = f"{fw}" if isinstance(fw, (int, float)) else "-"
         bc = s.get("band_change")
@@ -573,9 +593,18 @@ def _roaming_section(structured: Dict[str, Any]) -> List[str]:
             bc_str = "동일"
         else:
             bc_str = "-"
+        total = s.get("total_roam_ms")
+        total_str = f"{total}" if isinstance(total, (int, float)) else "-"
         lines.append(
-            f"| {i} | {ts} | {sta} | {ap_str} | {gap_str} | {fw_str} | {bc_str} |"
+            f"| {i} | {ts} | {sta} | {ap_str} | {gap_str} | {fw_str} | {total_str} | {bc_str} |"
         )
+    lines.append("")
+    lines.append(
+        "> Gap = Auth 요청 → Reassoc 요청 구간만. 전체 = Auth 요청 → 4-way 완료 "
+        "(로밍 실소요). **느린 로밍 판정은 전체 기준**이다. 4-way를 못 찾으면 전체는 "
+        "`-`이고, 그때는 Gap이 이미 임계를 넘은 경우에만 느림으로 확정한다"
+        "(전체 ≥ Gap 이므로)."
+    )
     if len(seqs) > 20:
         lines.append("")
         lines.append(f"_(총 {len(seqs)}건 중 앞 20건만 표시)_")

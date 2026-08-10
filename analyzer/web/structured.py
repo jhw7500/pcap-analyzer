@@ -566,7 +566,7 @@ def _structured_roaming(
     assoc 직후 첫 4-way duration(four_way_ms)을 부착한다(매칭 실패 시 None).
     """
     from ..core.detector import mac_name
-    from ..core.modules.eapol import match_four_way_ms
+    from ..core.modules.eapol import match_four_way
 
     roaming_frames = [f for f in frames if f.is_roaming_related]
     sta_macs = {mac for mac, role in roles.items() if role.get("role") == "STA"}
@@ -578,50 +578,105 @@ def _structured_roaming(
         info = ap_ch.get(mac)
         return info.get(key) if info else None
 
+    # 짝짓기 규칙은 roaming.pair_roaming_sequences(단일 소스) — 텍스트 모듈과
+    # 같은 시퀀스를 봐야 한다. 이전에는 이 로직이 양쪽에 복제돼 있었고, 그래서
+    # "앵커를 소비 후 지우지 않아 수십 초 전 Auth와 짝지어지는" 결함도 양쪽에
+    # 똑같이 있었다(자세한 근거는 그 함수 docstring).
+    from ..core.modules.roaming import MISSING_FRAME_LABELS, pair_roaming_sequences
+
     sequences = []
-    auth_events: Dict[str, Frame] = {}
-    for frame in roaming_frames:
-        if frame.subtype == "11" and frame.ta in sta_macs:
-            auth_events[frame.ta] = frame
-        elif frame.subtype in ("0", "2") and frame.ta in sta_macs:
-            auth_frame = auth_events.get(frame.ta)
-            if auth_frame is None:
-                continue
-            gap_ms = (frame.epoch - auth_frame.epoch) * 1000
-            prev_ap = frame.current_ap or ""
-            prev_band = _ch_of(prev_ap, "band") if prev_ap else None
-            new_band = _ch_of(frame.ra, "band")
-            # 양쪽 밴드를 모두 알 때만 전환 여부 판정, 아니면 None(정보 없음).
-            band_change = (
-                prev_band != new_band
-                if prev_band is not None and new_band is not None
-                else None
+    for pairing in pair_roaming_sequences(roaming_frames, sta_macs):
+        frame = pairing.assoc
+        auth_frame = pairing.auth
+        # gap_ms는 **None일 수 있다**(이 로밍의 Auth가 캡처에 없어 시작 시각을
+        # 모르는 경우). 시퀀스 자체는 남긴다 — 로밍은 실제로 일어났으므로 횟수에서
+        # 빠지면 안 되고, 대신 gap을 지어내지 않는다(정직한 공백). 소비자는
+        # gap_ms is None을 반드시 처리해야 한다.
+        gap_ms = pairing.gap_ms
+        prev_ap = frame.current_ap or ""
+        prev_band = _ch_of(prev_ap, "band") if prev_ap else None
+        new_band = _ch_of(frame.ra, "band")
+        # 양쪽 밴드를 모두 알 때만 전환 여부 판정, 아니면 None(정보 없음).
+        band_change = (
+            prev_band != new_band
+            if prev_band is not None and new_band is not None
+            else None
+        )
+        # 4-way를 한 번만 매칭해 duration과 종료 시각을 함께 쓴다.
+        hs = match_four_way(frame.epoch, frame.ta, handshakes or [], ap=frame.ra)
+        four_way_ms = hs.get("duration_ms") if hs else None
+        total_roam_ms = None
+        total_note = ""
+        hs_end = hs.get("end_epoch") if hs else None
+        if auth_frame is not None and isinstance(hs_end, (int, float)):
+            total_roam_ms = round((hs_end - auth_frame.epoch) * 1000, 1)
+        elif auth_frame is None:
+            total_note = "Auth 프레임 미포착 — 시작 시각을 몰라 전체 소요 계산 불가"
+        else:
+            total_note = (
+                "4-way 핸드셰이크가 캡처에 없어 완료 시점 불명 "
+                "(802.11r FT로 생략됐거나 모니터가 EAPOL을 놓침)"
             )
-            sequences.append(
-                {
-                    "sta": frame.ta,
-                    "sta_name": mac_name(frame.ta, roles),
-                    "prev_ap": prev_ap,
-                    "prev_ap_name": mac_name(prev_ap, roles) if prev_ap else "",
-                    "ap": frame.ra,
-                    "ap_name": mac_name(frame.ra, roles),
-                    "auth_epoch": auth_frame.epoch,
-                    "assoc_epoch": frame.epoch,
-                    "auth_fnum": auth_frame.number,
-                    "assoc_fnum": frame.number,
-                    "gap_ms": round(gap_ms, 1),
-                    "assoc_type": frame.subtype_name,
-                    "is_slow": gap_ms > ROAM_GAP_DANGER_MS,
-                    "prev_ap_channel": _ch_of(prev_ap, "channel") if prev_ap else None,
-                    "prev_ap_band": prev_band,
-                    "ap_channel": _ch_of(frame.ra, "channel"),
-                    "ap_band": new_band,
-                    "band_change": band_change,
-                    "four_way_ms": match_four_way_ms(
-                        frame.epoch, frame.ta, handshakes or [], ap=frame.ra
-                    ),
-                }
-            )
+        if total_roam_ms is not None:
+            is_slow = total_roam_ms > ROAM_GAP_DANGER_MS
+            slow_basis = "total"
+        elif gap_ms is not None and gap_ms > ROAM_GAP_DANGER_MS:
+            # total ≥ gap 이므로 전체도 반드시 임계 초과 — 확정.
+            is_slow = True
+            slow_basis = "gap_lower_bound"
+        else:
+            is_slow = False
+            slow_basis = None       # 판정 불가
+        sequences.append(
+            {
+                "sta": frame.ta,
+                "sta_name": mac_name(frame.ta, roles),
+                "prev_ap": prev_ap,
+                "prev_ap_name": mac_name(prev_ap, roles) if prev_ap else "",
+                "ap": frame.ra,
+                "ap_name": mac_name(frame.ra, roles),
+                "auth_epoch": auth_frame.epoch if auth_frame else None,
+                "assoc_epoch": frame.epoch,
+                "auth_fnum": auth_frame.number if auth_frame else None,
+                "assoc_fnum": frame.number,
+                "gap_ms": round(gap_ms, 1) if gap_ms is not None else None,
+                "assoc_type": frame.subtype_name,
+                # 느린 로밍 판정은 **로밍 전체 소요(total_roam_ms)** 기준이다.
+                # gap_ms(Auth→Reassoc)에만 임계를 걸면 전체 25.2ms 중 5.3ms
+                # 구간만 보게 돼, 4-way가 길어 실제로 느린 로밍을 놓친다
+                # (실측: gap 6.3ms인데 4-way 41.7ms로 전체 105ms인 건이 있다).
+                #
+                # total이 없어도(4-way 미포착) **total ≥ gap이 항상 성립**하므로
+                # gap이 이미 임계를 넘으면 그 로밍은 확정적으로 느리다 — 아는
+                # 정보를 버리지 않는다. 둘 다 아니면 판정 불가(slow_basis=None)로
+                # 두고, 건강도 분모에서 제외한다.
+                "is_slow": is_slow,
+                "slow_basis": slow_basis,
+                # gap을 무엇을 기준으로 쟀는지 / 무엇이 없어서 못 쟀는지.
+                "gap_basis": pairing.basis,
+                "missing": list(pairing.missing),
+                "missing_labels": [
+                    MISSING_FRAME_LABELS.get(code, code) for code in pairing.missing
+                ],
+                "gap_note": pairing.note,
+                "prev_ap_channel": _ch_of(prev_ap, "channel") if prev_ap else None,
+                "prev_ap_band": prev_band,
+                "ap_channel": _ch_of(frame.ra, "channel"),
+                "ap_band": new_band,
+                "band_change": band_change,
+                "four_way_ms": four_way_ms,
+                # 로밍 **전체** 소요: Auth 요청 → 4-way 완료.
+                # gap_ms(Auth→Reassoc 요청)는 전체의 일부에 불과하다 — 실측
+                # 중앙값이 전체 25.1ms 중 5.3ms로, 나머지 대부분이 4-way다.
+                # gap+four_way 단순 합이 아니라 실제 종료 시각에서 계산한다
+                # (Reassoc 요청 ~ 4-way 시작 사이 대기가 빠지기 때문).
+                "total_roam_ms": total_roam_ms,
+                # 4-way를 못 찾으면 전체 소요를 알 수 없다(FT로 생략됐거나
+                # 모니터가 EAPOL을 놓쳤거나) — 지어내지 않고 None.
+                "total_basis": "four_way" if total_roam_ms is not None else None,
+                "total_note": total_note,
+            }
+        )
 
     return {
         "roaming_frame_count": len(roaming_frames),
@@ -1308,9 +1363,25 @@ def _structured_diagnosis(
     )
 
     retry_score = max(0, 100 - retry_pct * 5)
-    roam_score = 100
-    if len(roam_seqs) > 0:
-        slow_ratio = len(slow_roams) / len(roam_seqs) * 100
+    # gap 측정 불가 시퀀스는 느린지 아닌지 **알 수 없다**. 분모에 그대로 넣으면
+    # "느린 로밍 비율"이 희석돼 점수가 낙관적으로 부풀려진다 — 극단적으로 전량
+    # 측정 불가면 만점이 나와 "캡처가 나쁠수록 건강해 보이는" 역전이 생긴다.
+    # 측정된 시퀀스만 분모로 쓰고, 하나도 없으면 loss와 같이 None(측정 불가)으로
+    # 두어 아래 가중치 재정규화에 태운다.
+    # "판정 가능"의 기준은 gap 유무가 아니라 **느린 로밍 판정이 섰는지**다
+    # (slow_basis). total이 있거나, total이 없어도 gap이 이미 임계를 넘어 확정된
+    # 경우가 판정 가능이다. 구버전 result에는 slow_basis가 없으므로 gap 유무로 폴백.
+    measurable_roams = [
+        seq for seq in roam_seqs
+        if seq.get("slow_basis") is not None
+        or ("slow_basis" not in seq and isinstance(seq.get("gap_ms"), (int, float)))
+    ]
+    if not roam_seqs:
+        roam_score = 100          # 로밍 자체가 없음 = 문제 없음
+    elif not measurable_roams:
+        roam_score = None         # 로밍은 있으나 전부 측정 불가 = 판정 불가
+    else:
+        slow_ratio = len(slow_roams) / len(measurable_roams) * 100
         roam_score = max(0, 100 - slow_ratio * 2)
     loss_score = max(0, 100 - loss_pct * 10) if ping_available else None
 
@@ -1350,12 +1421,24 @@ def _structured_diagnosis(
         s_rssi = 100
         if rssi_avg is not None:
             s_rssi = max(0, min(100, (rssi_avg + 90) * 2.5))
-        s_roam = (
-            100
-            if not sta_roams
-            else max(0, 100 - len(sta_slow_roams) / max(len(sta_roams), 1) * 200)
+        # 전체 점수와 같은 원칙 — 측정 불가는 분모에서 뺀다(계수 200이라 왜곡 폭이
+        # 전체 점수의 2배다). 전부 측정 불가면 로밍 컴포넌트를 빼고 재정규화한다.
+        sta_measurable = [
+            s for s in sta_roams
+            if s.get("slow_basis") is not None
+            or ("slow_basis" not in s and isinstance(s.get("gap_ms"), (int, float)))
+        ]
+        if not sta_roams:
+            s_roam = 100
+        elif not sta_measurable:
+            s_roam = None
+        else:
+            s_roam = max(0, 100 - len(sta_slow_roams) / len(sta_measurable) * 200)
+        _sta_weights = [(s_retry, 0.35), (s_rssi, 0.35), (s_roam, 0.3)]
+        _sta_avail = [(v, w) for v, w in _sta_weights if v is not None]
+        s_overall = round(
+            sum(v * w for v, w in _sta_avail) / sum(w for _, w in _sta_avail)
         )
-        s_overall = round(s_retry * 0.35 + s_rssi * 0.35 + s_roam * 0.3)
 
         issues = []
 
@@ -1464,7 +1547,10 @@ def _structured_diagnosis(
             _add_issue(
                 {
                     "severity": "high",
-                    "msg": f"느린 로밍 {len(sta_slow_roams)}회 (>{ROAM_GAP_DANGER_MS}ms)",
+                    "msg": (
+                        f"느린 로밍 {len(sta_slow_roams)}회 "
+                        f"(전체 소요 >{ROAM_GAP_DANGER_MS}ms)"
+                    ),
                     "action": "802.11r/k/v 설정 확인, 로밍 히스테리시스 조정",
                 },
                 refs, window, signal_type="slow_roaming",
@@ -1488,7 +1574,10 @@ def _structured_diagnosis(
                 "scores": {
                     "retry": round(s_retry),
                     "rssi": round(s_rssi),
-                    "roaming": round(s_roam),
+                    # 그 STA의 로밍이 전부 판정 불가면 None(측정 불가) — 전체
+                    # component_scores.roaming과 같은 규약이다. 0으로도 100으로도
+                    # 쓰면 안 된다(모르는 값을 점수로 단정하는 것).
+                    "roaming": round(s_roam) if s_roam is not None else None,
                 },
                 "metrics": {
                     "retry_pct": sta_retry,
@@ -1496,6 +1585,8 @@ def _structured_diagnosis(
                     "rssi_min": rssi_min,
                     "roaming_count": len(sta_roams),
                     "slow_roaming": len(sta_slow_roams),
+                    # 느림 판정이 선 로밍 수 — slow_roaming의 실제 분모.
+                    "roaming_measurable": len(sta_measurable),
                     "total_frames": ds.get("total_frames", 0),
                 },
                 "issues": issues,
@@ -1645,7 +1736,8 @@ def _structured_diagnosis(
             # None = 측정 불가(ICMP 없음). JSON에는 null로 직렬화되며 구버전
             # result(숫자)와 소비자(charts.js/report.py)가 모두 분기 처리한다.
             "loss": round(loss_score) if loss_score is not None else None,
-            "roaming": round(roam_score),
+            # 측정 불가면 None — loss와 동일 규약(소비자가 분기 처리).
+            "roaming": round(roam_score) if roam_score is not None else None,
         },
         "summary": {
             "total_frames": total_frames,
@@ -1653,6 +1745,10 @@ def _structured_diagnosis(
             "loss_pct": loss_pct if ping_available else None,
             "roaming_total": len(roam_seqs),
             "roaming_slow": len(slow_roams),
+            # 느린 로밍 비율의 실제 분모와, 판정 불가 건수를 숨기지 않는다 —
+            # 이게 없으면 "총 N회 중 느린 M회"가 정상 비율처럼 읽힌다.
+            "roaming_measurable": len(measurable_roams),
+            "roaming_unmeasured": len(roam_seqs) - len(measurable_roams),
             "delay_zones": len(delay_zones),
             "anomaly_count": len(anom_events),
         },

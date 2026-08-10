@@ -123,31 +123,64 @@ def _build_roaming_section(roaming: dict) -> list:
         return []
     slow = [s for s in seqs if s.get("is_slow")]
     failed = [s for s in seqs if s.get("failed") or s.get("status") == "failed"]
-    gaps = [s.get("gap_ms", 0) for s in seqs if s.get("gap_ms") is not None]
+    # gap_ms는 None(측정 불가)일 수 있다 — 통계에서 제외해야 평균이 왜곡되지 않는다.
+    gaps = [s.get("gap_ms") for s in seqs if isinstance(s.get("gap_ms"), (int, float))]
+    unmeasured = [s for s in seqs if s.get("gap_ms") is None]
     lines = ["", "## 로밍 (BSS Transition)"]
+    unmeasured_str = f" / gap 측정불가 {len(unmeasured)}회" if unmeasured else ""
     lines.append(
-        f"- 총 {len(seqs)}회 / 느린 로밍(>{ROAM_GAP_DANGER_MS}ms) {len(slow)}회 / "
-        f"실패 {len(failed)}회"
+        f"- 총 {len(seqs)}회 / 느린 로밍(전체 소요 >{ROAM_GAP_DANGER_MS}ms) {len(slow)}회 / "
+        f"실패 {len(failed)}회{unmeasured_str}"
     )
+    if unmeasured:
+        lines.append(
+            "  · 측정불가 = 그 로밍의 Auth 프레임이 캡처에 없어 시작 시각을 알 수 없음"
+            " (지연이 없었다는 뜻이 아님 — 판단 근거로 쓰지 말 것)"
+        )
     if gaps:
         lines.append(
-            f"- gap_ms: min={min(gaps):.1f} / avg={sum(gaps)/len(gaps):.1f} / "
-            f"max={max(gaps):.1f}"
+            f"- gap_ms(Auth→Reassoc 구간만): min={min(gaps):.1f} / "
+            f"avg={sum(gaps)/len(gaps):.1f} / max={max(gaps):.1f}"
+        )
+    # 로밍 실소요는 4-way까지 포함해야 한다 — gap_ms만 보면 크게 과소평가된다.
+    totals = [
+        s.get("total_roam_ms") for s in seqs
+        if isinstance(s.get("total_roam_ms"), (int, float))
+    ]
+    if totals:
+        lines.append(
+            f"- total_roam_ms(Auth→4-way 완료 = 로밍 실소요, n={len(totals)}): "
+            f"min={min(totals):.1f} / avg={sum(totals)/len(totals):.1f} / "
+            f"max={max(totals):.1f}"
+        )
+        lines.append(
+            "  · gap_ms는 전체의 일부 구간일 뿐이다 — 로밍 빠르기 판단은 "
+            "total_roam_ms로 할 것"
         )
     # 느린 로밍 top 5 상세 (gap 큰 순). 4-way/밴드 전환은 신규 키 — 있을 때만 표기.
-    for s in sorted(slow or seqs, key=lambda x: -x.get("gap_ms", 0))[:5]:
-        ts = s.get("auth_epoch") or s.get("timestamp") or "?"
+    def _gap_sort_key(x):
+        g = x.get("gap_ms")
+        # None(측정 불가)은 -None이 TypeError라 정렬에서 맨 뒤로 보낸다.
+        return -g if isinstance(g, (int, float)) else float("inf")
+
+    for s in sorted(slow or seqs, key=_gap_sort_key)[:5]:
+        # auth_epoch은 측정 불가 시 None — Assoc 시각으로 폴백(항상 아는 값).
+        ts = s.get("auth_epoch") or s.get("assoc_epoch") or s.get("timestamp") or "?"
         sta = s.get("sta_name") or s.get("sta") or "?"
         ap = s.get("ap_name") or s.get("ap") or "?"
         atype = s.get("assoc_type", "?")
-        gap = s.get("gap_ms", 0)
+        gap = s.get("gap_ms")
         extra = ""
         fw = s.get("four_way_ms")
         if isinstance(fw, (int, float)):
             extra += f", 4-way={fw:.1f}ms"
         if s.get("band_change") is True:
             extra += f", 밴드 전환 {s.get('prev_ap_band') or '?'}→{s.get('ap_band') or '?'}"
-        lines.append(f"  · t={ts} {sta} → {ap} [{atype}], gap={gap:.1f}ms{extra}")
+        gap_str = f"{gap:.1f}ms" if isinstance(gap, (int, float)) else "측정불가"
+        tot = s.get("total_roam_ms")
+        if isinstance(tot, (int, float)):
+            extra += f", 전체={tot:.1f}ms"
+        lines.append(f"  · t={ts} {sta} → {ap} [{atype}], gap={gap_str}{extra}")
     # STA별 로밍 횟수
     sta_counts: dict = {}
     for s in seqs:

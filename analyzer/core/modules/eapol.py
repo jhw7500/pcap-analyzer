@@ -140,18 +140,21 @@ def build_handshakes(
     return {"handshakes": handshakes}
 
 
-def match_four_way_ms(
+def match_four_way(
     assoc_epoch: float,
     sta: str,
     handshakes: List[Dict[str, Any]],
     window_sec: float = HANDSHAKE_GAP_SEC,
     ap: Optional[str] = None,
-) -> Optional[float]:
-    """assoc 직후 첫 완결 핸드셰이크의 duration_ms. 매칭 실패 시 None.
+) -> Optional[Dict[str, Any]]:
+    """assoc 직후 첫 완결 핸드셰이크 dict. 매칭 실패 시 None.
 
     핸드셰이크 msg1은 assoc과 거의 동시에 캡처될 수 있어 50ms 슬랙을 둔다.
     ap가 주어지면 해당 AP와의 핸드셰이크만 매칭 — 다중 AP 로밍 캡처에서
     이전 AP의 핸드셰이크가 새 AP 행에 오귀속되는 것을 방지.
+
+    `match_four_way_ms`(소요 시간만)와 로밍 전체 소요(`total_roam_ms`, 핸드셰이크
+    **종료 시각**이 필요) 양쪽이 같은 매칭 규칙을 쓰도록 이 함수를 단일 소스로 둔다.
     """
     best = None
     for h in handshakes:
@@ -165,4 +168,16 @@ def match_four_way_ms(
         if assoc_epoch - 0.05 <= start <= assoc_epoch + window_sec:
             if best is None or start < best.get("start_epoch", float("inf")):
                 best = h
+    return best
+
+
+def match_four_way_ms(
+    assoc_epoch: float,
+    sta: str,
+    handshakes: List[Dict[str, Any]],
+    window_sec: float = HANDSHAKE_GAP_SEC,
+    ap: Optional[str] = None,
+) -> Optional[float]:
+    """assoc 직후 첫 완결 핸드셰이크의 duration_ms. 매칭 실패 시 None."""
+    best = match_four_way(assoc_epoch, sta, handshakes, window_sec, ap)
     return best.get("duration_ms") if best else None

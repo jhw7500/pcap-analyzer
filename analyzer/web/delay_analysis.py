@@ -28,9 +28,16 @@ def _find_cause(
     per_second_timeline: List[Dict],
 ) -> str:
     """지연 구간의 원인을 추정한다."""
-    # 로밍 이벤트가 2초 이내에 있는지 확인
+    # 로밍 이벤트가 2초 이내에 있는지 확인.
+    # auth_epoch은 그 로밍의 Auth가 캡처에 없으면 None이다(gap 측정 불가) —
+    # 그래도 **Assoc 시각은 항상 알므로** 그걸로 폴백해야 로밍이 원인 후보에서
+    # 통째로 빠지지 않는다. (None을 그대로 빼면 TypeError로 분석이 죽는다.)
     for seq in roaming_sequences:
-        roam_epoch = seq.get("auth_epoch", 0)
+        roam_epoch = seq.get("auth_epoch")
+        if not isinstance(roam_epoch, (int, float)):
+            roam_epoch = seq.get("assoc_epoch")
+        if not isinstance(roam_epoch, (int, float)):
+            continue
         if abs(roam_epoch - start_epoch) <= 2.0 or abs(roam_epoch - end_epoch) <= 2.0:
             return "roaming"
         if start_epoch <= roam_epoch <= end_epoch:

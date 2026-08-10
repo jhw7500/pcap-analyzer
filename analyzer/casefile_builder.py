@@ -176,10 +176,23 @@ def build_casefile(result: Dict[str, Any], incident_id: str = "") -> Dict[str, A
         observed.append(
             {
                 "layer": "observed",
-                "message": f"로밍 시퀀스 {seq.get('assoc_type', 'assoc')} gap {seq.get('gap_ms', 0)}ms",
+                "message": (
+                    f"로밍 시퀀스 {seq.get('assoc_type', 'assoc')} "
+                    + (
+                        f"gap {seq['gap_ms']}ms"
+                        if isinstance(seq.get("gap_ms"), (int, float))
+                        else "gap 측정불가(Auth 프레임 미포착)"
+                    )
+                ),
                 "source_type": "pcap_metric",
                 "source_ref": f"roaming:{seq.get('auth_fnum')}->{seq.get('assoc_fnum')}",
-                "timestamp": float(seq.get("auth_epoch") or selected.trigger_ts),
+                # auth_epoch은 gap 측정 불가 시 None이다 — 그때도 Assoc 시각은
+                # 정확히 알므로 incident 트리거 시각으로 뭉개지 않고 그걸 쓴다.
+                "timestamp": float(
+                    seq.get("auth_epoch")
+                    or seq.get("assoc_epoch")
+                    or selected.trigger_ts
+                ),
                 "confidence": "high",
                 "explainability": "structured.roaming.sequences에서 incident window 기준 추출",
             }
