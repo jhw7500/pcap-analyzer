@@ -78,19 +78,34 @@ def estimate_offset(
     if not log_epochs or not pcap_epochs:
         return None, 0, float("inf")
 
-    # 타임존 사전 정렬 — STA 로그의 시각 문자열에는 타임존이 없어 파서가 **분석
-    # 서버의 로컬 타임존**으로 해석한다(station_log._parse_ts). 서버가 UTC이고
-    # 로그가 Asia/Seoul이면 모든 시각이 9시간 어긋나 ±30초 탐색으로는 한 쌍도
-    # 못 찾고 STA 로그가 통째로 무시된다(개발 호스트가 KST라 드러나지 않았다).
-    # 실제 타임존 차이는 15분 배수이므로, 중앙값 차이를 15분 격자에 스냅해 거친
-    # 오프셋을 먼저 걷어내고 그 위에서 원래의 정밀 탐색을 한다. 탐색 범위 안이면
-    # 0이라 기존 동작이 그대로다.
-    coarse = statistics.median(pcap_epochs) - statistics.median(log_epochs)
-    coarse = round(coarse / TZ_SNAP_SEC) * TZ_SNAP_SEC if abs(coarse) > search_sec else 0.0
-    if coarse:
-        log_epochs = [le + coarse for le in log_epochs]
-
     pcap_sorted = sorted(pcap_epochs)
+    direct = _search_offset(log_epochs, pcap_sorted, search_sec)
+    if direct[1] >= MIN_MATCHES:
+        return direct
+
+    # 타임존 폴백 — STA 로그의 시각 문자열에는 타임존이 없어 파서가 **분석 서버의
+    # 로컬 타임존**으로 해석한다(station_log._parse_ts). 서버가 UTC이고 로그가
+    # Asia/Seoul이면 모든 시각이 9시간 어긋나 ±30초 탐색으로는 한 쌍도 못 찾고
+    # STA 로그가 통째로 무시된다(개발 호스트가 KST라 드러나지 않았다).
+    #
+    # **직접 탐색이 실패했을 때만** 시도한다. 중앙값 차이는 두 목록의 관측 구간이
+    # 크게 다르면(예: 로그 24시간 vs 캡처 10분) 타임존과 무관하게 커져 엉뚱한
+    # 격자로 스냅될 수 있다 — 무조건 적용하면 원래 되던 매칭을 깨뜨린다.
+    # 폴백은 결과가 **더 많이 매칭될 때만** 채택하므로 직접 탐색보다 나빠지지 않는다.
+    coarse = statistics.median(pcap_epochs) - statistics.median(log_epochs)
+    coarse = round(coarse / TZ_SNAP_SEC) * TZ_SNAP_SEC
+    if not coarse:
+        return direct
+    shifted = _search_offset([le + coarse for le in log_epochs], pcap_sorted, search_sec)
+    if shifted[1] <= direct[1]:
+        return direct
+    return coarse + shifted[0], shifted[1], shifted[2]
+
+
+def _search_offset(
+    log_epochs: Sequence[float], pcap_sorted: Sequence[float], search_sec: float
+) -> Tuple[Optional[float], int, float]:
+    """탐색 범위 안에서만 오프셋을 찾는다(`estimate_offset`의 핵심 루프)."""
     buckets: Dict[int, List[float]] = {}
     for le in log_epochs:
         lo = bisect_left(pcap_sorted, le - search_sec)
@@ -122,13 +137,11 @@ def estimate_offset(
         if best is not None and abs(best) <= COARSE_WINDOW_SEC:
             residuals.append(best)
     if not residuals:
-        return coarse + offset, 0, float("inf")
+        return offset, 0, float("inf")
     med = statistics.median(residuals)
     mad = statistics.median([abs(r - med) for r in residuals]) if len(residuals) > 1 else 0.0
     # 중앙 잔차만큼 한 번 더 당겨 최종 오프셋을 다듬는다.
-    # coarse는 위에서 log_epochs에 미리 반영했으므로 반환값에 되돌려 더한다 —
-    # 호출부(binding.offset_sec)는 **원본 로그 시각** 기준 오프셋을 기대한다.
-    return coarse + offset + med, len(residuals), mad
+    return offset + med, len(residuals), mad
 
 
 @dataclass
@@ -222,6 +235,12 @@ def attach_station_to_sequences(
     tolerance_sec: float = MATCH_TOLERANCE_SEC,
 ) -> int:
     """pcap 로밍 시퀀스에 그 STA 로그의 로밍 정보를 붙인다.
+
+    **주의: `sequences`의 원소 dict를 직접 변형한다**(`seq["sta_log"] = ...`).
+    호출 경로는 `pipeline._correlate_station_logs` 하나뿐이고 결과가 직렬화되기
+    **전**에 실행되므로 지금은 안전하다. 캐시(`routes/analysis._read_result_cached`)
+    에서 읽어온 dict를 넘기면 **캐시된 원본이 오염된다** — 그 캐시는 같은 객체를
+    다음 요청에도 그대로 돌려준다.
 
     pcap 시퀀스의 시작 시각(`auth_epoch` 없으면 `assoc_epoch`)에 가장 가까운
     로그 로밍을 찾아 붙인다. `tolerance_sec` 밖이면 붙이지 않는다 — 억지로

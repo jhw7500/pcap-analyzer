@@ -287,3 +287,39 @@ class TestResultCacheThreadSafety:
             analysis_module._read_result_cached(self._write(tmp_path, f"l{i}", i))
         assert len(analysis_module._result_cache) <= analysis_module._RESULT_CACHE_MAX
         analysis_module._invalidate_result_cache()
+
+
+class TestCacheNotMutatedByConsumers:
+    """캐시는 **같은 객체**를 다음 요청에도 돌려준다 — 소비자가 변형하면 그 뒤
+    모든 응답이 오염된다. 깊은 복사는 33MB × 요청마다라 현실적이지 않으므로,
+    계약(변형 금지)이 깨지는 순간을 테스트로 잡는다.
+    """
+
+    def test_real_consumers_leave_cached_object_untouched(self, tmp_path, monkeypatch):
+        import copy
+
+        monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+        analysis_module._invalidate_result_cache()
+        path = _write_result(tmp_path, "m1", 4242)
+
+        cached = analysis_module._read_result_cached(path)
+        pristine = copy.deepcopy(cached)
+
+        # 실제 소비자를 태운다 — 페이지 렌더·JSON·report.md·인쇄뷰·text.
+        # casefile 3종은 이 최소 픽스처로는 422(생성 불가)라 본체까지 가지 않는다 —
+        # 경로만 걸어두고, 커버되는 건 앞의 5개다.
+        for url in (
+            "/analysis/m1",
+            "/api/analysis/m1",
+            "/api/analysis/m1/report.md",
+            "/analysis/m1/report",
+            "/api/analysis/m1/text",
+            "/api/analysis/m1/casefile",
+            "/api/analysis/m1/casefile/text",
+            "/analysis/m1/casefile",
+        ):
+            client.get(url)     # 상태코드는 관심 없다 — 변형 여부만 본다
+
+        again = analysis_module._read_result_cached(path)
+        assert again is cached, "같은 객체가 재사용돼야 이 테스트가 의미를 갖는다"
+        assert again == pristine, "소비자가 캐시된 dict를 변형했다"

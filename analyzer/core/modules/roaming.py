@@ -155,6 +155,9 @@ def pair_roaming_sequences(
        이미 앵커면 덮어쓰지 않는다(요청 시각이 더 정확한 시작점).
     3. 짝지은 앵커는 **즉시 폐기**한다 — 다음 Assoc이 재사용할 수 없다.
     4. 앵커가 `ROAM_PAIR_MAX_GAP_SEC`보다 오래됐으면 그 로밍의 앵커로 보지 않는다.
+    5. 같은 STA·같은 subtype의 **retry 프레임**이 `_ASSOC_RETRY_SEC` 안에 다시 오면
+       재전송 사본으로 보고 건너뛴다 — 규칙 3 때문에 사본은 앵커를 못 찾아
+       "측정 불가" 시퀀스를 하나 더 만들고, 로밍 횟수까지 함께 부풀린다.
 
     앵커를 찾지 못해도 **시퀀스는 남긴다** — 로밍이 일어난 건 사실이라 횟수에서
     빠지면 안 된다. 대신 gap을 지어내지 않고 `gap_ms=None`(측정 불가)으로 두고
@@ -197,7 +200,7 @@ def pair_roaming_sequences(
                 getattr(frame, "retry", False)
                 and prev_assoc is not None
                 and prev_assoc[1] == frame.subtype
-                and 0 <= frame.epoch - prev_assoc[0] <= _ASSOC_RETRY_SEC
+                and abs(frame.epoch - prev_assoc[0]) <= _ASSOC_RETRY_SEC
             ):
                 continue
             last_assoc[frame.ta] = (frame.epoch, frame.subtype)

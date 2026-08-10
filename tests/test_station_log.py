@@ -307,6 +307,32 @@ class TestTimezoneMismatch:
             assert matched == len(self.PCAP), f"shift={shift}"
             assert abs(off - (shift + 0.11)) < 0.02, f"shift={shift}"
 
+    def test_span_mismatch_does_not_break_working_match(self):
+        """로그가 캡처보다 훨씬 길면 중앙값 차이가 타임존과 무관하게 커진다.
+
+        로그 24시간 vs 캡처 10분이면 중앙값 차이가 수 시간이라, 무조건 15분 격자에
+        스냅하면 **원래 되던 매칭이 깨진다**. 직접 탐색이 성공하면 폴백을 아예 타지
+        않아야 한다.
+        """
+        pcap = [1_000_000.0 + i * 20 for i in range(20)]        # 캡처 ~7분
+        logs = [t - 0.11 for t in pcap]
+        # 캡처 구간 밖의 로밍이 로그에만 잔뜩 있다(24시간 분량) — 중앙값이 크게 밀린다.
+        logs += [1_000_000.0 + 3600 * h for h in range(1, 24)]
+        off, matched, mad = estimate_offset(logs, pcap)
+        assert matched == len(pcap), "구간 불일치로 매칭이 깨졌다"
+        assert abs(off - 0.11) < 0.02
+        assert mad < 0.05
+
+    def test_fallback_only_when_direct_fails(self):
+        """폴백은 직접 탐색보다 **더 많이** 매칭될 때만 채택한다."""
+        pcap = [1_000_000.0 + i * 20 for i in range(20)]
+        logs = [t - 0.11 for t in pcap]
+        direct_off, direct_n, _ = estimate_offset(logs, pcap)
+        shifted_off, shifted_n, _ = estimate_offset([t - 9 * 3600 for t in logs], pcap)
+        assert direct_n == shifted_n == len(pcap)
+        assert abs(direct_off - 0.11) < 0.02
+        assert abs(shifted_off - (9 * 3600 + 0.11)) < 0.02
+
     def test_clock_skew_within_search_is_not_snapped(self):
         """수 초짜리 시계 오차를 타임존으로 오인해 15분 격자에 붙이면 안 된다."""
         off, matched, _ = estimate_offset(self._logs(2.74), self.PCAP)
