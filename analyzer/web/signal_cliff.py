@@ -47,13 +47,11 @@ def analyze_signal_cliffs(signal_data: Dict[str, Any]) -> Dict[str, Any]:
             if rssi_i is None:
                 i += 1
                 continue
-            # j는 **자기 버킷부터** 본다. 1초 버킷 집계로 바뀐 뒤 같은 버킷 안에서
-            # 시작하고 끝난 급락(멀티패스 순간 변동)은 j=i+1로 시작하면 어느 쌍과도
-            # 비교되지 않아 통째로 사라진다 — 원샘플 시절에는 잡히던 하락이다.
-            # j=i면 그 버킷의 최대(rssi_max) ↔ 최소(rssi_min)를 비교하게 돼 복원된다.
-            # 구버전 result(원샘플)는 max/min이 없어 두 값이 같은 rssi라 하락 0 —
-            # 이 비교가 추가돼도 판정이 달라지지 않는다.
-            j = i
+            # 자기 버킷 안에서 시작하고 끝난 급락(1초 미만)은 이 루프가 보지 못한다 —
+            # 아래 별도 패스에서 처리한다. 여기서 j=i부터 보게 하면 skip-ahead(i = j)가
+            # 무력화돼 건너뛰던 구간이 다시 스캔되고, 같은 절벽이 여러 번 계상된다
+            # (실측 2시간 캡처에서 STA당 2,419건 → 4,310건으로 부풀었다).
+            j = i + 1
             while j < len(timeline) and timeline[j]["epoch"] - timeline[i]["epoch"] <= 5.0:
                 rssi_j = _drop_to(timeline[j])
                 if rssi_j is not None and rssi_i - rssi_j >= 10:
@@ -68,6 +66,32 @@ def analyze_signal_cliffs(signal_data: Dict[str, Any]) -> Dict[str, Any]:
                     break
                 j += 1
             i += 1
+
+        # 버킷 **내부** 급락 — 1초 안에서 떨어졌다 회복한 경우.
+        # rssi_timeline이 1초 버킷 집계로 바뀌면서 위 루프로는 어느 쌍과도 비교되지
+        # 않아 통째로 사라졌다(원샘플 시절에는 잡히던 하락이다). 버킷이 min/max를
+        # 함께 담고 있으므로 자기 버킷의 max↔min만 보면 복원된다.
+        #
+        # **별도 패스인 이유**: 위 루프에 끼워 넣으면 skip-ahead가 무력화돼 같은
+        # 절벽이 중복 계상된다. 그리고 이미 보고된 절벽 구간 **안**에 들어가는
+        # 버킷은 건너뛴다 — 하강 도중의 버킷은 당연히 max-min이 크므로, 그대로
+        # 세면 하나의 절벽을 구간 길이만큼 반복해서 세게 된다.
+        covered = [(c["epoch"], c["epoch"] + c["duration_sec"]) for c in cliffs]
+        for point in timeline:
+            hi, lo = _drop_from(point), _drop_to(point)
+            if hi is None or lo is None or hi - lo < 10:
+                continue
+            ep = point["epoch"]
+            if any(start <= ep <= end for start, end in covered):
+                continue
+            cliffs.append({
+                "epoch": ep,
+                "rssi_before": hi,
+                "rssi_after": lo,
+                "drop_db": hi - lo,
+                "duration_sec": 0.0,     # 같은 버킷 = 1초 미만
+            })
+        cliffs.sort(key=lambda c: c["epoch"])
 
         result[sta_name] = {"cliffs": cliffs}
 

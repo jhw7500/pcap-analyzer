@@ -281,18 +281,31 @@ class TestIntraBucketCliff:
         ]
 
     def test_drop_inside_one_bucket_detected(self):
-        # 주변을 낮은 값으로 깔아 **버킷 간** 하락이 성립하지 않게 한 뒤,
-        # 한 버킷 안에서만 올랐다 떨어지게 둔다 — 이 하락은 자기 버킷의
-        # max↔min을 봐야만 보인다.
-        timeline = self._flat(rssi=-65)
-        timeline[5] = {"epoch": 1005, "rssi": -57, "rssi_min": -65, "rssi_max": -50}
+        # 주변을 -58로 깔아 **버킷 간** 하락이 어느 쌍에서도 10dB에 못 미치게 한다
+        # (앞 버킷 max -58 → 급락 버킷 min -62 = 4dB, 급락 버킷 max -50 → 뒤 버킷
+        # min -58 = 8dB). 오직 자기 버킷의 max↔min(12dB)만 임계를 넘는다.
+        timeline = self._flat(rssi=-58)
+        timeline[5] = {"epoch": 1005, "rssi": -56, "rssi_min": -62, "rssi_max": -50}
         cliffs = analyze_signal_cliffs(
             {"stas": {"STA1": {"rssi_timeline": timeline}}})["STA1"]["cliffs"]
         assert len(cliffs) == 1
         c = cliffs[0]
         assert c["epoch"] == 1005
-        assert c["drop_db"] == 15          # 버킷 최대 -50 → 최소 -65
-        assert c["duration_sec"] == 0.0    # 같은 버킷 = 1초 이내
+        assert c["drop_db"] == 12          # 버킷 최대 -50 → 최소 -62
+        assert c["duration_sec"] == 0.0    # 같은 버킷 = 1초 미만
+
+    def test_intra_bucket_inside_reported_cliff_is_not_double_counted(self):
+        """하강 도중의 버킷은 max-min이 크다 — 그대로 세면 절벽 하나를 반복해 센다."""
+        timeline = self._flat()
+        # 1005~1008에 걸쳐 -50 → -70으로 내려간다(각 버킷 안에서도 폭이 크다).
+        for k, (hi, lo) in enumerate([(-50, -58), (-58, -66), (-66, -70)], start=5):
+            timeline[k] = {"epoch": 1000 + k, "rssi": (hi + lo) // 2,
+                           "rssi_min": lo, "rssi_max": hi}
+        cliffs = analyze_signal_cliffs(
+            {"stas": {"STA1": {"rssi_timeline": timeline}}})["STA1"]["cliffs"]
+        spans = [(c["epoch"], c["duration_sec"]) for c in cliffs]
+        # 구간 안쪽 버킷이 중복으로 잡히면 같은 시각대에 항목이 겹쳐 쌓인다.
+        assert len(cliffs) == len({e for e, _ in spans}), spans
 
     def test_stable_buckets_still_report_nothing(self):
         cliffs = analyze_signal_cliffs(
