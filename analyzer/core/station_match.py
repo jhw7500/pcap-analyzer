@@ -79,27 +79,34 @@ def estimate_offset(
         return None, 0, float("inf")
 
     pcap_sorted = sorted(pcap_epochs)
-    direct = _search_offset(log_epochs, pcap_sorted, search_sec)
-    if direct[1] >= MIN_MATCHES:
-        return direct
-
-    # 타임존 폴백 — STA 로그의 시각 문자열에는 타임존이 없어 파서가 **분석 서버의
-    # 로컬 타임존**으로 해석한다(station_log._parse_ts). 서버가 UTC이고 로그가
-    # Asia/Seoul이면 모든 시각이 9시간 어긋나 ±30초 탐색으로는 한 쌍도 못 찾고
-    # STA 로그가 통째로 무시된다(개발 호스트가 KST라 드러나지 않았다).
+    # 후보 셋을 모두 재고 **가장 많이 매칭된 것**을 고른다.
+    #  · 보정 없음 — 시계가 맞는 정상 경로.
+    #  · 15분 격자 스냅 — STA 로그에는 타임존이 없어 파서가 **분석 서버의 로컬
+    #    타임존**으로 읽는다(station_log._parse_ts). 서버 UTC + 로그 KST면 9시간
+    #    어긋나 ±30초 탐색으로는 한 쌍도 못 찾는다(개발 호스트가 KST라 드러나지
+    #    않았다). 타임존 차이는 반드시 15분 배수라 격자에 정확히 떨어진다.
+    #  · 중앙값 차이 그대로 — 폐쇄망/NTP 부재 장비는 시계가 **임의의** 값만큼
+    #    어긋난다(수 분~수십 분). 격자에 스냅하면 3분 오차는 0으로 반올림돼 무용하다.
     #
-    # **직접 탐색이 실패했을 때만** 시도한다. 중앙값 차이는 두 목록의 관측 구간이
-    # 크게 다르면(예: 로그 24시간 vs 캡처 10분) 타임존과 무관하게 커져 엉뚱한
-    # 격자로 스냅될 수 있다 — 무조건 적용하면 원래 되던 매칭을 깨뜨린다.
-    # 폴백은 결과가 **더 많이 매칭될 때만** 채택하므로 직접 탐색보다 나빠지지 않는다.
-    coarse = statistics.median(pcap_epochs) - statistics.median(log_epochs)
-    coarse = round(coarse / TZ_SNAP_SEC) * TZ_SNAP_SEC
-    if not coarse:
-        return direct
-    shifted = _search_offset([le + coarse for le in log_epochs], pcap_sorted, search_sec)
-    if shifted[1] <= direct[1]:
-        return direct
-    return coarse + shifted[0], shifted[1], shifted[2]
+    # **보정 없음이 조건을 만족해도 조기 확정하지 않는다.** 로밍 간격이 규칙적이면
+    # 큰 시계 오차가 그 주기로 접혀 들어와(에일리어싱) 틀린 오프셋이 잔차 0으로
+    # 그럴듯하게 맞는다 — 실측 재현: 20초 주기 로밍에 187초 오차를 주면 보정 없음이
+    # 27.11초에서 12건을 맞히지만 올바른 187.11초는 20건 전부를 맞힌다.
+    #
+    # 동점이면 앞 후보(보정 없음)를 유지하므로 보정이 없는 쪽보다 나빠지지 않는다.
+    # 관측 구간이 크게 다르면(로그 24시간 vs 캡처 10분) 중앙값 차이가 시계와
+    # 무관하게 커지는데, 그 후보는 매칭이 적어 자연히 탈락한다.
+    gap = statistics.median(pcap_epochs) - statistics.median(log_epochs)
+    best = _search_offset(log_epochs, pcap_sorted, search_sec)
+    seen = {0.0}
+    for coarse in (round(gap / TZ_SNAP_SEC) * TZ_SNAP_SEC, gap):
+        if coarse in seen:
+            continue
+        seen.add(coarse)
+        got = _search_offset([le + coarse for le in log_epochs], pcap_sorted, search_sec)
+        if got[1] > best[1]:
+            best = (coarse + got[0], got[1], got[2])
+    return best
 
 
 def _search_offset(

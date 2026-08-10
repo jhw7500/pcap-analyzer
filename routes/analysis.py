@@ -70,7 +70,10 @@ def _read_result_cached(path) -> Optional[dict[str, Any]]:
             return cached
     try:
         parsed = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError, MemoryError):
+        # MemoryError까지 잡는 이유는 `upload._analysis_card`와 같다 — 결과 하나가
+        # 33MB라 여유가 빠듯한 호스트에서 터질 수 있고, 여기서 새면 스레드풀
+        # 예외로 500이 그대로 누출된다. 호출부가 ANALYSIS_CORRUPTED로 바꾼다.
         return None
     if parsed is None:
         # 파일 내용이 리터럴 `null`인 경우. 캐시에 넣으면 `get(key)`가 주는 None을

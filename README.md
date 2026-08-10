@@ -20,10 +20,17 @@ WLAN(802.11) pcap 파일을 업로드하면 `tshark`로 프레임을 추출하�
 ### 1. 시스템 의존성
 
 ```bash
-sudo apt install tshark                # Debian/Ubuntu
-# 또는 brew install wireshark          # macOS
-# 또는 https://www.wireshark.org/      # Windows
+sudo apt install tshark wireshark-common   # Debian/Ubuntu
+# 또는 brew install wireshark              # macOS
+# 또는 https://www.wireshark.org/          # Windows
 ```
+
+- `tshark` — 프레임 추출(필수).
+- `mergecap` — **분할 캡처 이어붙이기에만** 필요(선택). 스니퍼 로테이션으로 쪼개진
+  조각을 한 번에 올릴 때 쓴다. 없으면 조각 여러 개 업로드가 `MERGECAP_MISSING`으로
+  거부되지만, 파일 하나 업로드는 영향이 없다. Wireshark가 tshark와 함께 설치하므로
+  대개 이미 있고(Debian/Ubuntu는 `wireshark-common` 패키지), 감지 시 tshark와 같은
+  디렉터리를 먼저 본다.
 
 ### 2. Python 의존성
 
@@ -129,7 +136,10 @@ CDN을 쓰려면(온라인 전용) 설정 페이지에서 "오프라인 에셋 �
 |------|-----------|
 | 설정 페이지에 "tshark: 미감지" | `tshark` 바이너리가 `PATH`에 없음. 설정 페이지에 절대 경로 입력 또는 `apt install tshark`. |
 | 업로드 시 "유효한 pcap/pcapng 포맷이 아닙니다." | 파일이 실제 pcap이 아니거나 헤더 손상. `file`/`tshark -r` 로 먼저 검증. |
-| 업로드 시 413 | `MAX_UPLOAD_SIZE`(기본 200MB) 초과. `config.py`에서 조정 가능. |
+| 업로드 시 413 (상한 초과) | 파일별 기본 상한 1GB. `PCAP_MAX_UPLOAD_MB` 환경변수 또는 `config.local.json`의 `max_upload_mb`로 조정. |
+| 업로드 시 413 (요청 합계 상한) | 한 요청의 임시 파일 합계가 8GB를 넘음(조각·다중 스니퍼·STA 로그 합산). 조각을 나눠 올리거나 `routes/upload._MAX_REQUEST_TOTAL_BYTES` 조정. |
+| 분할 캡처 업로드가 "mergecap이 필요합니다"로 거부 | `mergecap` 미설치. `apt install wireshark-common` 또는 설정 페이지에서 경로 지정. 파일 하나만 올리면 필요 없다. |
+| 디스크 여유가 적은 호스트 | 분석 중 임시 pcap이 최대 8GB(요청 합계 상한)까지 쓰인다. 여유가 적으면 `max_upload_mb`를 낮춰 잡을 것. |
 | "프레임을 추출하지 못했습니다" | tshark 버전 호환성 문제 가능. 결과 JSON의 `tshark_version` 확인. 4.x 권장. |
 | 분석이 멈춰 보임 | 수백만 프레임 pcap은 시간이 걸림. `/api/progress`로 확인. |
 | 로밍이 감지되지 않음 | 캡처 시작 시점이 AP 전환 뒤라 Auth 프레임이 없을 수 있음. |

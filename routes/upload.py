@@ -405,17 +405,10 @@ async def _save_station_logs(files: List[UploadFile], budget=None):
                 if not chunk:
                     break
                 total += len(chunk)
-                if budget is not None and not budget.add(len(chunk)):
-                    tmp.close()
-                    _cleanup_tmps(tmp.name, *tmps)
-                    return None, [], JSONResponse(
-                        error_payload(
-                            ErrorCode.FILE_TOO_LARGE,
-                            f"(요청 합계 상한 {budget.limit_gb}GB — "
-                            f"pcap 조각·다중 스니퍼·STA 로그 합산)",
-                        ),
-                        status_code=413,
-                    )
+                # 검사 순서는 `_save_pcap_upload`와 같다 — **파일별 상한 먼저,
+                # 요청 합계 나중**. 반대로 두면 파일 하나가 자기 상한을 넘겨 거부될
+                # 청크가 합계에 먼저 계상돼, 이어지는 다른 파일이 애먼 이유로
+                # 합계 초과 판정을 받는다.
                 if total > _MAX_STATION_LOG_BYTES:
                     tmp.close()
                     _cleanup_tmps(tmp.name, *tmps)
@@ -424,6 +417,17 @@ async def _save_station_logs(files: List[UploadFile], budget=None):
                         error_payload(
                             ErrorCode.FILE_TOO_LARGE,
                             f"(STA 로그 {base} — 상한 {limit_mb}MB)",
+                        ),
+                        status_code=413,
+                    )
+                if budget is not None and not budget.add(len(chunk)):
+                    tmp.close()
+                    _cleanup_tmps(tmp.name, *tmps)
+                    return None, [], JSONResponse(
+                        error_payload(
+                            ErrorCode.FILE_TOO_LARGE,
+                            f"(요청 합계 상한 {budget.limit_gb}GB — "
+                            f"pcap 조각·다중 스니퍼·STA 로그 합산)",
                         ),
                         status_code=413,
                     )

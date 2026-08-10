@@ -333,6 +333,22 @@ class TestTimezoneMismatch:
         assert abs(direct_off - 0.11) < 0.02
         assert abs(shifted_off - (9 * 3600 + 0.11)) < 0.02
 
+    def test_arbitrary_clock_skew_recovered(self):
+        """폐쇄망/NTP 부재 장비는 시계가 **임의의** 값만큼 어긋난다.
+
+        15분 격자에만 스냅하면 3분 어긋난 시계는 0으로 반올림돼 아무 도움이 안 된다.
+        중앙값 차이 자체도 후보로 함께 시도한다.
+
+        여기 쓰는 로밍 시각은 **주기가 정확히 20초**라 에일리어싱이 일어난다 —
+        187초 오차가 27.11초로 접혀 들어와 보정 없음이 12건을 잔차 0으로 맞힌다.
+        후보를 전부 재고 최다 매칭을 고르지 않으면 여기서 조기 확정돼 틀린다.
+        """
+        for shift in (187.0, -401.5, 3 * 60 + 7.25):
+            off, matched, mad = estimate_offset(self._logs(shift), self.PCAP)
+            assert matched == len(self.PCAP), f"shift={shift}"
+            assert abs(off - (shift + 0.11)) < 0.02, f"shift={shift}"
+            assert mad < 0.05, f"shift={shift}"
+
     def test_clock_skew_within_search_is_not_snapped(self):
         """수 초짜리 시계 오차를 타임존으로 오인해 15분 격자에 붙이면 안 된다."""
         off, matched, _ = estimate_offset(self._logs(2.74), self.PCAP)
