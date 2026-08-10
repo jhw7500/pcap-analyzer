@@ -15,11 +15,15 @@ from fastapi.templating import Jinja2Templates
 import config
 from analyzer.core.pcap_magic import has_valid_pcap_magic
 from analyzer.errors import ErrorCode, error_payload
+from analyzer.core.split_merge import merge_split_captures, merged_display_name
 from analyzer.pipeline import run_analysis
 
 _UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB
 _JOBS_MAX = 100  # 최근 N개만 유지
-_MAX_WIRELESS_FILES = 4  # 기본(file) 1개 + wireless_files 최대 3개
+_MAX_WIRELESS_FILES = 4  # 무선 **캡처(관측점)** 수: 기본(file) 1개 + wireless_files 최대 3개
+#: 한 캡처를 이루는 분할 조각 수 상한. 조각마다 max_upload_size가 따로
+#: 적용되므로 이 값은 디스크 폭주를 막는 상한이다(2시간 무선 캡처가 실측 3조각).
+_MAX_SPLIT_PARTS = 32
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
@@ -224,6 +228,60 @@ async def _save_pcap_upload(file: UploadFile):
     return tmp.name, None
 
 
+async def _save_capture_group(files: List[UploadFile]):
+    """한 캡처를 이루는 파일들(분할 조각 1개 이상)을 저장하고 단일 경로로 만든다.
+
+    반환 `(tmp_path, names, error_response)` — error가 non-None이면 tmp_path는
+    None이고 이 함수가 자기가 만든 임시 파일을 **모두 정리한 뒤**다
+    (`_save_pcap_upload`의 계약을 그룹 단위로 확장).
+
+    조각이 1개면 기존 단일 업로드와 **완전히 동일한 경로**(mergecap 미호출)를
+    타서 동작이 바뀌지 않는다. 2개 이상이면 mergecap으로 시간순 병합해 하나의
+    캡처로 만든다 — 조각들은 같은 관측점의 연속 구간이라 다중 스니퍼 병합
+    (TSF 정렬 + dedup)과는 다른 처리가 필요하다(analyzer/core/split_merge 참조).
+    """
+    if len(files) > _MAX_SPLIT_PARTS:
+        return None, [], JSONResponse(
+            error_payload(
+                ErrorCode.TOO_MANY_FILES,
+                f"(한 캡처의 분할 조각은 최대 {_MAX_SPLIT_PARTS}개)",
+            ),
+            status_code=400,
+        )
+    tmps: List[str] = []
+    names: List[str] = []
+    for f in files:
+        tmp, err = await _save_pcap_upload(f)
+        if err is not None:
+            _cleanup_tmps(*tmps)
+            return None, [], err
+        tmps.append(tmp)
+        names.append(f.filename or "unknown.pcap")
+
+    if not tmps:
+        return None, [], JSONResponse(
+            error_payload(ErrorCode.EMPTY_FILE), status_code=400)
+    if len(tmps) == 1:
+        return tmps[0], names, None
+
+    mergecap = config.detect_mergecap()
+    if not mergecap:
+        _cleanup_tmps(*tmps)
+        return None, [], JSONResponse(
+            error_payload(ErrorCode.MERGECAP_MISSING), status_code=500)
+
+    merged = tempfile.NamedTemporaryFile(delete=False, suffix=".pcapng")
+    merged.close()
+    ok, reason = merge_split_captures(tmps, merged.name, mergecap_path=mergecap)
+    # 조각들은 병합 성공·실패와 무관하게 더 이상 필요 없다.
+    _cleanup_tmps(*tmps)
+    if not ok:
+        _cleanup_tmps(merged.name)
+        return None, [], JSONResponse(
+            error_payload(ErrorCode.MERGE_FAILED, f"({reason})"), status_code=400)
+    return merged.name, names, None
+
+
 def _cleanup_tmps(*paths: str) -> None:
     """주어진 임시 경로들을 모두 unlink 시도(존재하지 않아도 무시). 빈 문자열은 skip.
 
@@ -246,9 +304,13 @@ def _cleanup_tmps(*paths: str) -> None:
 
 @router.post("/api/upload")
 async def upload_pcap(
-    file: UploadFile = File(...),
+    # file / wired_file 은 **하나의 캡처를 이루는 분할 조각들**을 받는다(1개면
+    # 기존과 동일). 스니퍼 파일 로테이션으로 쪼개진 연속 캡처를 mergecap으로
+    # 이어붙여 단일 캡처로 분석한다. 반면 wireless_files 는 같은 구간을 **다른
+    # 위치에서 동시에** 관측한 별개 스니퍼로, TSF 정렬 + dedup 경로를 탄다.
+    file: List[UploadFile] = File(...),
     wireless_files: List[UploadFile] = File([]),
-    wired_file: UploadFile | None = File(None),
+    wired_file: List[UploadFile] = File([]),
     ssid: str = Form(""),
     passphrase: str = Form(""),
     mac_filter: str = Form(""),
@@ -266,10 +328,13 @@ async def upload_pcap(
     if 1 + len(valid_wireless_files) > _MAX_WIRELESS_FILES:
         return JSONResponse(error_payload(ErrorCode.TOO_MANY_FILES), status_code=400)
 
-    name = file.filename or "unknown.pcap"
-    tmp_name, err = await _save_pcap_upload(file)
+    primary_files = [f for f in file if f is not None and (f.filename or "")]
+    if not primary_files:
+        return JSONResponse(error_payload(ErrorCode.EMPTY_FILE), status_code=400)
+    tmp_name, primary_names, err = await _save_capture_group(primary_files)
     if err is not None:
         return err
+    name = merged_display_name(primary_names)
 
     # 추가 무선 파일들(w2, w3, …) — 하나라도 실패하면 그때까지 저장된 것 전부 정리
     wireless_tmps: List[str] = []
@@ -292,9 +357,10 @@ async def upload_pcap(
 
     wired_tmp = ""
     wired_name = ""
-    if wired_file is not None and (wired_file.filename or ""):
+    wired_files = [f for f in (wired_file or []) if f is not None and (f.filename or "")]
+    if wired_files:
         try:
-            wired_tmp, werr = await _save_pcap_upload(wired_file)
+            wired_tmp, wired_names, werr = await _save_capture_group(wired_files)
         except Exception:
             _cleanup_tmps(tmp_name, *wireless_tmps)
             raise
@@ -302,7 +368,7 @@ async def upload_pcap(
             wired_tmp = ""
             _cleanup_tmps(tmp_name, *wireless_tmps)
             return werr
-        wired_name = wired_file.filename
+        wired_name = merged_display_name(wired_names)
 
     # 클라이언트가 미리 만든 job_id를 우선 사용(본인 job만 폴링/취소하기 위함).
     # 미제공·형식오류·이미 active한 id와 충돌하면 서버가 uuid를 생성한다.

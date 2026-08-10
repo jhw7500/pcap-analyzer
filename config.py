@@ -72,6 +72,28 @@ def detect_tshark() -> Optional[str]:
     return None
 
 
+def detect_mergecap() -> Optional[str]:
+    """mergecap 실행 경로를 찾는다. 없으면 None.
+
+    분할 캡처(스니퍼 파일 로테이션으로 쪼개진 연속 캡처) 조각들을 하나로
+    이어붙일 때 쓴다. mergecap은 Wireshark가 tshark와 함께 설치하므로 먼저
+    **감지된 tshark와 같은 디렉터리**를 본다 — PATH에 없는 경로(Windows 기본
+    설치 경로, 사용자가 /settings에서 지정한 경로)에서도 짝을 찾기 위함이다.
+    그다음 PATH를 본다.
+    """
+    configured = get("mergecap_path")
+    if configured and shutil.which(configured):
+        return configured
+    tshark = detect_tshark()
+    if tshark:
+        sibling = Path(tshark).resolve().parent / (
+            "mergecap.exe" if platform.system() == "Windows" else "mergecap"
+        )
+        if sibling.exists():
+            return str(sibling)
+    return shutil.which("mergecap")
+
+
 def ensure_data_dir() -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     return DATA_DIR

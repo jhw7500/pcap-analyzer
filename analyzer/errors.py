@@ -11,6 +11,8 @@ class ErrorCode(str, Enum):
     FILE_TOO_LARGE = "FILE_TOO_LARGE"
     EMPTY_FILE = "EMPTY_FILE"
     TOO_MANY_FILES = "TOO_MANY_FILES"
+    MERGECAP_MISSING = "MERGECAP_MISSING"
+    MERGE_FAILED = "MERGE_FAILED"
     NO_FRAMES = "NO_FRAMES"
     INVALID_TIME_FILTER = "INVALID_TIME_FILTER"
     CANCELLED = "CANCELLED"
@@ -48,6 +50,14 @@ ERROR_CATALOG: Dict[ErrorCode, Dict[str, str]] = {
     ErrorCode.TOO_MANY_FILES: {
         "message": "무선 캡처 파일이 너무 많습니다.",
         "hint": "무선 캡처는 최대 4개(기본 1개 + 추가 3개)까지 업로드할 수 있습니다.",
+    },
+    ErrorCode.MERGECAP_MISSING: {
+        "message": "분할 캡처를 이어붙이려면 mergecap이 필요합니다.",
+        "hint": "mergecap은 Wireshark에 tshark와 함께 설치됩니다(apt install wireshark-common). 설치할 수 없으면 파일을 하나만 올리거나, 미리 `mergecap -w 합친파일.pcapng 조각1 조각2 ...`로 합쳐서 올리세요.",
+    },
+    ErrorCode.MERGE_FAILED: {
+        "message": "분할 캡처를 이어붙이지 못했습니다.",
+        "hint": "조각 파일들이 같은 링크 계층(예: 전부 802.11 monitor)인지 확인하세요. 서로 다른 encapsulation은 하나로 합칠 수 없습니다.",
     },
     ErrorCode.NO_FRAMES: {
         "message": "프레임을 추출하지 못했습니다.",

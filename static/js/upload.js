@@ -46,15 +46,26 @@
     // 클라이언트 측 파일 크기 즉시 검사
     const MAX_MB = parseInt(fileInput.getAttribute('data-max-mb') || '200', 10);
     const MAX_BYTES = MAX_MB * 1024 * 1024;
-    function validateFile(file) {
-        if (!file) return false;
-        if (file.size > MAX_BYTES) {
-            const sizeMb = (file.size / 1024 / 1024).toFixed(1);
-            alert(`파일이 너무 큽니다: ${sizeMb}MB (상한 ${MAX_MB}MB)\n\n` +
-                  `환경변수 PCAP_MAX_UPLOAD_MB 또는 config.local.json의 max_upload_mb 키로 조정 가능.`);
+    // 상한은 **조각 하나씩** 적용된다 — 서버도 파일 단위로 검사한다
+    // (routes/upload.py `_save_pcap_upload`). 여러 조각을 고르면 전부 검사한다.
+    const MAX_SPLIT_PARTS = 32;
+    function validateFiles(files) {
+        if (!files || !files.length) return false;
+        if (files.length > MAX_SPLIT_PARTS) {
+            alert(`한 캡처의 분할 조각은 최대 ${MAX_SPLIT_PARTS}개입니다 (선택 ${files.length}개).`);
             fileInput.value = '';
             fileName.classList.add('hidden');
             return false;
+        }
+        for (const file of files) {
+            if (file.size > MAX_BYTES) {
+                const sizeMb = (file.size / 1024 / 1024).toFixed(1);
+                alert(`파일이 너무 큽니다: ${file.name} — ${sizeMb}MB (조각당 상한 ${MAX_MB}MB)\n\n` +
+                      `환경변수 PCAP_MAX_UPLOAD_MB 또는 config.local.json의 max_upload_mb 키로 조정 가능.`);
+                fileInput.value = '';
+                fileName.classList.add('hidden');
+                return false;
+            }
         }
         return true;
     }
@@ -72,23 +83,25 @@
         e.preventDefault();
         dropZone.classList.remove('border-blue-500', 'bg-gray-700/30');
         if (e.dataTransfer.files.length) {
-            const f = e.dataTransfer.files[0];
-            if (!validateFile(f)) return;
+            if (!validateFiles(e.dataTransfer.files)) return;
             fileInput.files = e.dataTransfer.files;
-            showFileName(f.name);
+            showFileName(e.dataTransfer.files);
         }
     });
 
     fileInput.addEventListener('change', () => {
         if (fileInput.files.length) {
-            const f = fileInput.files[0];
-            if (!validateFile(f)) return;
-            showFileName(f.name);
+            if (!validateFiles(fileInput.files)) return;
+            showFileName(fileInput.files);
         }
     });
 
-    function showFileName(name) {
-        fileName.textContent = name;
+    function showFileName(files) {
+        // 조각이 여러 개면 이어붙여 하나로 분석된다는 걸 이름에서 바로 드러낸다.
+        const names = Array.from(files).map(f => f.name);
+        fileName.textContent = names.length === 1
+            ? names[0]
+            : `${names.length}개 조각을 시간순으로 이어붙여 분석: ${names.join(', ')}`;
         fileName.classList.remove('hidden');
     }
 
@@ -127,9 +140,15 @@
         const wiredInput = document.getElementById('wired-file');
         if (wiredInput && wiredInput.files.length) {
             const maxMb = parseInt(wiredInput.dataset.maxMb || fileInput.dataset.maxMb || '200', 10);
-            if (wiredInput.files[0].size > maxMb * 1024 * 1024) {
-                alert(`유선 pcap이 업로드 상한(${maxMb}MB)을 초과합니다.`);
+            if (wiredInput.files.length > MAX_SPLIT_PARTS) {
+                alert(`유선 캡처의 분할 조각은 최대 ${MAX_SPLIT_PARTS}개입니다.`);
                 return;
+            }
+            for (const wf of wiredInput.files) {
+                if (wf.size > maxMb * 1024 * 1024) {
+                    alert(`유선 pcap이 업로드 상한(${maxMb}MB)을 초과합니다: ${wf.name}`);
+                    return;
+                }
             }
         }
 
@@ -149,7 +168,11 @@
         }
 
         const formData = new FormData(form);
-        formData.set('file', fileInput.files[0]);
+        // 드롭존으로 넣은 경우까지 확실히 반영되도록 file 파트를 다시 만든다.
+        // 조각을 **전부** 보내야 서버가 mergecap으로 이어붙인다(첫 파일만
+        // 보내던 기존 동작은 나머지 조각을 조용히 버렸다).
+        formData.delete('file');
+        for (const f of fileInput.files) formData.append('file', f);
         // 진행률/취소를 본인 분석에만 한정하기 위해 클라이언트가 job_id를 먼저 생성해 전송.
         const jobId = (window.crypto && crypto.randomUUID)
             ? crypto.randomUUID()
