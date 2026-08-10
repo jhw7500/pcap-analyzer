@@ -263,3 +263,54 @@ class TestNetworkLegacyEvidence:
         ]
         idx = FrameIndex(frames, dict(SAMPLE_ROLES))
         assert network_legacy_evidence(frames, idx) == ([], None)
+
+
+class TestIntraBucketCliff:
+    """1초 버킷 안에서 시작하고 끝난 급락도 잡아야 한다.
+
+    rssi_timeline이 1초 버킷 집계로 바뀌면서, 탐지 루프가 다음 버킷부터 비교하면
+    같은 버킷 안에서 일어난 하락(멀티패스 순간 변동)은 어느 쌍과도 비교되지 않아
+    통째로 사라진다 — 원샘플 시절에는 잡히던 하락이다. 버킷이 min/max를 함께
+    담고 있으므로 자기 버킷의 max↔min을 비교하면 복원된다.
+    """
+
+    def _flat(self, n=12, rssi=-50):
+        return [
+            {"epoch": 1000 + i, "rssi": rssi, "rssi_min": rssi, "rssi_max": rssi}
+            for i in range(n)
+        ]
+
+    def test_drop_inside_one_bucket_detected(self):
+        # 주변을 낮은 값으로 깔아 **버킷 간** 하락이 성립하지 않게 한 뒤,
+        # 한 버킷 안에서만 올랐다 떨어지게 둔다 — 이 하락은 자기 버킷의
+        # max↔min을 봐야만 보인다.
+        timeline = self._flat(rssi=-65)
+        timeline[5] = {"epoch": 1005, "rssi": -57, "rssi_min": -65, "rssi_max": -50}
+        cliffs = analyze_signal_cliffs(
+            {"stas": {"STA1": {"rssi_timeline": timeline}}})["STA1"]["cliffs"]
+        assert len(cliffs) == 1
+        c = cliffs[0]
+        assert c["epoch"] == 1005
+        assert c["drop_db"] == 15          # 버킷 최대 -50 → 최소 -65
+        assert c["duration_sec"] == 0.0    # 같은 버킷 = 1초 이내
+
+    def test_stable_buckets_still_report_nothing(self):
+        cliffs = analyze_signal_cliffs(
+            {"stas": {"STA1": {"rssi_timeline": self._flat()}}})["STA1"]["cliffs"]
+        assert cliffs == []
+
+    def test_legacy_raw_samples_unaffected(self):
+        """구버전 result(원샘플)에는 min/max가 없어 판정이 달라지지 않아야 한다."""
+        raw = [{"epoch": 1000 + i * 0.1, "rssi": -50, "mcs": 7} for i in range(20)]
+        cliffs = analyze_signal_cliffs(
+            {"stas": {"STA1": {"rssi_timeline": raw}}})["STA1"]["cliffs"]
+        assert cliffs == []
+
+    def test_cross_bucket_drop_still_detected(self):
+        timeline = self._flat()
+        for i in range(6, 12):
+            timeline[i] = {"epoch": 1000 + i, "rssi": -66,
+                           "rssi_min": -66, "rssi_max": -66}
+        cliffs = analyze_signal_cliffs(
+            {"stas": {"STA1": {"rssi_timeline": timeline}}})["STA1"]["cliffs"]
+        assert cliffs and cliffs[0]["drop_db"] == 16

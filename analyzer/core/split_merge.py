@@ -21,7 +21,7 @@ from typing import List, Optional, Tuple
 
 #: mergecap 호출 상한(초). 실측 311MB(143만 프레임) 3조각 병합이 0.5초라
 #: 넉넉하다 — 파일이 잠기거나 네트워크 마운트가 멈춘 경우의 안전장치.
-MERGE_TIMEOUT_SEC = 900
+MERGE_TIMEOUT_SEC = 180
 
 
 def merge_split_captures(

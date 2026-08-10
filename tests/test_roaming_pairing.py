@@ -721,3 +721,97 @@ class TestStaScoresWithUndecided:
         # 메트릭에는 판정 분모가 병기돼 "느린 로밍 0회"가 정상으로 오독되지 않아야 한다.
         metric_line = next(x for x in lines if "메트릭" in x)
         assert "판정 0/3회" in metric_line
+
+
+class TestRetransmittedAssoc:
+    """802.11 재전송 사본이 별개 로밍으로 세어지면 안 된다.
+
+    앵커를 소비 즉시 폐기(규칙 3)하므로, 같은 교환의 Assoc/Reassoc이 재전송돼
+    두 번 잡히면 두 번째는 앵커를 찾지 못해 **측정 불가 시퀀스가 하나 더** 생긴다.
+    로밍 횟수와 측정 불가 건수가 함께 부풀려지고 STA 로그도 두 번 붙는다.
+    재전송은 retry 비트로 정확히 구분되므로 시간만으로 합치지 않는다.
+    """
+
+    def _auth_then_assoc(self, *, retry_at=None, retry_flag=True, subtype="2"):
+        frames = [
+            make_frame(number=1, epoch=1000.0, subtype="11", ta=STA1, ra=AP2),
+            make_frame(number=2, epoch=1000.005, subtype=subtype, ta=STA1, ra=AP2),
+        ]
+        if retry_at is not None:
+            frames.append(make_frame(number=3, epoch=retry_at, subtype=subtype,
+                                     ta=STA1, ra=AP2, retry=retry_flag))
+        return frames
+
+    def test_retry_copy_does_not_create_second_sequence(self):
+        pairs = pair_roaming_sequences(
+            self._auth_then_assoc(retry_at=1000.02), STA_MACS)
+        assert len(pairs) == 1
+        assert pairs[0].gap_ms is not None      # 측정 불가가 새로 생기지 않는다
+
+    def test_retry_flag_required__time_alone_does_not_merge(self):
+        """retry 비트가 없으면 별개 시도다 — 시간 휴리스틱으로 합치지 않는다."""
+        pairs = pair_roaming_sequences(
+            self._auth_then_assoc(retry_at=1000.02, retry_flag=False), STA_MACS)
+        assert len(pairs) == 2
+
+    def test_retry_outside_window_counts_separately(self):
+        pairs = pair_roaming_sequences(
+            self._auth_then_assoc(retry_at=1002.0), STA_MACS)
+        assert len(pairs) == 2
+
+    def test_first_copy_may_itself_be_a_retry(self):
+        """원본을 놓치고 재전송만 잡혔으면 그게 그 로밍의 유일한 프레임이다."""
+        frames = [
+            make_frame(number=1, epoch=1000.0, subtype="11", ta=STA1, ra=AP2),
+            make_frame(number=2, epoch=1000.005, subtype="2", ta=STA1, ra=AP2,
+                       retry=True),
+        ]
+        pairs = pair_roaming_sequences(frames, STA_MACS)
+        assert len(pairs) == 1 and pairs[0].gap_ms is not None
+
+    def test_different_subtype_is_not_a_retry_copy(self):
+        """AssocReq 뒤의 ReassocReq는 재전송이 아니라 다른 교환이다."""
+        frames = [
+            make_frame(number=1, epoch=1000.0, subtype="11", ta=STA1, ra=AP2),
+            make_frame(number=2, epoch=1000.005, subtype="0", ta=STA1, ra=AP2),
+            make_frame(number=3, epoch=1000.02, subtype="2", ta=STA1, ra=AP2,
+                       retry=True),
+        ]
+        assert len(pair_roaming_sequences(frames, STA_MACS)) == 2
+
+
+class TestClassifySlowSingleSource:
+    """느린 로밍 판정 규칙은 한 곳에만 있어야 한다.
+
+    이 PR이 고친 gap 허위 보고의 근원이 짝짓기 로직 복제였다 — 판정 규칙까지
+    복제되면 텍스트 리포트와 화면이 서로 다른 건수를 말하게 된다.
+    """
+
+    def test_total_decides_when_known(self):
+        from analyzer.core.modules.roaming import SLOW_THRESHOLD_MS, classify_slow
+
+        assert classify_slow(SLOW_THRESHOLD_MS + 1, 1.0) == (True, "total")
+        assert classify_slow(SLOW_THRESHOLD_MS - 1, 1.0) == (False, "total")
+
+    def test_gap_over_threshold_is_confirmed_slow_without_total(self):
+        """total ≥ gap 이므로 gap이 이미 임계를 넘으면 전체도 반드시 넘는다."""
+        from analyzer.core.modules.roaming import SLOW_THRESHOLD_MS, classify_slow
+
+        assert classify_slow(None, SLOW_THRESHOLD_MS + 1) == (True, "gap_lower_bound")
+
+    def test_undecidable_is_not_normal(self):
+        from analyzer.core.modules.roaming import SLOW_THRESHOLD_MS, classify_slow
+
+        assert classify_slow(None, SLOW_THRESHOLD_MS - 1) == (False, None)
+        assert classify_slow(None, None) == (False, None)
+
+    def test_structured_and_text_use_the_same_helper(self):
+        """화면(structured)과 텍스트(roaming.analyze)가 같은 판정을 낸다."""
+        import inspect
+
+        from analyzer.core.modules import roaming as roaming_mod
+        from analyzer.web import structured as structured_mod
+
+        assert "classify_slow" in inspect.getsource(structured_mod._structured_roaming)
+        assert "classify_slow" in inspect.getsource(roaming_mod.analyze)
+        assert "classify_slow" in inspect.getsource(roaming_mod.SequenceInfo.is_slow.fget)

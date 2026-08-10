@@ -345,7 +345,13 @@ def parse_logger_log(path: str) -> List[RoamDecision]:
                 d.trigger_th = int(last_cond.group("th"))
                 d.trend = last_cond.group("trend")
             out.append(d)
+            # 후보·조건 모두 **소비 즉시** 비운다. 조건 줄을 남겨두면 다음 로밍에
+            # `condition:`이 없을 때(파서가 명시적으로 허용하는 경우) 이전 로밍의
+            # trigger_rssi/trigger_th/trend가 그대로 붙어, 화면과 sta_log JSON에
+            # **없는 근거를 지어내 보여준다**. 앵커를 소비 후 폐기하는 로밍
+            # 짝짓기(roaming.pair_roaming_sequences 규칙 3)와 같은 이유다.
             last_cand = None
+            last_cond = None
     return out
 
 

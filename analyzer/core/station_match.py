@@ -29,6 +29,10 @@ COARSE_WINDOW_SEC = 3.0
 MATCH_TOLERANCE_SEC = 0.2
 #: 이 개수보다 적게 매칭되면 신뢰할 수 없는 짝으로 본다.
 MIN_MATCHES = 5
+#: 타임존 차이를 스냅할 격자(초) = 15분. 현존하는 UTC 오프셋은 모두 15분 배수라
+#: 이 격자면 서버/로그 타임존이 달라도 정확히 걷어낸다. 시계 오차(수 초)를
+#: 잘못 스냅하지 않도록 OFFSET_SEARCH_SEC를 넘는 차이에만 적용한다.
+TZ_SNAP_SEC = 900.0
 
 
 def pcap_ip_bindings(frames: Sequence[Any]) -> Dict[str, str]:
@@ -74,6 +78,18 @@ def estimate_offset(
     if not log_epochs or not pcap_epochs:
         return None, 0, float("inf")
 
+    # 타임존 사전 정렬 — STA 로그의 시각 문자열에는 타임존이 없어 파서가 **분석
+    # 서버의 로컬 타임존**으로 해석한다(station_log._parse_ts). 서버가 UTC이고
+    # 로그가 Asia/Seoul이면 모든 시각이 9시간 어긋나 ±30초 탐색으로는 한 쌍도
+    # 못 찾고 STA 로그가 통째로 무시된다(개발 호스트가 KST라 드러나지 않았다).
+    # 실제 타임존 차이는 15분 배수이므로, 중앙값 차이를 15분 격자에 스냅해 거친
+    # 오프셋을 먼저 걷어내고 그 위에서 원래의 정밀 탐색을 한다. 탐색 범위 안이면
+    # 0이라 기존 동작이 그대로다.
+    coarse = statistics.median(pcap_epochs) - statistics.median(log_epochs)
+    coarse = round(coarse / TZ_SNAP_SEC) * TZ_SNAP_SEC if abs(coarse) > search_sec else 0.0
+    if coarse:
+        log_epochs = [le + coarse for le in log_epochs]
+
     pcap_sorted = sorted(pcap_epochs)
     buckets: Dict[int, List[float]] = {}
     for le in log_epochs:
@@ -106,11 +122,13 @@ def estimate_offset(
         if best is not None and abs(best) <= COARSE_WINDOW_SEC:
             residuals.append(best)
     if not residuals:
-        return offset, 0, float("inf")
+        return coarse + offset, 0, float("inf")
     med = statistics.median(residuals)
     mad = statistics.median([abs(r - med) for r in residuals]) if len(residuals) > 1 else 0.0
     # 중앙 잔차만큼 한 번 더 당겨 최종 오프셋을 다듬는다.
-    return offset + med, len(residuals), mad
+    # coarse는 위에서 log_epochs에 미리 반영했으므로 반환값에 되돌려 더한다 —
+    # 호출부(binding.offset_sec)는 **원본 로그 시각** 기준 오프셋을 기대한다.
+    return coarse + offset + med, len(residuals), mad
 
 
 @dataclass
@@ -264,7 +282,7 @@ def attach_station_to_sequences(
             "source": binding.log_name,
         }
         # 직전 스캔 — ROAM 명령 이전에 끝난 가장 가까운 스캔.
-        k = bisect_left(scan_t, roam_t_sorted[order.index(best_i)] if False else ep.cmd_epoch + binding.offset_sec)
+        k = bisect_left(scan_t, ep.cmd_epoch + binding.offset_sec)
         if k > 0:
             sc = scans[k - 1]
             info["scan_ms"] = round(sc.duration_ms, 1)

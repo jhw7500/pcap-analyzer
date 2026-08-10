@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import uuid
+from functools import partial
 from pathlib import Path
 from typing import List
 
@@ -277,7 +278,15 @@ async def _save_capture_group(files: List[UploadFile]):
 
     merged = tempfile.NamedTemporaryFile(delete=False, suffix=".pcapng")
     merged.close()
-    ok, reason = merge_split_captures(tmps, merged.name, mergecap_path=mergecap)
+    # mergecap은 블로킹 subprocess다 — async 핸들러에서 직접 부르면 병합이 끝날
+    # 때까지 **이벤트 루프 전체가 멈춰** 진행률 폴링·취소·다른 요청이 모두 막힌다
+    # (홈 `index()`를 `def`로 내린 것과 같은 이유이고, 분석 본체가 executor로
+    # 나가 있는 것과도 일관된다). 실측 311MB는 0.5초지만 느린 파일시스템이나
+    # 타임아웃(MERGE_TIMEOUT_SEC)에 걸리면 그만큼 서버가 서지 못한다.
+    loop = asyncio.get_running_loop()
+    ok, reason = await loop.run_in_executor(
+        None, partial(merge_split_captures, tmps, merged.name, mergecap_path=mergecap)
+    )
     # 조각들은 병합 성공·실패와 무관하게 더 이상 필요 없다.
     _cleanup_tmps(*tmps)
     if not ok:

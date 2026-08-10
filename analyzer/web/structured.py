@@ -582,7 +582,11 @@ def _structured_roaming(
     # 같은 시퀀스를 봐야 한다. 이전에는 이 로직이 양쪽에 복제돼 있었고, 그래서
     # "앵커를 소비 후 지우지 않아 수십 초 전 Auth와 짝지어지는" 결함도 양쪽에
     # 똑같이 있었다(자세한 근거는 그 함수 docstring).
-    from ..core.modules.roaming import MISSING_FRAME_LABELS, pair_roaming_sequences
+    from ..core.modules.roaming import (
+        MISSING_FRAME_LABELS,
+        classify_slow,
+        pair_roaming_sequences,
+    )
 
     sequences = []
     for pairing in pair_roaming_sequences(roaming_frames, sta_macs):
@@ -617,16 +621,9 @@ def _structured_roaming(
                 "4-way 핸드셰이크가 캡처에 없어 완료 시점 불명 "
                 "(802.11r FT로 생략됐거나 모니터가 EAPOL을 놓침)"
             )
-        if total_roam_ms is not None:
-            is_slow = total_roam_ms > ROAM_GAP_DANGER_MS
-            slow_basis = "total"
-        elif gap_ms is not None and gap_ms > ROAM_GAP_DANGER_MS:
-            # total ≥ gap 이므로 전체도 반드시 임계 초과 — 확정.
-            is_slow = True
-            slow_basis = "gap_lower_bound"
-        else:
-            is_slow = False
-            slow_basis = None       # 판정 불가
+        # 판정 규칙은 roaming.classify_slow(단일 소스) — 텍스트 리포트와 화면이
+        # 다른 느린 로밍 건수를 말하면 안 된다(이 버그의 근원이 로직 복제였다).
+        is_slow, slow_basis = classify_slow(total_roam_ms, gap_ms)
         sequences.append(
             {
                 "sta": frame.ta,

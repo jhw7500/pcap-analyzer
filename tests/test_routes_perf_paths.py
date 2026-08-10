@@ -6,6 +6,7 @@
 - 34MB 응답을 무압축 전송
 """
 import gzip
+import time
 import json
 from unittest.mock import patch
 
@@ -198,3 +199,91 @@ class TestGzip:
         resp = client.get("/api/analysis/a1", headers={"Accept-Encoding": "identity"})
         assert resp.status_code == 200
         assert resp.headers.get("content-encoding") != "gzip"
+
+
+class TestResultCacheThreadSafety:
+    """결과 캐시는 스레드풀에서 동시에 접근된다.
+
+    `def` 엔드포인트는 FastAPI가 스레드풀로 내보내므로(홈 `index()`와 같은 이유)
+    여러 요청이 동시에 이 OrderedDict를 만진다. 개별 dict 연산은 GIL 아래
+    원자적이지만 "조회 → 삽입 → LRU 축출"은 아니라, 잠금이 없으면 두 스레드가
+    같은 미스를 처리할 때 `popitem`이 이미 빠진 키를 건드려 KeyError가 날 수 있다.
+
+    **이 테스트들의 한계**: 아래 스트레스 테스트는 잠금을 제거해도 통과한다(3회
+    확인). GIL 때문에 check-then-act의 경합 창이 수 바이트코드로 좁아 스레드로는
+    재현되지 않는다 — 회귀 방지용 smoke이지 잠금의 필요성을 증명하지는 못한다.
+    잠금이 실제로 걸려 있는지는 아래 구조 테스트로 고정한다.
+    """
+
+    def test_cache_mutations_are_guarded(self):
+        """조회·삽입·무효화가 모두 잠금 안에서 일어나는지 구조로 고정한다."""
+        import inspect
+
+        for fn in (analysis_module._read_result_cached,
+                   analysis_module._invalidate_result_cache):
+            src = inspect.getsource(fn)
+            assert "with _result_cache_lock" in src, fn.__name__
+        # 파싱은 잠금 밖이어야 한다 — 안이면 동시 요청이 직렬화돼 캐시가 병목이 된다.
+        read_src = inspect.getsource(analysis_module._read_result_cached)
+        parse_line = next(i for i, ln in enumerate(read_src.splitlines())
+                          if "json.loads" in ln)
+        indent = len(read_src.splitlines()[parse_line]) - len(
+            read_src.splitlines()[parse_line].lstrip())
+        assert indent <= 8, "json.loads가 잠금 블록 안으로 들어갔다"
+
+    def _write(self, tmp_path, name, frames):
+        p = tmp_path / f"{name}.json"
+        p.write_text(json.dumps(_result(name, frames)), encoding="utf-8")
+        return p
+
+    def test_concurrent_read_and_invalidate_does_not_raise(self, tmp_path):
+        import threading
+
+        analysis_module._invalidate_result_cache()
+        # 캐시 상한(2)보다 많은 파일을 돌려 축출 경로를 반드시 타게 한다.
+        paths = [self._write(tmp_path, f"c{i}", 100 + i) for i in range(6)]
+        errors, reads = [], []
+        stop = threading.Event()
+
+        def reader(path):
+            try:
+                while not stop.is_set():
+                    got = analysis_module._read_result_cached(path)
+                    if got is None:
+                        errors.append(f"{path} 파싱 실패")
+                        return
+                    # 캐시가 뒤섞이면 다른 결과가 돌아온다.
+                    if got["id"] != path.stem:
+                        errors.append(f"{path.stem} 자리에 {got['id']}")
+                        return
+                    reads.append(1)
+            except Exception as exc:            # 잠금 없으면 여기서 KeyError
+                errors.append(repr(exc))
+
+        def invalidator():
+            try:
+                while not stop.is_set():
+                    analysis_module._invalidate_result_cache(paths[0])
+                    analysis_module._invalidate_result_cache()
+            except Exception as exc:
+                errors.append(repr(exc))
+
+        threads = [threading.Thread(target=reader, args=(p,)) for p in paths]
+        threads += [threading.Thread(target=invalidator) for _ in range(2)]
+        for t in threads:
+            t.start()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and not errors:
+            time.sleep(0.01)        # 바쁜 대기는 워커를 굶겨 경합을 오히려 줄인다
+        stop.set()
+        for t in threads:
+            t.join(timeout=5)
+        assert not errors, errors[:3]
+        assert reads, "읽기가 한 번도 성공하지 않았다 — 테스트가 무력"
+
+    def test_lru_keeps_at_most_max_entries(self, tmp_path):
+        analysis_module._invalidate_result_cache()
+        for i in range(5):
+            analysis_module._read_result_cached(self._write(tmp_path, f"l{i}", i))
+        assert len(analysis_module._result_cache) <= analysis_module._RESULT_CACHE_MAX
+        analysis_module._invalidate_result_cache()

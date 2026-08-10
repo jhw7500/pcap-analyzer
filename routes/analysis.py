@@ -2,6 +2,7 @@
 
 import html
 import json
+import threading
 from collections import OrderedDict
 from typing import Any, Optional, Tuple
 
@@ -43,6 +44,13 @@ templates = Jinja2Templates(directory="templates")
 #: 갱신하면 mtime/size가 바뀌어 캐시 키가 자연히 무효화된다.
 _RESULT_CACHE_MAX = 2
 _result_cache: "OrderedDict[tuple, dict[str, Any]]" = OrderedDict()
+#: 캐시 접근 직렬화. `def` 엔드포인트는 FastAPI가 **스레드풀**로 내보내므로
+#: (홈의 `index()`와 같은 이유) 여러 요청이 동시에 이 OrderedDict를 만진다.
+#: 개별 dict 연산은 GIL 아래 원자적이지만 "조회 → 삽입 → LRU 축출"은 아니라,
+#: 두 스레드가 같은 미스를 처리하면 `popitem`이 이미 빠진 키를 건드려 KeyError가
+#: 날 수 있다. 파싱(33MB)은 잠금 **밖**에서 한다 — 안에서 하면 동시 요청이
+#: 직렬화돼 캐시가 오히려 병목이 된다. 중복 파싱은 낭비일 뿐 오류가 아니다.
+_result_cache_lock = threading.Lock()
 
 
 def _read_result_cached(path) -> Optional[dict[str, Any]]:
@@ -55,29 +63,32 @@ def _read_result_cached(path) -> Optional[dict[str, Any]]:
     except OSError:
         return None
     key = (str(path), st.st_mtime_ns, st.st_size)
-    cached = _result_cache.get(key)
-    if cached is not None:
-        _result_cache.move_to_end(key)
-        return cached
+    with _result_cache_lock:
+        cached = _result_cache.get(key)
+        if cached is not None:
+            _result_cache.move_to_end(key)
+            return cached
     try:
         parsed = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError, OSError):
         return None
-    _result_cache[key] = parsed
-    _result_cache.move_to_end(key)
-    while len(_result_cache) > _RESULT_CACHE_MAX:
-        _result_cache.popitem(last=False)
+    with _result_cache_lock:
+        _result_cache[key] = parsed
+        _result_cache.move_to_end(key)
+        while len(_result_cache) > _RESULT_CACHE_MAX:
+            _result_cache.popitem(last=False)
     return parsed
 
 
 def _invalidate_result_cache(path=None) -> None:
     """캐시 비우기. path를 주면 그 경로 항목만, 없으면 전부."""
-    if path is None:
-        _result_cache.clear()
-        return
-    target = str(path)
-    for key in [k for k in _result_cache if k[0] == target]:
-        _result_cache.pop(key, None)
+    with _result_cache_lock:
+        if path is None:
+            _result_cache.clear()
+            return
+        target = str(path)
+        for key in [k for k in _result_cache if k[0] == target]:
+            _result_cache.pop(key, None)
 
 
 def _load_result(analysis_id: str) -> Optional[dict[str, Any]]:

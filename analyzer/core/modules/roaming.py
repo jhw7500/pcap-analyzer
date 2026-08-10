@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 import importlib
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..models import AnalysisSection as AnalysisSectionType
@@ -43,6 +43,12 @@ ROAM_PAIR_MAX_GAP_SEC = 10.0
 
 #: 같은 Auth 교환(STA 요청 ↔ AP 응답)으로 볼 최대 간격(초). 실측 수 µs~ms.
 _SAME_AUTH_EXCHANGE_SEC = 1.0
+
+#: 같은 Assoc/Reassoc 교환의 **재전송 사본**으로 볼 최대 간격(초).
+#: 802.11 재전송은 ACK 타임아웃 단위(수 ms)라 1초면 충분히 관대하다. 이 창을
+#: 넘어 다시 온 요청은 retry 비트가 있어도 별개 시도로 본다(합쳤다가 실제 재시도
+#: 로밍을 놓치는 것보다, 나눠서 세는 쪽이 로밍 횟수 왜곡이 작다).
+_ASSOC_RETRY_SEC = 1.0
 
 
 #: gap 시작점으로 쓴 프레임 종류.
@@ -95,6 +101,32 @@ class RoamPairing:
         return ""
 
 
+def classify_slow(
+    total_roam_ms: Optional[float], gap_ms: Optional[float]
+) -> Tuple[bool, Optional[str]]:
+    """느린 로밍 판정 — `(is_slow, slow_basis)`. **판정 규칙의 단일 소스.**
+
+    `roaming.analyze`(텍스트)와 `structured._structured_roaming`(화면)이 서로
+    다른 느린 로밍 건수를 말하면 안 된다. 이 PR이 고친 gap 허위 보고의 근원이
+    바로 짝짓기 로직 복제였으므로, 판정 규칙도 처음부터 한 곳에만 둔다.
+
+    판정 기준은 gap이 아니라 **로밍 전체 소요**(Auth 요청 → 4-way 완료)다.
+    gap(Auth→Reassoc)에만 임계를 걸면 전체 25.2ms 중 5.3ms 구간만 보게 돼,
+    4-way가 길어 실제로 느린 로밍을 놓친다(실측: gap 6.3ms인데 4-way 41.7ms로
+    전체 105ms인 건이 있다).
+
+    total이 없어도(4-way 미포착) **total ≥ gap이 항상 성립**하므로 gap이 이미
+    임계를 넘으면 그 로밍은 확정적으로 느리다 — 아는 정보를 버리지 않는다.
+    둘 다 아니면 판정 불가(`None`)이며, '정상'이 아니라 '모름'이므로 건강도
+    분모에서 제외해야 한다.
+    """
+    if total_roam_ms is not None:
+        return total_roam_ms > SLOW_THRESHOLD_MS, "total"
+    if gap_ms is not None and gap_ms > SLOW_THRESHOLD_MS:
+        return True, "gap_lower_bound"
+    return False, None
+
+
 def pair_roaming_sequences(
     roaming_frames: List[FrameType], sta_macs: Any
 ) -> List[RoamPairing]:
@@ -138,6 +170,8 @@ def pair_roaming_sequences(
     """
     # sta MAC → (앵커 프레임, 앵커 종류)
     anchors: Dict[str, Any] = {}
+    # sta MAC → (직전 Assoc/Reassoc 시각, subtype) — 재전송 사본 식별용
+    last_assoc: Dict[str, Any] = {}
     pairs: List[RoamPairing] = []
     for frame in roaming_frames:
         if frame.subtype == "11":
@@ -151,6 +185,22 @@ def pair_roaming_sequences(
                     anchors[frame.ra] = (frame, GAP_BASIS_RESPONSE)
             continue
         if frame.subtype in ("0", "2") and frame.ta in sta_macs:
+            # 규칙 5 — 재전송 사본은 새 로밍이 아니다.
+            # 802.11 Assoc/Reassoc 요청이 재전송되면 같은 교환의 프레임이 두 번
+            # 잡힌다. 그대로 두면 두 번째는 앵커를 이미 소비한 뒤라 "측정 불가"
+            # 시퀀스가 하나 더 생겨 **로밍 횟수와 측정 불가 건수가 함께 부풀려진다**
+            # (STA 로그도 같은 로밍에 두 번 붙는다). 재전송은 retry 비트로 정확히
+            # 구분되므로 시간 휴리스틱만으로 합치지 않는다 — 같은 STA가 같은
+            # subtype으로 창 안에 다시 보낸 **retry 프레임**만 건너뛴다.
+            prev_assoc = last_assoc.get(frame.ta)
+            if (
+                getattr(frame, "retry", False)
+                and prev_assoc is not None
+                and prev_assoc[1] == frame.subtype
+                and 0 <= frame.epoch - prev_assoc[0] <= _ASSOC_RETRY_SEC
+            ):
+                continue
+            last_assoc[frame.ta] = (frame.epoch, frame.subtype)
             anchor = anchors.pop(frame.ta, None)      # 규칙 3 — 소비 즉시 폐기
             if anchor is not None:
                 anchor_frame, basis = anchor
@@ -203,10 +253,7 @@ class SequenceInfo:
     @property
     def is_slow(self) -> bool:
         """느린 로밍 여부. **판정 불가면 False** — slow_basis로 구분할 것."""
-        return self.slow_basis is not None and (
-            (self.total_roam_ms is not None and self.total_roam_ms > SLOW_THRESHOLD_MS)
-            or (self.slow_basis == "gap_lower_bound")
-        )
+        return classify_slow(self.total_roam_ms, self.gap_ms)[0]
 
 
 @dataclass
@@ -301,12 +348,7 @@ def analyze(
         if pairing.auth is not None and isinstance(hs_end, (int, float)):
             total = round((hs_end - pairing.auth.epoch) * 1000, 1)
         gap = pairing.gap_ms
-        if total is not None:
-            basis = "total"
-        elif gap is not None and gap > SLOW_THRESHOLD_MS:
-            basis = "gap_lower_bound"   # total ≥ gap 이므로 확정적으로 느림
-        else:
-            basis = None                # 판정 불가
+        _, basis = classify_slow(total, gap)   # 판정 규칙 단일 소스
         sequences.append(SequenceInfo(
             sta=assoc.ta,
             ap=assoc.ra,

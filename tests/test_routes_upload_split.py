@@ -271,3 +271,45 @@ class TestUploadRoute:
         for p in saved_paths:
             assert not Path(p).exists(), f"임시 파일 누수: {p}"
 
+
+
+@patch("routes.upload.config.detect_tshark", return_value="tshark")
+@patch("routes.upload.run_analysis")
+class TestMergeOffEventLoop:
+    """mergecap은 블로킹 subprocess다 — async 핸들러에서 직접 부르면 병합이 끝날
+    때까지 이벤트 루프 전체가 멈춰 진행률 폴링·취소·다른 요청이 모두 막힌다.
+    분석 본체가 executor로 나가 있는 것과 같은 규약을 병합에도 적용한다.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _stub_mergecap(self):
+        with patch("routes.upload.config.detect_mergecap",
+                   return_value="/usr/bin/mergecap"):
+            yield
+
+    def test_merge_runs_in_executor_not_on_the_loop(self, mock_run, _tshark,
+                                                    tmp_path, monkeypatch):
+        import asyncio
+
+        import config
+        monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+        mock_run.side_effect = _ok_result
+        on_loop = []
+
+        def fake_merge(paths, out_path, mergecap_path=None):
+            # 이벤트 루프 스레드에서 돌면 get_running_loop()가 성공한다.
+            try:
+                asyncio.get_running_loop()
+                on_loop.append(True)
+            except RuntimeError:
+                on_loop.append(False)
+            Path(out_path).write_bytes(PCAP_MAGIC)
+            return True, ""
+
+        with patch("routes.upload.merge_split_captures", side_effect=fake_merge):
+            resp = client.post("/api/upload", files=[
+                ("file", ("a.pcapng", PCAP_MAGIC, "application/octet-stream")),
+                ("file", ("b.pcapng", PCAP_MAGIC, "application/octet-stream")),
+            ])
+        assert resp.status_code == 200, resp.text
+        assert on_loop == [False], "mergecap이 이벤트 루프를 점유했다"

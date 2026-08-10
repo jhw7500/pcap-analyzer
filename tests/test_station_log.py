@@ -247,3 +247,68 @@ class TestMissingFiles:
     def test_empty_set(self):
         st = parse_station_logs({}, name="x")
         assert st.roams == [] and st.scans == [] and len(st.warnings) == 3
+
+
+class TestConsumedConditionState:
+    """소비한 로밍 조건은 비워야 한다 — 아니면 다음 로밍에 남의 근거가 붙는다.
+
+    `condition:` 줄은 매 로밍마다 찍히지 않는다(파서가 명시적으로 허용). 소비 후
+    비우지 않으면 조건 줄이 없는 다음 로밍이 **이전 로밍의 trigger_rssi/th/trend**
+    를 물려받아 화면과 sta_log JSON에 없는 근거를 지어내 보여준다.
+    """
+
+    LOG = """
+    2026-07-23 08:50:08.940 ROAM[info] [wifi_roam.py:2263] [mlan0] roaming condition: -67 < -65 (base=-65, trend=stable)
+    2026-07-23 08:50:08.962 ROAM[info] [wifi_roam.py:2382] [mlan0] Roam candidate: 00:80:4c:e1:09:cc, rssi=-51dB (diff=16dB), load=0.0%, reason=RSSI diff: 16dB, score=160.0
+    2026-07-23 08:50:08.965 ROAM[warning] [wifi_roam.py:2401] [mlan0] Roaming: 00:80:4c:e1:09:cb → 00:80:4c:e1:09:cc, reason=RSSI diff: 16dB, score=160.0
+    2026-07-23 08:50:26.127 ROAM[info] [wifi_roam.py:2382] [mlan0] Roam candidate: 00:80:4c:e1:09:cb, rssi=-61dB (diff=5dB), load=0.0%, reason=RSSI diff: 5dB, score=50.0
+    2026-07-23 08:50:26.128 ROAM[warning] [wifi_roam.py:2401] [mlan0] Roaming: 00:80:4c:e1:09:cc → 00:80:4c:e1:09:cb, reason=RSSI diff: 5dB, score=50.0
+    """
+
+    def test_condition_is_not_carried_to_next_roam(self, tmp_path):
+        ds = parse_logger_log(_write(tmp_path, "logger.log", self.LOG))
+        assert len(ds) == 2
+        assert ds[0].trigger_rssi == -67 and ds[0].trigger_th == -65
+        # 두 번째 로밍에는 조건 줄이 없었다 — 근거를 물려받으면 안 된다.
+        assert ds[1].trigger_rssi is None
+        assert ds[1].trigger_th is None
+        assert not ds[1].trend          # RoamDecision의 미설정 기본값(빈 문자열)
+        # 후보(candidate)는 각자 있었으므로 사유·점수는 제 것이 붙는다.
+        assert ds[1].score == 50.0
+
+
+class TestTimezoneMismatch:
+    """로그 시각 문자열에는 타임존이 없다 — 파서가 **분석 서버의 로컬 TZ**로
+    해석하므로, 서버가 UTC이고 로그가 Asia/Seoul이면 전부 9시간 어긋난다.
+    ±30초 탐색으로는 한 쌍도 못 찾아 STA 로그가 통째로 무시된다(개발 호스트가
+    KST라 드러나지 않았다). 15분 격자 사전 정렬로 걷어낸다.
+    """
+
+    PCAP = [1000.0 + i * 20 for i in range(20)]
+
+    def _logs(self, shift_sec):
+        # 로그→공중 전송 지연 110ms(실측)를 반영한 뒤 타임존만큼 더 어긋뜨린다.
+        return [t - 0.11 - shift_sec for t in self.PCAP]
+
+    def test_no_shift_unchanged(self):
+        off, matched, mad = estimate_offset(self._logs(0), self.PCAP)
+        assert matched == len(self.PCAP)
+        assert abs(off - 0.11) < 0.02
+
+    def test_nine_hour_shift_recovered(self):
+        off, matched, mad = estimate_offset(self._logs(9 * 3600), self.PCAP)
+        assert matched == len(self.PCAP)
+        assert abs(off - (9 * 3600 + 0.11)) < 0.02
+        assert mad < 0.05          # 정렬 후 잔차는 원래대로 작아야 한다
+
+    def test_negative_and_half_hour_offsets(self):
+        for shift in (-5 * 3600, 5.5 * 3600, -9.5 * 3600, 12.75 * 3600):
+            off, matched, _ = estimate_offset(self._logs(shift), self.PCAP)
+            assert matched == len(self.PCAP), f"shift={shift}"
+            assert abs(off - (shift + 0.11)) < 0.02, f"shift={shift}"
+
+    def test_clock_skew_within_search_is_not_snapped(self):
+        """수 초짜리 시계 오차를 타임존으로 오인해 15분 격자에 붙이면 안 된다."""
+        off, matched, _ = estimate_offset(self._logs(2.74), self.PCAP)
+        assert matched == len(self.PCAP)
+        assert abs(off - (2.74 + 0.11)) < 0.02

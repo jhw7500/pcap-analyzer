@@ -47,7 +47,13 @@ def analyze_signal_cliffs(signal_data: Dict[str, Any]) -> Dict[str, Any]:
             if rssi_i is None:
                 i += 1
                 continue
-            j = i + 1
+            # j는 **자기 버킷부터** 본다. 1초 버킷 집계로 바뀐 뒤 같은 버킷 안에서
+            # 시작하고 끝난 급락(멀티패스 순간 변동)은 j=i+1로 시작하면 어느 쌍과도
+            # 비교되지 않아 통째로 사라진다 — 원샘플 시절에는 잡히던 하락이다.
+            # j=i면 그 버킷의 최대(rssi_max) ↔ 최소(rssi_min)를 비교하게 돼 복원된다.
+            # 구버전 result(원샘플)는 max/min이 없어 두 값이 같은 rssi라 하락 0 —
+            # 이 비교가 추가돼도 판정이 달라지지 않는다.
+            j = i
             while j < len(timeline) and timeline[j]["epoch"] - timeline[i]["epoch"] <= 5.0:
                 rssi_j = _drop_to(timeline[j])
                 if rssi_j is not None and rssi_i - rssi_j >= 10:
