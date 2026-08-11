@@ -28,3 +28,10 @@ dist/
 # Local install/run logs (release scripts produce these in the extracted dir,
 # but devs sometimes run install.sh from the source tree for testing)
 *.log
+
+# 세션 작업 문서 — 로컬 전용(저장소 관례: 다른 프로젝트도 미추적)
+# HANDOFF.md: 다음 세션 인계용 상세 기록. 저장소 히스토리에 넣으면 코드와 무관한
+#   세션 서사가 diff에 섞인다.
+# .jhw/: /jhw:ship의 리뷰 판정 기록(ship-decisions.md)·타겟 스크립트(ship-target.sh).
+HANDOFF.md
+.jhw/
