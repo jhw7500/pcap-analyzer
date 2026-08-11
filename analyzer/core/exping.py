@@ -459,17 +459,17 @@ def extract_icmp_frames(
     미전달(기본 `None`)이면 감시 스레드를 아예 만들지 않아 동작이 불변이다.
 
     `warnings_out` 리스트를 주면 부분 실패(비정상 종료했지만 프레임은 건진 경우)
-    경고를 stderr 와 **같은 내용**으로 거기에도 담는다.
-
-    **계약: 여기에 담기는 것은 부분 실패 경고뿐이다.** 정상 추출이면 비어 있다.
-    `wired_ping.build_ground_truth`가 이 리스트의 **비어 있음 여부만으로**
-    `extraction_partial`(= 손실률 과소 계상 가능 → 1차 판정에 쓸 수 없음)을
-    판정하므로, 정보성 경고를 여기에 추가하면 멀쩡한 유선 GT가 조용히 판정에서
-    빠진다. 다른 종류의 경고가 필요하면 **별도 채널**을 쓸 것
-    (회귀 고정: tests/test_wired_ping.py::TestWarningsOutContract). stderr 만으로는 웹 경로가
+    경고를 stderr 와 **같은 내용**으로 거기에도 담는다. stderr 만으로는 웹 경로가
     그 사실을 알 길이 없어, 잘린/손상 pcap 이 아무 경고 없이 "성공한 ground
     truth" 로 게시된다(손실률이 실제보다 낮게 나온다). stderr 출력은 그대로
     유지되므로 CLI 동작은 불변이다.
+
+    **계약: `warnings_out` 에 담기는 것은 부분 실패 경고뿐이다.** 정상 추출이면
+    비어 있다. `wired_ping.build_ground_truth` 가 이 리스트의 **비어 있음 여부만으로**
+    `extraction_partial`(= 손실률 과소 계상 가능 → 1차 판정에 쓸 수 없음)을 정하므로,
+    정보성 경고를 여기에 섞으면 멀쩡한 유선 GT 가 조용히 판정에서 빠진다. 다른
+    종류의 경고가 필요하면 **별도 채널**을 쓸 것.
+    회귀 고정: `tests/test_wired_ping.py::TestWarningsOutContract`.
     """
     if cancel_event is not None and cancel_event.is_set():
         # 이미 취소된 뒤라면 자식을 띄우지도 않는다.

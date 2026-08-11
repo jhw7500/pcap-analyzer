@@ -368,3 +368,36 @@ class TestReportLossBasis:
         """구버전 result에는 loss_pct_used/loss_basis가 없다 — 기존처럼 찍혀야 한다."""
         out = self._section({"retry_pct": 3, "loss_pct": 8.24})
         assert "Ping Loss 8.24%" in out
+
+
+class TestLossBasisVocabularyParity:
+    """판정 근거 어휘가 Python·JS 양쪽에서 갈라지지 않는지 고정한다.
+
+    JS는 Python 상수를 import할 수 없어 `charts.js`가 같은 키·라벨을 손으로 들고
+    있다. 주석으로 안내는 했지만 강제 수단이 없으면 라벨을 한쪽만 고쳤을 때
+    화면만 달라지는 **무음 회귀**가 된다 — 그 순간을 이 테스트가 잡는다.
+    """
+
+    def _js_map(self):
+        import re
+        from pathlib import Path
+
+        src = Path("static/js/charts.js").read_text(encoding="utf-8")
+        m = re.search(r"const LOSS_BASIS_LABEL = \{([^}]*)\}", src)
+        assert m, "charts.js에서 LOSS_BASIS_LABEL 정의를 찾지 못했다"
+        return dict(re.findall(r"(\w+)\s*:\s*'([^']*)'", m.group(1)))
+
+    def test_keys_and_labels_match_python(self):
+        from analyzer.web.structured import LOSS_BASIS_LABELS
+
+        assert self._js_map() == LOSS_BASIS_LABELS
+
+    def test_report_uses_the_same_labels(self):
+        """report.py도 같은 정의를 쓰는지 — 자체 dict로 갈라진 적이 있다."""
+        import inspect
+
+        from analyzer.web import report
+
+        src = inspect.getsource(report._health_section)
+        assert "LOSS_BASIS_LABELS" in src
+        assert '"유선 확정"' not in src and '"무선 관측"' not in src
