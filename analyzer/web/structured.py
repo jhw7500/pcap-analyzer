@@ -1207,8 +1207,12 @@ def _loss_for_judgment(ping, wireless_loss_pct, ping_available):
         total = gt.get("total")
         gt_pct = gt.get("loss_pct")
         # total은 int로 오지만(len(exchanges) → JSON), 방어적으로 수치면 받는다 —
-        # 조용한 폴백은 원인을 추적하기 어렵다.
-        if isinstance(total, (int, float)) and total > 0 and isinstance(gt_pct, (int, float)):
+        # 조용한 폴백은 원인을 추적하기 어렵다. bool은 int의 서브클래스라 True가
+        # 1로 통과하므로 명시적으로 배제한다(손실률이 True인 GT는 GT가 아니다).
+        if (
+            isinstance(total, (int, float)) and not isinstance(total, bool) and total > 0
+            and isinstance(gt_pct, (int, float)) and not isinstance(gt_pct, bool)
+        ):
             return gt_pct, LOSS_BASIS_WIRED
     if ping_available:
         return wireless_loss_pct, LOSS_BASIS_WIRELESS

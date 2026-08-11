@@ -1153,11 +1153,22 @@ class TestLossJudgedByWiredGroundTruth:
     나쁠수록 네트워크가 나빠 보이는" 역전이다.
     """
 
-    def _structured(self, *, wireless_loss=8.0, gt=None):
-        # full_list 8/100 = 8.0% — stats와 같은 값으로 맞춘다(픽스처 내부 정합).
+    def _structured(self, *, wireless_loss=8.0, gt=None, wireless_loss_items=8):
+        # full_list의 손실 건수를 stats와 맞춘다(픽스처 내부 정합).
+        # `wireless_loss_items=0`이면 무선이 손실을 **전혀 못 본** 상황 — 근거
+        # 프레임이 없어 이슈가 드롭되는 경로를 재현한다.
+        n_loss = wireless_loss_items
+        # 손실 항목에는 **근거 필드**(req_num/epoch)를 담는다 — 이게 없으면
+        # ping_loss_evidence가 빈 근거를 주고 이슈가 항상 드롭돼, 이슈 관련
+        # 단언이 무의미하게 통과한다(실제로 그렇게 한 번 새어나갔다).
         ping = {
             "stats": {"loss_pct": wireless_loss, "req_total_raw": 100},
-            "full_list": [{"status": "loss"}] * 8 + [{"status": "matched"}] * 92,
+            "full_list": (
+                [{"status": "loss", "req_num": 1000 + i, "epoch": 2000.0 + i}
+                 for i in range(n_loss)]
+                + [{"status": "matched", "req_num": 2000 + i, "epoch": 2100.0 + i}
+                   for i in range(100 - n_loss)]
+            ),
         }
         if gt is not None:
             ping["ground_truth"] = gt
@@ -1205,11 +1216,43 @@ class TestLossJudgedByWiredGroundTruth:
         assert d["summary"]["loss_basis"] == "wireless_observed"
 
     def test_gt_reports_loss_that_wireless_missed(self):
-        """반대 방향도 성립해야 한다 — 유선이 손실을 보는데 무선이 못 본 경우."""
+        """반대 방향도 성립해야 한다 — 유선이 손실을 보는데 무선이 못 본 경우.
+
+        무선 손실 항목을 **0으로 비워** 실제 상황(모니터가 그 구간을 통째로 놓침)을
+        재현한다 — 픽스처에 무선 손실이 남아 있으면 이 경로를 검증하지 못한다.
+        """
         d = _structured_diagnosis(self._structured(
-            wireless_loss=0.0, gt={"total": 1000, "ok": 880, "ng": 120, "loss_pct": 12.0}))
+            wireless_loss=0.0, wireless_loss_items=0,
+            gt={"total": 1000, "ok": 880, "ng": 120, "loss_pct": 12.0}))
         assert d["summary"]["loss_basis"] == "wired_gt"
+        assert d["summary"]["loss_pct_used"] == 12.0
         assert d["component_scores"]["loss"] == 0        # 100 - 120 → 0으로 클램프
+
+    def test_no_wireless_evidence_drops_issue_but_keeps_verdict(self):
+        """무선 근거가 없으면 이슈는 드롭되지만 **판정은 남는다**.
+
+        "근거 없는 결론 0건"이 이 저장소의 대원칙이라 근거 프레임이 없는 이슈는
+        붙이지 않는다. 대신 건강도 점수가 유선 기준으로 낮게 나오므로 판정 자체가
+        사라지지는 않는다 — 사용자가 "왜 점수가 낮은지" 알 수 있는 경로는
+        summary(loss_pct_used/loss_basis)와 유선 streak 이슈다.
+        """
+        d = _structured_diagnosis(self._structured(
+            wireless_loss=0.0, wireless_loss_items=0,
+            gt={"total": 1000, "ok": 880, "ng": 120, "loss_pct": 12.0}))
+        assert not [i for i in d["issues"] if i.get("signal_type") == "high_loss"]
+        # 판정은 남아 있어야 한다 — 점수 0 + 근거 필드로 드러난다.
+        assert d["component_scores"]["loss"] == 0
+        assert d["summary"]["loss_basis"] == "wired_gt"
+        assert d["summary"]["loss_pct_used"] == 12.0
+
+    def test_wireless_evidence_present_keeps_issue(self):
+        """대조군 — 무선 근거가 있으면 같은 조건에서 이슈가 붙는다(드롭이 조건부임)."""
+        d = _structured_diagnosis(self._structured(
+            wireless_loss=12.0, wireless_loss_items=12,
+            gt={"total": 1000, "ok": 880, "ng": 120, "loss_pct": 12.0}))
+        loss_issues = [i for i in d["issues"] if i.get("signal_type") == "high_loss"]
+        assert len(loss_issues) == 1, d["issues"]
+        assert "12.0%" in loss_issues[0]["msg"] and "유선 확정" in loss_issues[0]["msg"]
 
     def test_no_ping_at_all_stays_unmeasurable(self):
         """ICMP도 GT도 없으면 여전히 판정 불가(None) — 만점 부풀림 금지."""

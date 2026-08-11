@@ -409,31 +409,38 @@ def build_ground_truth(
     미확인"과 구분하기 위해)에도 확인해 같은 값을 반환한다.
     """
     warnings: List[str] = []
+    # 추출 경고만 담는 **전용** 리스트. 공용 warnings를 그대로 넘기면
+    # `extraction_partial = bool(warnings)`가 "이 줄 이전에 다른 경고가 추가되지
+    # 않는다"는 암묵적 순서 계약에 의존하게 된다 — 나중에 누가 무관한 정보성
+    # 경고를 앞에 넣으면 정상 추출이 부분 실패로 오인돼 유선 GT가 판정에서
+    # 통째로 빠진다(조용히, 아무도 모르게). 리스트를 분리하면 구조적으로 막힌다.
+    extract_warnings: List[str] = []
     try:
         # warnings_out: tshark가 일부 행만 내고 비정상 종료한 경우의 경고를 gt
         # warnings로 올린다 — stderr만으로는 웹 경로가 알 수 없어 잘린 pcap이
         # 경고 없는 "성공한 GT"로 게시된다(손실 과소 계상).
         frames = exping.extract_icmp_frames(
             pcap_path, tshark=tshark_path, cancel_event=cancel_event,
-            warnings_out=warnings,
+            warnings_out=extract_warnings,
         )
     except InterruptedError:
         return {"cancelled": True}
     except FileNotFoundError:
-        return {"error": f"tshark 를 찾을 수 없다: {tshark_path}", "warnings": warnings}
+        return {"error": f"tshark 를 찾을 수 없다: {tshark_path}",
+                "warnings": warnings + extract_warnings}
     except (ValueError, TimeoutError) as exc:
-        return {"error": str(exc), "warnings": warnings}
+        return {"error": str(exc), "warnings": warnings + extract_warnings}
+    warnings.extend(extract_warnings)
 
-    # **추출 무결성 플래그.** 이 시점의 warnings는 `extract_icmp_frames`의
-    # warnings_out 계약상 **부분 실패**(tshark가 일부 행만 내고 비정상 종료)에서만
-    # 온다 — 이후 단계의 경고가 섞이기 전에 확정한다.
+    # **추출 무결성 플래그.** 전용 리스트만 보므로 이후 어떤 경고가 추가돼도
+    # 영향받지 않는다.
     #
     # 부분 실패면 손실률이 **실제보다 낮게** 나온다(못 읽은 요청은 애초에 모집단에
     # 없다). 그 값을 1차 판정으로 승격하면 건강도가 부풀고 진짜 손실 이슈가 눌린다
     # — 소비자(`structured._loss_for_judgment`)가 이 플래그로 걸러낸다.
     # `error`가 아니라 플래그인 이유: 화면의 GT 카드는 부분 결과라도 보여줄 값이
     # 있고, "판정에 못 쓴다"와 "아예 없다"는 다르다.
-    extraction_partial = bool(warnings)
+    extraction_partial = bool(extract_warnings)
 
     # ip_filter(사용자)와 derived_ip_filter(mac_filter 유도값)는 독립적인 필터로
     # 순차 AND 적용된다 — 위 build_ground_truth docstring·_cohort_requests

@@ -327,6 +327,14 @@ def _build_diagnosis_section(diagnosis: Any) -> list:
                 " 차이는 네트워크 문제가 아니라 **모니터가 못 본 프레임**의 양이다 —"
                 " 무선 값으로 손실을 논하지 말 것."
             )
+        elif summary.get("loss_pct") is not None:
+            # 구버전 result에는 loss_basis 자체가 없다. 안내가 없으면 무선 관측값을
+            # 확정 손실로 읽어 "위험"으로 오판한다 — 실측에서 무선은 유선보다 20배
+            # 높게 나왔다. 유선 확정이 없을 때는 상한으로만 읽도록 명시한다.
+            lines.append(
+                "  · loss_pct는 **무선 관측**이라 모니터가 놓친 프레임까지 손실로 센다"
+                " — 유선 확정치가 없으므로 실제 손실의 **상한**으로만 읽을 것."
+            )
     issues = diagnosis.get("issues") or diagnosis.get("findings") or []
     if issues:
         lines.append("")
