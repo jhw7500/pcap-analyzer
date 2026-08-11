@@ -158,6 +158,28 @@ def _build_roaming_section(roaming: dict) -> list:
             "  · gap_ms는 전체의 일부 구간일 뿐이다 — 로밍 빠르기 판단은 "
             "total_roam_ms로 할 것"
         )
+    # STA 로그 체감 — pcap이 원리적으로 못 보는 구간까지 포함한 실제 로밍 소요.
+    # 실측 776건 대조에서 pcap 25.1ms vs 체감 97.0ms로 74.1%가 전파 밖이었다.
+    sta_totals = [
+        s["sta_log"]["total_ms"] for s in seqs
+        if isinstance(s.get("sta_log"), dict)
+        and isinstance(s["sta_log"].get("total_ms"), (int, float))
+    ]
+    if sta_totals:
+        lines.append(
+            f"- sta_log.total_ms(ROAM 명령→CONNECTED = STA 체감, n={len(sta_totals)}): "
+            f"min={min(sta_totals):.1f} / avg={sum(sta_totals)/len(sta_totals):.1f} / "
+            f"max={max(sta_totals):.1f}"
+        )
+        lines.append(
+            "  · total_roam_ms는 전파에 나온 구간만이다 — 스캔·로밍 판단·드라이버 "
+            "처리·키 설치는 캡처에 없어 체감이 더 크다. 로그가 붙지 않은 로밍은 "
+            "'빨랐다'가 아니라 '모른다'로 다룰 것"
+        )
+        lines.append(
+            "  · 느린 로밍 판정은 여전히 total_roam_ms 기준이다 — 체감값으로 "
+            "판정 건수를 다시 세지 말 것"
+        )
     # 느린 로밍 top 5 상세 (gap 큰 순). 4-way/밴드 전환은 신규 키 — 있을 때만 표기.
     def _gap_sort_key(x):
         g = x.get("gap_ms")
@@ -181,6 +203,12 @@ def _build_roaming_section(roaming: dict) -> list:
         tot = s.get("total_roam_ms")
         if isinstance(tot, (int, float)):
             extra += f", 전체={tot:.1f}ms"
+        # STA 체감은 있을 때만 — 4-way/밴드 전환과 같은 조건부 표기 방식.
+        log = s.get("sta_log")
+        if isinstance(log, dict) and isinstance(log.get("total_ms"), (int, float)):
+            extra += f", STA체감={log['total_ms']:.1f}ms"
+            if log.get("reason"):
+                extra += f", 사유={log['reason']}"
         lines.append(f"  · t={ts} {sta} → {ap} [{atype}], gap={gap_str}{extra}")
     # STA별 로밍 횟수
     sta_counts: dict = {}
@@ -192,6 +220,48 @@ def _build_roaming_section(roaming: dict) -> list:
             f"{n}×{c}회" for n, c in sorted(sta_counts.items(), key=lambda kv: -kv[1])[:5]
         )
         lines.append(f"- STA별 로밍 횟수: {top_str}")
+    return lines
+
+
+def _build_station_log_section(station_logs: dict) -> list:
+    """STA(단말) 로그 요약 — 매칭 품질과 체감/스캔 분포.
+
+    로그를 올리지 않은 분석에는 `station_logs` 자체가 없으므로 빈 리스트를 반환해
+    프롬프트가 기존과 동일하게 유지된다(죽은 헤더로 토큰을 쓰지 않는다).
+
+    `warnings`와 정렬 잔차(MAD)를 함께 낸다 — 시계 정렬 품질을 모르면 LLM이
+    체감값을 확정 수치로 인용한다.
+    """
+    stations = (
+        station_logs.get("stations") if isinstance(station_logs, dict) else None
+    )
+    if not isinstance(stations, list) or not stations:
+        return []
+    lines = ["", "## STA 로그 (단말 관점)"]
+    for st in stations:
+        if not isinstance(st, dict):
+            continue
+        who = st.get("sta_name") or "매칭 실패"
+        method = "IP" if st.get("match_method") == "ip" else "시각 상관"
+        parts = [
+            f"{st.get('name', '?')} → {who}({method})",
+            f"부착 {st.get('attached', 0)}/{st.get('roam_total', 0)}",
+        ]
+        for key, label in (
+            ("total_ms_p50", "체감 p50"),
+            ("scan_ms_p50", "스캔 p50"),
+            ("residual_mad_ms", "정렬 MAD"),
+        ):
+            v = st.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                parts.append(f"{label}={v}ms")
+        lines.append(f"- {', '.join(parts)}")
+        for w in st.get("warnings") or []:
+            lines.append(f"  · 주의: {w}")
+    lines.append(
+        "  · 스캔은 ROAM 명령보다 약 1초 앞서 끝나는 별개 이벤트라 로밍 소요에 "
+        "합산하지 않는다. 스캔 소요는 커널 monotonic 기준이라 호기 간 비교 금지"
+    )
     return lines
 
 
@@ -527,6 +597,7 @@ def build_review_prompt(structured: dict) -> str:
             _build_device_section({"🌐 전체 시스템": system_stats}, header=None)
         )
     out.extend(_build_roaming_section(roaming))
+    out.extend(_build_station_log_section(structured.get("station_logs")))
     out.extend(_build_ping_section(ping))
     out.extend(_build_signal_section(signal, cliffs))
     out.extend(_build_delay_anomaly_section(delays, anomalies))

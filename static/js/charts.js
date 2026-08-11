@@ -539,19 +539,33 @@
                     <td class="py-1 text-right text-gray-500">${st.residual_mad_ms ?? '-'}</td>
                 </tr>`;
             }).join('');
-            // pcap이 못 보는 비중 — 같은 로밍끼리 대조한 중앙값 기준.
-            const paired = seqs.filter(s => s.sta_log && typeof s.sta_log.total_ms === 'number'
-                                            && typeof s.total_roam_ms === 'number');
-            let note = '';
-            if (paired.length) {
+            /* pcap이 못 보는 비중 — 같은 로밍끼리 대조한 중앙값 기준.
+               같은 비율을 화면과 백엔드가 따로 계산하면 중앙값 정의 차이(짝수일 때
+               평균 vs 상위값)로 두 수치가 갈린다. 신규 결과는 진단 summary가 실어
+               보내는 값을 그대로 쓰고, 그 키가 없는 구버전 result에서만 아래
+               폴백으로 계산한다 — 리포트·AI와 같은 숫자를 말하게 하는 지점이다. */
+            const covSum = (DATA.diagnosis && DATA.diagnosis.summary) || {};
+            let pairedN = covSum.roaming_sta_log_matched;
+            let p = covSum.roaming_pcap_total_ms_p50;
+            let t = covSum.roaming_sta_total_ms_p50;
+            let visiblePct = covSum.roaming_pcap_visible_pct;
+            if (typeof pairedN !== 'number') {
+                const paired = seqs.filter(s => s.sta_log && typeof s.sta_log.total_ms === 'number'
+                                                && typeof s.total_roam_ms === 'number');
                 const med = arr => { const v = arr.slice().sort((a, b) => a - b); return v[Math.floor(v.length / 2)]; };
-                const p = med(paired.map(s => s.total_roam_ms));
-                const t = med(paired.map(s => s.sta_log.total_ms));
+                pairedN = paired.length;
+                p = paired.length ? med(paired.map(s => s.total_roam_ms)) : null;
+                t = paired.length ? med(paired.map(s => s.sta_log.total_ms)) : null;
+                visiblePct = (t > 0) ? (p / t) * 100 : null;
+            }
+            let note = '';
+            if (pairedN > 0 && typeof p === 'number' && typeof t === 'number') {
                 /* 체감 로밍 중앙값이 0이면 비율이 Infinity/NaN으로 찍힌다. 로그 스탬프
                    정밀도가 ms라 극단적으로 짧은 로밍에서 0이 나올 수 있다 — 값을
                    지어내지 않고 '측정불가'로 둔다. */
-                const outsidePct = t > 0 ? ((1 - p / t) * 100).toFixed(1) + '%' : '측정불가';
-                note = `<p class="mt-2 text-gray-400">같은 로밍 ${paired.length.toLocaleString()}건 대조 —
+                const outsidePct = typeof visiblePct === 'number'
+                    ? (100 - visiblePct).toFixed(1) + '%' : '측정불가';
+                note = `<p class="mt-2 text-gray-400">같은 로밍 ${pairedN.toLocaleString()}건 대조 —
                     pcap 전파구간 <span class="text-gray-200">${p.toFixed(1)}ms</span> vs
                     STA 체감 <span class="text-sky-300">${t.toFixed(1)}ms</span>.
                     <span class="text-gray-200">${outsidePct}</span>가 전파에 나타나지 않는 구간

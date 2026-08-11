@@ -575,11 +575,22 @@ def _roaming_section(structured: Dict[str, Any]) -> List[str]:
     if not isinstance(seqs, list) or not seqs:
         return []
     lines = ["## 로밍 (BSS Transition)", ""]
-    # Gap은 Auth→Reassoc 구간만이라 로밍 전체 소요와 다르다 — 둘 다 싣는다.
-    lines.append(
-        "| # | 시각(Auth) | STA | AP (이전→이후) | Gap(ms) | 4-way(ms) | 전체(ms) | 밴드 전환 |"
+    # STA 로그가 붙은 결과에만 체감 열을 붙인다. 무조건 9열로 만들면 로그 없이
+    # 분석한 구버전 결과의 report.md까지 달라진다(출력 불변 원칙).
+    # 헤더·구분선·데이터 행을 **같은 리스트**에서 만들어 열 수 불일치로 GFM 표가
+    # 깨지는 것을 구조적으로 막는다 — 세 곳 수기 동기가 열 추가 때 가장 잘 깨진다.
+    has_sta_log = any(
+        isinstance(s, dict) and isinstance(s.get("sta_log"), dict)
+        and isinstance(s["sta_log"].get("total_ms"), (int, float))
+        for s in seqs
     )
-    lines.append("|---|---|---|---|---|---|---|---|")
+    # Gap은 Auth→Reassoc 구간만이라 로밍 전체 소요와 다르다 — 둘 다 싣는다.
+    cols = ["#", "시각(Auth)", "STA", "AP (이전→이후)", "Gap(ms)", "4-way(ms)", "전체(ms)"]
+    if has_sta_log:
+        cols.append("STA 체감(ms)")
+    cols.append("밴드 전환")
+    lines.append("| " + " | ".join(cols) + " |")
+    lines.append("|" + "|".join(["---"] * len(cols)) + "|")
     for i, s in enumerate(seqs[:20], start=1):
         if not isinstance(s, dict):
             continue
@@ -611,9 +622,17 @@ def _roaming_section(structured: Dict[str, Any]) -> List[str]:
             bc_str = "-"
         total = s.get("total_roam_ms")
         total_str = f"{total}" if isinstance(total, (int, float)) else "-"
-        lines.append(
-            f"| {i} | {ts} | {sta} | {ap_str} | {gap_str} | {fw_str} | {total_str} | {bc_str} |"
-        )
+        cells = [str(i), ts, sta, ap_str, gap_str, fw_str, total_str]
+        if has_sta_log:
+            log = s.get("sta_log")
+            st_total = log.get("total_ms") if isinstance(log, dict) else None
+            # "-"로 두면 지연이 없었던 것처럼 읽힌다 — 측정불가 표기와 같은 원칙으로
+            # 왜 값이 없는지(로그가 안 붙었다)를 밝힌다.
+            cells.append(
+                f"{st_total}" if isinstance(st_total, (int, float)) else "로그 미매칭"
+            )
+        cells.append(bc_str)
+        lines.append("| " + " | ".join(cells) + " |")
     lines.append("")
     lines.append(
         "> Gap = Auth 요청 → Reassoc 요청 구간만. 전체 = Auth 요청 → 4-way 완료 "
@@ -621,11 +640,95 @@ def _roaming_section(structured: Dict[str, Any]) -> List[str]:
         "`-`이고, 그때는 Gap이 이미 임계를 넘은 경우에만 느림으로 확정한다"
         "(전체 ≥ Gap 이므로)."
     )
+    if has_sta_log:
+        lines.append(
+            "> STA 체감 = 단말 로그의 ROAM 명령 → CONNECTED. 스캔·로밍 판단·드라이버 "
+            "처리·키 설치처럼 **전파에 나타나지 않는 구간**까지 포함하므로 전체(ms)보다 "
+            "크다. `로그 미매칭`은 그 로밍에 대응하는 로그를 찾지 못했다는 뜻이지 지연이 "
+            "없었다는 뜻이 아니다. **느린 로밍 판정은 여전히 전체(ms) 기준**이며 체감은 "
+            "판정에 쓰지 않는다."
+        )
     if len(seqs) > 20:
         lines.append("")
         lines.append(f"_(총 {len(seqs)}건 중 앞 20건만 표시)_")
     lines.append("")
     return lines
+
+
+def _station_log_section(
+    structured: Dict[str, Any], diagnosis: Dict[str, Any]
+) -> List[str]:
+    """STA(단말) 로그 요약 — 매칭 결과·체감 분포·관측 커버리지.
+
+    로그를 올리지 않은 결과에는 `station_logs`가 아예 없으므로 빈 리스트를 반환해
+    기존 report.md와 완전히 같은 출력을 유지한다.
+
+    `warnings`를 반드시 함께 낸다 — 시계 정렬 품질이 낮은 부착까지 확정 수치처럼
+    읽히면 안 된다. 화면 카드(`charts.js`)가 warnings를 노란색으로 내는 것과 같은
+    이유다.
+    """
+    blk = structured.get("station_logs") or {}
+    stations = blk.get("stations") if isinstance(blk, dict) else None
+    if not isinstance(stations, list) or not stations:
+        return []
+    lines = ["## STA 로그 (단말 관점 로밍)", ""]
+    lines.append("| 로그 | STA IP | 매칭 | 부착/로밍 | 체감 p50(ms) | 스캔 p50(ms) | 정렬 MAD(ms) |")
+    lines.append("|---|---|---|---|---|---|---|")
+    for st in stations:
+        if not isinstance(st, dict):
+            continue
+        name = _clean_cell(st.get("name", "?"))
+        ip = _clean_cell(st.get("sta_ip") or "-")
+        if st.get("sta_name"):
+            method = "IP" if st.get("match_method") == "ip" else "시각 상관"
+            matched = f"{_clean_cell(st['sta_name'])} ({method})"
+        else:
+            matched = "매칭 실패"
+        att = f"{_fmt_count(st.get('attached'))}/{_fmt_count(st.get('roam_total'))}"
+        lines.append(
+            f"| {name} | {ip} | {matched} | {att} | "
+            f"{_num_or_dash(st.get('total_ms_p50'))} | "
+            f"{_num_or_dash(st.get('scan_ms_p50'))} | "
+            f"{_num_or_dash(st.get('residual_mad_ms'))} |"
+        )
+    lines.append("")
+    warned = False
+    for st in stations:
+        if not isinstance(st, dict):
+            continue
+        for w in st.get("warnings") or []:
+            lines.append(f"> ⚠ {_clean_cell(st.get('name', '?'))}: {_clean_cell(w)}")
+            warned = True
+    if warned:
+        lines.append("")
+    summary = diagnosis.get("summary") or {}
+    matched_n = summary.get("roaming_sta_log_matched")
+    visible = summary.get("roaming_pcap_visible_pct")
+    pcap_p50 = summary.get("roaming_pcap_total_ms_p50")
+    sta_p50 = summary.get("roaming_sta_total_ms_p50")
+    if (
+        isinstance(matched_n, int) and matched_n > 0
+        and isinstance(visible, (int, float))
+        and isinstance(pcap_p50, (int, float)) and isinstance(sta_p50, (int, float))
+    ):
+        lines.append(
+            f"같은 로밍 {_fmt_count(matched_n)}건 대조 — pcap 전파구간 **{pcap_p50}ms** vs "
+            f"STA 체감 **{sta_p50}ms**. pcap이 보는 건 전체의 **{visible}%**이고 나머지는 "
+            "스캔·로밍 판단·드라이버 처리·키 설치로 전파에 나타나지 않는다."
+        )
+        lines.append("")
+        lines.append(
+            "> 스캔은 ROAM 명령보다 약 1초 앞서 끝나는 별개 이벤트라 로밍 소요에 "
+            "합산하지 않는다. 개별 로밍의 세부 구간은 로그 스탬프 정밀도(±20ms대)를 "
+            "넘어서므로 분포로만 표기한다."
+        )
+        lines.append("")
+    return lines
+
+
+def _num_or_dash(v: Any) -> str:
+    """수치면 그대로, 아니면 `-`. None을 'None'으로 찍지 않기 위한 셀 포매터."""
+    return f"{v}" if isinstance(v, (int, float)) and not isinstance(v, bool) else "-"
 
 
 def _ping_section(structured: Dict[str, Any]) -> List[str]:
@@ -788,6 +891,7 @@ def build_report_markdown(result: Dict[str, Any]) -> str:
     out.extend(_health_section(diagnosis))
     out.extend(_ping_section(structured))
     out.extend(_roaming_section(structured))
+    out.extend(_station_log_section(structured, diagnosis))
     out.extend(_correlations_section(diagnosis))
     out.extend(_issues_table(diagnosis))
     out.extend(_sta_diags_section(diagnosis, structured))
