@@ -1186,18 +1186,29 @@ LOSS_BASIS_LABELS = {
 def _loss_for_judgment(ping, wireless_loss_pct, ping_available):
     """손실 판정에 쓸 `(loss_pct, basis)`. 판정 불가면 `(None, None)`.
 
-    유선 ground truth가 **쓸 수 있는 상태**면 그 값을 쓴다 — `error`가 없고
-    모집단(`total`)이 1건 이상이어야 한다. `total == 0`이면 시간창·IP 필터를
-    거친 뒤 남은 교환이 없다는 뜻이라 손실률 0.0이 "손실 없음"을 의미하지 않는다
-    (판정 근거가 없는 0이다) → 무선 관측으로 폴백한다.
+    유선 ground truth가 **쓸 수 있는 상태**면 그 값을 쓴다. 세 가지를 확인한다.
+
+    1. `error`가 없을 것.
+    2. `extraction_partial`이 아닐 것 — tshark가 일부 행만 내고 비정상 종료하면
+       (잘린/손상 pcap) `error` 없이 **과소 계상된** 손실률이 나온다. 못 읽은
+       요청은 애초에 모집단에 없기 때문이다. 그걸 1차 판정으로 승격하면 건강도가
+       부풀고 진짜 손실 이슈가 눌린다 — 이 PR이 막으려는 바로 그 실패(관측 한계를
+       사실로 오인)를 반대 방향으로 반복하는 셈이다.
+    3. 모집단(`total`)이 1건 이상일 것 — `total == 0`이면 시간창·IP 필터를 거친 뒤
+       남은 교환이 없다는 뜻이라 손실률 0.0이 "손실 없음"이 아니라 **근거 없는 0**
+       이다(그대로 쓰면 필터를 좁힐수록 건강해지는 역전).
 
     구버전 result에는 `ground_truth` 자체가 없으므로 자동으로 무선 경로를 탄다.
+    `extraction_partial` 키가 없는 구버전 GT는 판정에 쓴다 — 그때의 무결성은
+    소급해서 알 수 없고, 없는 정보를 이유로 기존 동작을 바꾸지는 않는다.
     """
     gt = ping.get("ground_truth")
-    if isinstance(gt, dict) and "error" not in gt:
+    if isinstance(gt, dict) and "error" not in gt and not gt.get("extraction_partial"):
         total = gt.get("total")
         gt_pct = gt.get("loss_pct")
-        if isinstance(total, int) and total > 0 and isinstance(gt_pct, (int, float)):
+        # total은 int로 오지만(len(exchanges) → JSON), 방어적으로 수치면 받는다 —
+        # 조용한 폴백은 원인을 추적하기 어렵다.
+        if isinstance(total, (int, float)) and total > 0 and isinstance(gt_pct, (int, float)):
             return gt_pct, LOSS_BASIS_WIRED
     if ping_available:
         return wireless_loss_pct, LOSS_BASIS_WIRELESS

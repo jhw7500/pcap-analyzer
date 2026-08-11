@@ -318,6 +318,15 @@ def _build_diagnosis_section(diagnosis: Any) -> list:
                 summary_parts.append(f"{k}={summary[k]}")
         if summary_parts:
             lines.append(f"- 핵심 지표: {', '.join(summary_parts)}")
+        # 두 손실률이 함께 실리면 AI가 어느 쪽을 근거로 삼아야 하는지 명시한다 —
+        # 값이 20배까지 벌어질 수 있어(실측 유선 0.38% vs 무선 8.24%) 안내 없이는
+        # 모순된 진단이 나온다.
+        if summary.get("loss_basis") == "wired_gt":
+            lines.append(
+                "  · 손실 판정 근거는 loss_pct_used(유선 확정)다. loss_pct(무선 관측)와의"
+                " 차이는 네트워크 문제가 아니라 **모니터가 못 본 프레임**의 양이다 —"
+                " 무선 값으로 손실을 논하지 말 것."
+            )
     issues = diagnosis.get("issues") or diagnosis.get("findings") or []
     if issues:
         lines.append("")

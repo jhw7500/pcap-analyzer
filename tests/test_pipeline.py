@@ -1153,7 +1153,8 @@ class TestLossJudgedByWiredGroundTruth:
     나쁠수록 네트워크가 나빠 보이는" 역전이다.
     """
 
-    def _structured(self, *, wireless_loss=8.24, gt=None):
+    def _structured(self, *, wireless_loss=8.0, gt=None):
+        # full_list 8/100 = 8.0% — stats와 같은 값으로 맞춘다(픽스처 내부 정합).
         ping = {
             "stats": {"loss_pct": wireless_loss, "req_total_raw": 100},
             "full_list": [{"status": "loss"}] * 8 + [{"status": "matched"}] * 92,
@@ -1176,7 +1177,7 @@ class TestLossJudgedByWiredGroundTruth:
         assert d["summary"]["loss_basis"] == "wired_gt"
         assert d["summary"]["loss_pct_used"] == 0.38
         # 무선 관측값은 그대로 남는다 — 두 값의 차이가 캡처 커버리지 정보다.
-        assert d["summary"]["loss_pct"] == 8.24
+        assert d["summary"]["loss_pct"] == 8.0
         # 100 - 0.38*10 = 96.2 (무선이면 100 - 82.4 = 17.6)
         assert d["component_scores"]["loss"] == 96
 
@@ -1184,8 +1185,8 @@ class TestLossJudgedByWiredGroundTruth:
         """구버전 result(ground_truth 키 없음)는 기존 동작 그대로."""
         d = _structured_diagnosis(self._structured())
         assert d["summary"]["loss_basis"] == "wireless_observed"
-        assert d["summary"]["loss_pct_used"] == 8.24
-        assert d["component_scores"]["loss"] == 18       # 100 - 82.4
+        assert d["summary"]["loss_pct_used"] == 8.0
+        assert d["component_scores"]["loss"] == 20       # 100 - 80.0
 
     def test_empty_gt_population_falls_back(self):
         """total==0이면 손실률 0.0은 '손실 없음'이 아니라 **근거 없는 0**이다.
@@ -1196,7 +1197,7 @@ class TestLossJudgedByWiredGroundTruth:
         d = _structured_diagnosis(self._structured(
             gt={"total": 0, "ok": 0, "ng": 0, "loss_pct": 0.0}))
         assert d["summary"]["loss_basis"] == "wireless_observed"
-        assert d["component_scores"]["loss"] == 18
+        assert d["component_scores"]["loss"] == 20
 
     def test_failed_gt_falls_back(self):
         d = _structured_diagnosis(self._structured(
@@ -1226,3 +1227,35 @@ class TestLossJudgedByWiredGroundTruth:
         loss_issues = [i for i in d["issues"] if i.get("category") == "Ping"]
         # 유선 확정 0.38%는 임계(5%) 미만이라 이슈가 뜨면 안 된다.
         assert not [i for i in loss_issues if "Loss" in i.get("msg", "")], loss_issues
+
+    def test_partial_extraction_is_not_promoted(self):
+        """잘린/손상 유선 pcap은 `error` 없이 **과소 계상된** 손실률을 준다.
+
+        tshark가 일부 행만 내고 비정상 종료하면 못 읽은 요청은 애초에 모집단에
+        없어 손실률이 낮게 나온다. 그걸 1차 판정으로 승격하면 건강도가 부풀고
+        진짜 손실 이슈가 눌린다 — 관측 한계를 사실로 오인하는, 이 변경이 막으려는
+        바로 그 실패를 반대 방향으로 반복하는 셈이다.
+        """
+        d = _structured_diagnosis(self._structured(gt={
+            "total": 500, "ok": 499, "ng": 1, "loss_pct": 0.2,
+            "extraction_partial": True,
+            "warnings": ["tshark 가 exit 2 로 끝났다 — 결과가 일부일 수 있다"],
+        }))
+        assert d["summary"]["loss_basis"] == "wireless_observed"
+        assert d["component_scores"]["loss"] == 20
+
+    def test_legacy_gt_without_flag_is_still_used(self):
+        """구버전 GT에는 extraction_partial 키가 없다 — 소급 판정할 수 없으므로
+        없는 정보를 이유로 기존 동작을 바꾸지 않는다."""
+        d = _structured_diagnosis(self._structured(
+            gt={"total": 1000, "ok": 996, "ng": 4, "loss_pct": 0.4}))
+        assert d["summary"]["loss_basis"] == "wired_gt"
+
+    def test_wired_zero_loss_is_a_real_verdict(self):
+        """유선 확정 0%는 유효한 판정이다 — 무선이 손실을 봐도 유선이 무결하면 만점."""
+        d = _structured_diagnosis(self._structured(
+            wireless_loss=8.0,
+            gt={"total": 20000, "ok": 20000, "ng": 0, "loss_pct": 0.0}))
+        assert d["summary"]["loss_basis"] == "wired_gt"
+        assert d["summary"]["loss_pct_used"] == 0.0
+        assert d["component_scores"]["loss"] == 100

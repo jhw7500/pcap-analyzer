@@ -424,6 +424,17 @@ def build_ground_truth(
     except (ValueError, TimeoutError) as exc:
         return {"error": str(exc), "warnings": warnings}
 
+    # **추출 무결성 플래그.** 이 시점의 warnings는 `extract_icmp_frames`의
+    # warnings_out 계약상 **부분 실패**(tshark가 일부 행만 내고 비정상 종료)에서만
+    # 온다 — 이후 단계의 경고가 섞이기 전에 확정한다.
+    #
+    # 부분 실패면 손실률이 **실제보다 낮게** 나온다(못 읽은 요청은 애초에 모집단에
+    # 없다). 그 값을 1차 판정으로 승격하면 건강도가 부풀고 진짜 손실 이슈가 눌린다
+    # — 소비자(`structured._loss_for_judgment`)가 이 플래그로 걸러낸다.
+    # `error`가 아니라 플래그인 이유: 화면의 GT 카드는 부분 결과라도 보여줄 값이
+    # 있고, "판정에 못 쓴다"와 "아예 없다"는 다르다.
+    extraction_partial = bool(warnings)
+
     # ip_filter(사용자)와 derived_ip_filter(mac_filter 유도값)는 독립적인 필터로
     # 순차 AND 적용된다 — 위 build_ground_truth docstring·_cohort_requests
     # docstring 근거 참조.
@@ -563,6 +574,9 @@ def build_ground_truth(
         "streaks": streaks,
         "ng_epochs": [x.time for x in ng][:MAX_NG_EPOCHS],
         "trailing_dropped": dropped,
+        # True면 tshark 부분 실패로 모집단이 불완전하다 — 손실률이 과소 계상이라
+        # 판정 근거로 쓰면 안 된다(표시는 가능).
+        "extraction_partial": extraction_partial,
         "warnings": warnings,
     }
     # 유선 RTT 1차 노출(스펙 2026-08-05-wired-rtt-primary §1): exchanges는
