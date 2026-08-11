@@ -1241,6 +1241,28 @@ ROAM_COVERAGE_MIN_PAIRS = 3     # 대조 표본이 이 미만이면 커버리지
 ROAM_COVERAGE_LOW_PCT = 50.0
 
 
+def coverage_is_reportable(matched, visible_pct) -> bool:
+    """커버리지를 **문장으로 단정해도 되는가** — 진단·리포트·화면의 단일 규칙.
+
+    표본이 `ROAM_COVERAGE_MIN_PAIRS` 미만이면 "pcap이 보는 건 전체의 X%"라고
+    말하지 않는다. 대조 1~2건으로 낸 비율은 중앙값이라 부르기도 민망하다.
+
+    이 술어가 필요한 이유는 실제로 당했기 때문이다(PR #31 Codex P2): 진단 이슈는
+    임계를 걸었는데 리포트(`> 0`)와 화면(`> 0`)이 각자 판단해, **같은 데이터에서
+    진단은 "주장 안 함"인데 리포트는 "26%"라고 단정**했다. 규칙을 세 곳에 복제하면
+    이렇게 갈라진다 — 이 저장소가 반복해서 당한 실패 모드다.
+
+    화면은 파이썬을 부를 수 없으므로 결과를 `summary.roaming_coverage_reportable`로
+    실어 보낸다(구버전 result엔 그 키가 없어 화면이 자체 폴백을 탄다).
+    """
+    return (
+        isinstance(matched, int) and not isinstance(matched, bool)
+        and matched >= ROAM_COVERAGE_MIN_PAIRS
+        and isinstance(visible_pct, (int, float))
+        and not isinstance(visible_pct, bool)
+    )
+
+
 def _median_ms(values) -> Optional[float]:
     """수치 중앙값(소수 1자리). 빈 입력이면 None — 0으로 뭉개지 않는다.
 
@@ -1818,11 +1840,8 @@ def _structured_diagnosis(
     # 겹쳐 인과 confidence를 부풀린다. signal_type 없는 issue는 `_collect_signals`가
     # 그냥 지나치며(`:158`, `:178`), STA issue 승격 경로도 이미 안 붙인다.
     cov_matched, cov_sta_p50, cov_pcap_p50, cov_visible_pct = _roam_coverage(roam_seqs)
-    if (
-        cov_matched >= ROAM_COVERAGE_MIN_PAIRS
-        and cov_visible_pct is not None
-        and cov_visible_pct < ROAM_COVERAGE_LOW_PCT
-    ):
+    cov_reportable = coverage_is_reportable(cov_matched, cov_visible_pct)
+    if cov_reportable and cov_visible_pct < ROAM_COVERAGE_LOW_PCT:
         matched_seqs = [
             s for s in roam_seqs
             if isinstance(s, dict) and isinstance(s.get("sta_log"), dict)
@@ -1946,6 +1965,9 @@ def _structured_diagnosis(
             "roaming_sta_total_ms_p50": cov_sta_p50,
             "roaming_pcap_total_ms_p50": cov_pcap_p50,
             "roaming_pcap_visible_pct": cov_visible_pct,
+            # 표본이 충분해 비율을 단정해도 되는가. 리포트·화면이 각자 판단하면
+            # 진단과 갈라지므로(PR #31 Codex P2) 판단 결과를 실어 보낸다.
+            "roaming_coverage_reportable": cov_reportable,
             "delay_zones": len(delay_zones),
             "anomaly_count": len(anom_events),
         },

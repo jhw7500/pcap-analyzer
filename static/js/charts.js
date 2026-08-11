@@ -549,6 +549,11 @@
             let p = covSum.roaming_pcap_total_ms_p50;
             let t = covSum.roaming_sta_total_ms_p50;
             let visiblePct = covSum.roaming_pcap_visible_pct;
+            /* 표본이 적으면 비율을 단정하지 않는다. 백엔드가 같은 술어
+               (structured.coverage_is_reportable)로 판단한 결과를 실어 보내므로
+               화면이 따로 세지 않는다 — 화면·리포트가 `> 0`으로 각자 판단해
+               진단("표본 부족, 주장 안 함")과 갈라진 것이 PR #31 Codex P2였다. */
+            let reportable = covSum.roaming_coverage_reportable;
             if (typeof pairedN !== 'number') {
                 const paired = seqs.filter(s => s.sta_log && typeof s.sta_log.total_ms === 'number'
                                                 && typeof s.total_roam_ms === 'number');
@@ -557,9 +562,12 @@
                 p = paired.length ? med(paired.map(s => s.total_roam_ms)) : null;
                 t = paired.length ? med(paired.map(s => s.sta_log.total_ms)) : null;
                 visiblePct = (t > 0) ? (p / t) * 100 : null;
+                /* 구버전 result엔 플래그가 없다. 백엔드 ROAM_COVERAGE_MIN_PAIRS(=3)와
+                   같은 값이며, 바꿀 일이 생기면 두 곳을 함께 고쳐야 한다. */
+                reportable = pairedN >= 3 && typeof visiblePct === 'number';
             }
             let note = '';
-            if (pairedN > 0 && typeof p === 'number' && typeof t === 'number') {
+            if (reportable && typeof p === 'number' && typeof t === 'number') {
                 /* 체감 로밍 중앙값이 0이면 비율이 Infinity/NaN으로 찍힌다. 로그 스탬프
                    정밀도가 ms라 극단적으로 짧은 로밍에서 0이 나올 수 있다 — 값을
                    지어내지 않고 '측정불가'로 둔다.

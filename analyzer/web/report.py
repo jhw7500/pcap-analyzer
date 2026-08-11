@@ -16,8 +16,13 @@ from typing import Any, Dict, List
 from ..core.models import SUBTYPE_NAMES
 # 바인딩 방법 라벨은 station_match가 단일 정의 — 리포트·AI 프롬프트가 같은 어휘를 쓴다.
 from ..core.station_match import MATCH_METHOD_LABELS
-# 손실 판정 근거 라벨은 structured가 단일 정의 — 리포트·화면이 같은 어휘를 쓴다.
-from .structured import LOSS_BASIS_LABELS, LOSS_BASIS_WIRED
+# 손실 판정 근거 라벨과 커버리지 표본 술어는 structured가 단일 정의 —
+# 리포트·화면·진단이 같은 어휘와 같은 규칙을 쓴다.
+from .structured import (
+    LOSS_BASIS_LABELS,
+    LOSS_BASIS_WIRED,
+    coverage_is_reportable,
+)
 
 #: STA 로그 표에 실을 호기 수 상한. 로밍 표(`seqs[:20]`)와 같은 값 — 업로드가
 #: 호기 로그를 최대 60개 파일까지 받으므로 단말이 많으면 리포트가 통제 없이 길어진다.
@@ -716,9 +721,12 @@ def _station_log_section(
     visible = summary.get("roaming_pcap_visible_pct")
     pcap_p50 = summary.get("roaming_pcap_total_ms_p50")
     sta_p50 = summary.get("roaming_sta_total_ms_p50")
+    # 표본 임계는 진단과 **같은 술어**를 쓴다 — `> 0`으로 각자 판단하면 대조 1건에서
+    # 진단은 "주장 안 함"인데 리포트만 "26%"라고 단정한다(PR #31 Codex P2).
+    # 구버전 result에는 `roaming_coverage_reportable`이 없으므로 술어를 직접 호출한다.
     if (
-        isinstance(matched_n, int) and matched_n > 0
-        and _is_measure(visible) and _is_measure(pcap_p50) and _is_measure(sta_p50)
+        coverage_is_reportable(matched_n, visible)
+        and _is_measure(pcap_p50) and _is_measure(sta_p50)
     ):
         head = (
             f"같은 로밍 {_fmt_count(matched_n)}건 대조 — pcap 전파구간 **{pcap_p50}ms** vs "

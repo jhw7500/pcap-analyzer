@@ -435,6 +435,94 @@ class TestReviewRound1Fixes:
         assert "sta_log.total_ms" not in prompt
 
 
+class TestReviewRound2Fixes:
+    """PR #31 라운드 2 지적(Codex P2×2) 반영분."""
+
+    def _station(self, **kw):
+        base = {
+            "name": "1호기", "sta_ip": "192.168.0.21", "sta_name": "STA2",
+            "match_method": "ip", "attached": 281, "roam_total": 306,
+            "total_ms_p50": 96.5, "scan_ms_p50": 61.7, "residual_mad_ms": 20.7,
+            "warnings": [],
+        }
+        base.update(kw)
+        return base
+
+    def _cov_summary(self, matched, visible=25.9):
+        from analyzer.web.structured import coverage_is_reportable
+
+        return {"summary": {
+            "roaming_sta_log_matched": matched,
+            "roaming_sta_total_ms_p50": 97.0,
+            "roaming_pcap_total_ms_p50": 25.1,
+            "roaming_pcap_visible_pct": visible,
+            "roaming_coverage_reportable": coverage_is_reportable(matched, visible),
+        }}
+
+    def test_sample_threshold_is_one_rule_across_consumers(self):
+        """[Codex P2] 진단·리포트·화면이 **같은 임계**를 써야 한다.
+
+        진단은 `>= ROAM_COVERAGE_MIN_PAIRS`인데 리포트·화면이 `> 0`이면, 대조 1건에서
+        진단은 "주장 안 함"인데 리포트만 "26%"라고 단정한다 — 같은 규칙을 세 곳에
+        복제해 갈라진 이 저장소의 대표적 실패 모드다.
+        """
+        from analyzer.web.report import _station_log_section
+
+        below = ROAM_COVERAGE_MIN_PAIRS - 1
+        out_below = "\n".join(_station_log_section(
+            {"station_logs": {"stations": [self._station()]}}, self._cov_summary(below)))
+        # 표는 나오되 비율 단정 문장은 없어야 한다.
+        assert "1호기" in out_below
+        assert "%" not in out_below.split("| 로그 |")[0] or "전체의" not in out_below
+        assert "전체의" not in out_below
+
+        out_at = "\n".join(_station_log_section(
+            {"station_logs": {"stations": [self._station()]}},
+            self._cov_summary(ROAM_COVERAGE_MIN_PAIRS)))
+        assert "전체의 **25.9%**" in out_at
+
+    def test_reportable_flag_matches_diagnosis_decision(self):
+        """화면이 읽는 플래그는 진단이 이슈를 낼 때 쓴 술어와 같은 값이어야 한다."""
+        from analyzer.web.structured import coverage_is_reportable
+
+        few = _diag([_seq(25.0, 97.0, fnum=100 + i * 10)
+                     for i in range(ROAM_COVERAGE_MIN_PAIRS - 1)])
+        enough = _diag([_seq(25.0, 97.0, fnum=100 + i * 10)
+                        for i in range(ROAM_COVERAGE_MIN_PAIRS)])
+        assert few["summary"]["roaming_coverage_reportable"] is False
+        assert enough["summary"]["roaming_coverage_reportable"] is True
+        # 이슈 발행 여부와 플래그가 같은 술어에서 나온다.
+        assert [i for i in few["issues"] if i.get("category") == "관측"] == []
+        assert len([i for i in enough["issues"] if i.get("category") == "관측"]) == 1
+        for d in (few, enough):
+            s = d["summary"]
+            assert s["roaming_coverage_reportable"] == coverage_is_reportable(
+                s["roaming_sta_log_matched"], s["roaming_pcap_visible_pct"])
+
+    def test_reportable_flag_is_false_when_unmeasurable(self):
+        """대조 0건이면 플래그도 False — 화면이 '측정불가'를 단정으로 바꾸지 않는다."""
+        d = _diag([_seq(25.0, None, fnum=100 + i * 10) for i in range(5)])
+        assert d["summary"]["roaming_coverage_reportable"] is False
+
+    def test_long_warning_is_truncated_with_disclosure(self):
+        """[Codex P2] 개수만 제한하면 IP를 전부 join하는 경고 한 건이 계약을 깬다.
+
+        `station_log.py`의 "kern.log에 STA IP가 여러 개다(...)"는 발견한 모든 distinct
+        IP를 넣고, 업로드는 호기 로그를 64MB까지 받는다.
+        """
+        from ai.prompts import PROMPT_MAX_WARNING_CHARS, _build_station_log_section
+
+        ips = ", ".join(f"192.168.{a}.{b}" for a in range(6) for b in range(60))
+        long_warn = f"kern.log에 STA IP가 여러 개다({ips}) — DHCP 재할당 가능성"
+        assert len(long_warn) > 2000            # 픽스처 전제 확인
+        out = "\n".join(_build_station_log_section({"stations": [
+            self._station(warnings=[long_warn]),
+        ]}))
+        assert len(out) < PROMPT_MAX_WARNING_CHARS + 500
+        # 잘랐다는 사실과 원래 길이를 숨기지 않는다.
+        assert f"총 {len(long_warn)}자, 생략" in out
+
+
 class TestPromptRendering:
     """AI 프롬프트 — 없는 데이터를 아는 척하지 않게 만드는 경고가 핵심."""
 

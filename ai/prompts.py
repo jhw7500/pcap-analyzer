@@ -20,6 +20,11 @@ from analyzer.core.thresholds import ROAM_GAP_DANGER_MS
 #: 이유이며, 생략분은 반드시 건수로 밝혀 LLM이 전건을 봤다고 오해하지 않게 한다.
 PROMPT_MAX_STATIONS = 8
 PROMPT_MAX_STATION_WARNINGS = 3
+#: warning **한 건**의 길이 상한. 개수만 제한해서는 계약을 지킬 수 없다 —
+#: `station_log.py`의 "kern.log에 STA IP가 여러 개다(...)" 경고는 발견한 **모든**
+#: distinct IP를 join하고, 업로드는 호기 로그를 64MB까지 받는다. 한 건이 수천
+#: 토큰까지 늘 수 있어 길이도 함께 자른다(잘랐다는 사실과 원래 길이를 밝힌다).
+PROMPT_MAX_WARNING_CHARS = 200
 
 
 def _fmt_int(v: Any, default: str = "-") -> str:
@@ -279,10 +284,14 @@ def _build_station_log_section(station_logs: dict) -> list:
                 if key == "scan_ms_p50":
                     any_scan = True
         lines.append(f"- {', '.join(parts)}")
-        # warnings도 station당 상한 — 파서 경고는 한 호기에서 수십 건 나올 수 있다.
-        warns = [w for w in (st.get("warnings") or [])]
+        # warnings는 건수와 **개별 길이**를 함께 제한한다 — 개수만 막으면 IP를 전부
+        # join하는 경고 한 건으로도 프롬프트가 수천 토큰 늘어난다.
+        warns = st.get("warnings") or []
         for w in warns[:PROMPT_MAX_STATION_WARNINGS]:
-            lines.append(f"  · 주의: {w}")
+            text = str(w)
+            if len(text) > PROMPT_MAX_WARNING_CHARS:
+                text = f"{text[:PROMPT_MAX_WARNING_CHARS]}…(총 {len(text)}자, 생략)"
+            lines.append(f"  · 주의: {text}")
         if len(warns) > PROMPT_MAX_STATION_WARNINGS:
             lines.append(
                 f"  · 주의 {len(warns) - PROMPT_MAX_STATION_WARNINGS}건 추가(생략)"
