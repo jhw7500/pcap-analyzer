@@ -10,8 +10,21 @@
 from typing import Any
 
 from analyzer.core.ping_matching import ping_losses, ping_pairs
+from analyzer.core.station_match import MATCH_METHOD_LABELS
 from analyzer.web.structured import LOSS_BASIS_WIRED
 from analyzer.core.thresholds import ROAM_GAP_DANGER_MS
+
+#: STA 로그 섹션 상한. 업로드는 호기 로그를 최대 60개 파일까지 받고
+#: (`routes/upload._MAX_STATION_LOG_FILES`), 이 프롬프트는 **4000토큰 계약**을
+#: 지켜야 한다(`ai/AGENTS.md`). 로밍 표가 `seqs[:20]`으로 상한을 두는 것과 같은
+#: 이유이며, 생략분은 반드시 건수로 밝혀 LLM이 전건을 봤다고 오해하지 않게 한다.
+PROMPT_MAX_STATIONS = 8
+PROMPT_MAX_STATION_WARNINGS = 3
+#: warning **한 건**의 길이 상한. 개수만 제한해서는 계약을 지킬 수 없다 —
+#: `station_log.py`의 "kern.log에 STA IP가 여러 개다(...)" 경고는 발견한 **모든**
+#: distinct IP를 join하고, 업로드는 호기 로그를 64MB까지 받는다. 한 건이 수천
+#: 토큰까지 늘 수 있어 길이도 함께 자른다(잘랐다는 사실과 원래 길이를 밝힌다).
+PROMPT_MAX_WARNING_CHARS = 200
 
 
 def _fmt_int(v: Any, default: str = "-") -> str:
@@ -158,6 +171,31 @@ def _build_roaming_section(roaming: dict) -> list:
             "  · gap_ms는 전체의 일부 구간일 뿐이다 — 로밍 빠르기 판단은 "
             "total_roam_ms로 할 것"
         )
+    # STA 로그 체감 — pcap이 원리적으로 못 보는 구간까지 포함한 실제 로밍 소요.
+    # 실측 776건 대조에서 pcap 25.1ms vs 체감 97.0ms로 74.1%가 전파 밖이었다.
+    # bool 배제는 `_roam_coverage`와 같은 규약 — True가 1ms로 통과하면 통계가
+    # 조용히 오염된다(표시 경로에도 같은 가드를 둔다).
+    sta_totals = [
+        s["sta_log"]["total_ms"] for s in seqs
+        if isinstance(s.get("sta_log"), dict)
+        and isinstance(s["sta_log"].get("total_ms"), (int, float))
+        and not isinstance(s["sta_log"]["total_ms"], bool)
+    ]
+    if sta_totals:
+        lines.append(
+            f"- sta_log.total_ms(ROAM 명령→CONNECTED = STA 체감, n={len(sta_totals)}): "
+            f"min={min(sta_totals):.1f} / avg={sum(sta_totals)/len(sta_totals):.1f} / "
+            f"max={max(sta_totals):.1f}"
+        )
+        lines.append(
+            "  · total_roam_ms는 전파에 나온 구간만이다 — 스캔·로밍 판단·드라이버 "
+            "처리·키 설치는 캡처에 없어 체감이 더 크다. 로그가 붙지 않은 로밍은 "
+            "'빨랐다'가 아니라 '모른다'로 다룰 것"
+        )
+        lines.append(
+            "  · 느린 로밍 판정은 여전히 total_roam_ms 기준이다 — 체감값으로 "
+            "판정 건수를 다시 세지 말 것"
+        )
     # 느린 로밍 top 5 상세 (gap 큰 순). 4-way/밴드 전환은 신규 키 — 있을 때만 표기.
     def _gap_sort_key(x):
         g = x.get("gap_ms")
@@ -181,6 +219,13 @@ def _build_roaming_section(roaming: dict) -> list:
         tot = s.get("total_roam_ms")
         if isinstance(tot, (int, float)):
             extra += f", 전체={tot:.1f}ms"
+        # STA 체감은 있을 때만 — 4-way/밴드 전환과 같은 조건부 표기 방식.
+        log = s.get("sta_log")
+        if (isinstance(log, dict) and isinstance(log.get("total_ms"), (int, float))
+                and not isinstance(log["total_ms"], bool)):
+            extra += f", STA체감={log['total_ms']:.1f}ms"
+            if log.get("reason"):
+                extra += f", 사유={log['reason']}"
         lines.append(f"  · t={ts} {sta} → {ap} [{atype}], gap={gap_str}{extra}")
     # STA별 로밍 횟수
     sta_counts: dict = {}
@@ -192,6 +237,75 @@ def _build_roaming_section(roaming: dict) -> list:
             f"{n}×{c}회" for n, c in sorted(sta_counts.items(), key=lambda kv: -kv[1])[:5]
         )
         lines.append(f"- STA별 로밍 횟수: {top_str}")
+    return lines
+
+
+def _build_station_log_section(station_logs: dict) -> list:
+    """STA(단말) 로그 요약 — 매칭 품질과 체감/스캔 분포.
+
+    로그를 올리지 않은 분석에는 `station_logs` 자체가 없으므로 빈 리스트를 반환해
+    프롬프트가 기존과 동일하게 유지된다(죽은 헤더로 토큰을 쓰지 않는다).
+
+    `warnings`와 정렬 잔차(MAD)를 함께 낸다 — 시계 정렬 품질을 모르면 LLM이
+    체감값을 확정 수치로 인용한다.
+    """
+    stations = (
+        station_logs.get("stations") if isinstance(station_logs, dict) else None
+    )
+    if not isinstance(stations, list) or not stations:
+        return []
+    stations = [st for st in stations if isinstance(st, dict)]
+    if not stations:
+        return []
+    lines = ["", "## STA 로그 (단말 관점)"]
+    shown = stations[:PROMPT_MAX_STATIONS]
+    any_scan = False
+    for st in shown:
+        # 매칭 성공/실패를 **먼저** 가른다. 실패인데 방법 라벨을 붙이면
+        # "매칭 실패(시각 상관)"처럼 하지도 않은 근거를 AI에게 주장하게 된다.
+        sta_name = st.get("sta_name")
+        if sta_name:
+            method = MATCH_METHOD_LABELS.get(st.get("match_method"))
+            who = f"{sta_name}({method})" if method else f"{sta_name}"
+        else:
+            who = "매칭 실패 — 어느 STA에도 붙지 않음(이 호기 값은 근거로 쓸 수 없다)"
+        parts = [
+            f"{st.get('name', '?')} → {who}",
+            f"부착 {st.get('attached', 0)}/{st.get('roam_total', 0)}",
+        ]
+        for key, label in (
+            ("total_ms_p50", "체감 p50"),
+            ("scan_ms_p50", "스캔 p50"),
+            ("residual_mad_ms", "정렬 MAD"),
+        ):
+            v = st.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                parts.append(f"{label}={v}ms")
+                if key == "scan_ms_p50":
+                    any_scan = True
+        lines.append(f"- {', '.join(parts)}")
+        # warnings는 건수와 **개별 길이**를 함께 제한한다 — 개수만 막으면 IP를 전부
+        # join하는 경고 한 건으로도 프롬프트가 수천 토큰 늘어난다.
+        warns = st.get("warnings") or []
+        for w in warns[:PROMPT_MAX_STATION_WARNINGS]:
+            text = str(w)
+            if len(text) > PROMPT_MAX_WARNING_CHARS:
+                text = f"{text[:PROMPT_MAX_WARNING_CHARS]}…(총 {len(text)}자, 생략)"
+            lines.append(f"  · 주의: {text}")
+        if len(warns) > PROMPT_MAX_STATION_WARNINGS:
+            lines.append(
+                f"  · 주의 {len(warns) - PROMPT_MAX_STATION_WARNINGS}건 추가(생략)"
+            )
+    if len(stations) > PROMPT_MAX_STATIONS:
+        # 생략을 숨기지 않는다 — 조용히 자르면 LLM이 전건을 봤다고 오해한다.
+        lines.append(
+            f"- (총 {len(stations)}개 호기 중 앞 {PROMPT_MAX_STATIONS}개만 표시)"
+        )
+    if any_scan:
+        lines.append(
+            "  · 스캔은 ROAM 명령보다 약 1초 앞서 끝나는 별개 이벤트라 로밍 소요에 "
+            "합산하지 않는다. 스캔 소요는 커널 monotonic 기준이라 호기 간 비교 금지"
+        )
     return lines
 
 
@@ -527,6 +641,7 @@ def build_review_prompt(structured: dict) -> str:
             _build_device_section({"🌐 전체 시스템": system_stats}, header=None)
         )
     out.extend(_build_roaming_section(roaming))
+    out.extend(_build_station_log_section(structured.get("station_logs")))
     out.extend(_build_ping_section(ping))
     out.extend(_build_signal_section(signal, cliffs))
     out.extend(_build_delay_anomaly_section(delays, anomalies))

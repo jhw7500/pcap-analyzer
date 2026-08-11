@@ -539,23 +539,53 @@
                     <td class="py-1 text-right text-gray-500">${st.residual_mad_ms ?? '-'}</td>
                 </tr>`;
             }).join('');
-            // pcap이 못 보는 비중 — 같은 로밍끼리 대조한 중앙값 기준.
-            const paired = seqs.filter(s => s.sta_log && typeof s.sta_log.total_ms === 'number'
-                                            && typeof s.total_roam_ms === 'number');
-            let note = '';
-            if (paired.length) {
+            /* pcap이 못 보는 비중 — 같은 로밍끼리 대조한 중앙값 기준.
+               같은 비율을 화면과 백엔드가 따로 계산하면 중앙값 정의 차이(짝수일 때
+               평균 vs 상위값)로 두 수치가 갈린다. 신규 결과는 진단 summary가 실어
+               보내는 값을 그대로 쓰고, 그 키가 없는 구버전 result에서만 아래
+               폴백으로 계산한다 — 리포트·AI와 같은 숫자를 말하게 하는 지점이다. */
+            const covSum = (DATA.diagnosis && DATA.diagnosis.summary) || {};
+            let pairedN = covSum.roaming_sta_log_matched;
+            let p = covSum.roaming_pcap_total_ms_p50;
+            let t = covSum.roaming_sta_total_ms_p50;
+            let visiblePct = covSum.roaming_pcap_visible_pct;
+            /* 표본이 적으면 비율을 단정하지 않는다. 백엔드가 같은 술어
+               (structured.coverage_is_reportable)로 판단한 결과를 실어 보내므로
+               화면이 따로 세지 않는다 — 화면·리포트가 `> 0`으로 각자 판단해
+               진단("표본 부족, 주장 안 함")과 갈라진 것이 PR #31 Codex P2였다. */
+            let reportable = covSum.roaming_coverage_reportable;
+            if (typeof pairedN !== 'number') {
+                const paired = seqs.filter(s => s.sta_log && typeof s.sta_log.total_ms === 'number'
+                                                && typeof s.total_roam_ms === 'number');
                 const med = arr => { const v = arr.slice().sort((a, b) => a - b); return v[Math.floor(v.length / 2)]; };
-                const p = med(paired.map(s => s.total_roam_ms));
-                const t = med(paired.map(s => s.sta_log.total_ms));
+                pairedN = paired.length;
+                p = paired.length ? med(paired.map(s => s.total_roam_ms)) : null;
+                t = paired.length ? med(paired.map(s => s.sta_log.total_ms)) : null;
+                visiblePct = (t > 0) ? (p / t) * 100 : null;
+                /* 구버전 result엔 플래그가 없다. 백엔드 ROAM_COVERAGE_MIN_PAIRS(=3)와
+                   같은 값이며, 바꿀 일이 생기면 두 곳을 함께 고쳐야 한다. */
+                reportable = pairedN >= 3 && typeof visiblePct === 'number';
+            }
+            let note = '';
+            if (reportable && typeof p === 'number' && typeof t === 'number') {
                 /* 체감 로밍 중앙값이 0이면 비율이 Infinity/NaN으로 찍힌다. 로그 스탬프
                    정밀도가 ms라 극단적으로 짧은 로밍에서 0이 나올 수 있다 — 값을
-                   지어내지 않고 '측정불가'로 둔다. */
-                const outsidePct = t > 0 ? ((1 - p / t) * 100).toFixed(1) + '%' : '측정불가';
-                note = `<p class="mt-2 text-gray-400">같은 로밍 ${paired.length.toLocaleString()}건 대조 —
+                   지어내지 않고 '측정불가'로 둔다.
+                   체감은 pcap 구간의 상위집합이라 정상이면 100%를 넘을 수 없다. 넘으면
+                   (다른 시계로 잰 두 값이라 정렬이 틀어진 경우) 여기서 '전파 밖'이
+                   음수로 찍힌다 — 캡핑해 숨기지 않고 정렬 이상으로 알린다. */
+                const tail = (typeof visiblePct === 'number' && visiblePct > 100)
+                    ? `계산상 <span class="text-yellow-400">${visiblePct.toFixed(1)}%</span>로 100%를 초과했다 —
+                       체감이 pcap 구간을 포함하므로 정상이면 나올 수 없는 값이다.
+                       위 표의 <span class="text-gray-200">정렬 MAD</span>를 먼저 확인할 것
+                       (이 상태의 비율은 근거로 쓸 수 없다).`
+                    : `<span class="text-gray-200">${typeof visiblePct === 'number'
+                          ? (100 - visiblePct).toFixed(1) + '%' : '측정불가'}</span>가 전파에 나타나지 않는 구간
+                       (스캔·로밍 판단·드라이버 처리·키 설치).`;
+                note = `<p class="mt-2 text-gray-400">같은 로밍 ${pairedN.toLocaleString()}건 대조 —
                     pcap 전파구간 <span class="text-gray-200">${p.toFixed(1)}ms</span> vs
                     STA 체감 <span class="text-sky-300">${t.toFixed(1)}ms</span>.
-                    <span class="text-gray-200">${outsidePct}</span>가 전파에 나타나지 않는 구간
-                    (스캔·로밍 판단·드라이버 처리·키 설치).</p>
+                    ${tail}</p>
                     <p class="text-gray-500 mt-1">스캔은 ROAM 명령보다 약 1초 앞서 끝나는 별개 이벤트라 로밍 소요에 합산하지 않는다.
                     개별 로밍의 세부 구간은 로그 스탬프 정밀도(±20ms대)를 넘어서므로 분포로만 표기한다.</p>`;
             }

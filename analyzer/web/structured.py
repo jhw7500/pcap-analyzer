@@ -6,6 +6,7 @@ pipeline.run_analysis가 오케스트레이션 중 호출한다. 각 함수는 f
 
 import math
 from collections import Counter, defaultdict
+from statistics import median
 from typing import Any, Dict, List, Optional
 
 from ..core.channels import ap_channel_map, freq_to_band, freq_to_channel, parse_freq
@@ -1225,6 +1226,100 @@ def _loss_for_judgment(ping, wireless_loss_pct, ping_available):
     return None, None
 
 
+#: 로밍 관측 커버리지 — pcap이 본 구간이 STA 체감 로밍의 몇 %인가.
+#: 실측(2시간 캡처, 776건 대조)은 pcap 25.1ms vs STA 체감 97.0ms로 **25.9%**다.
+#: 나머지 74.1%(스캔·로밍 판단·드라이버 처리·키 설치)는 전파에 나타나지 않아
+#: 모니터 캡처로는 원리적으로 볼 수 없다.
+#:
+#: 이건 **판정 임계가 아니라 해석 경고의 임계**다. 커버리지가 낮다는 건 네트워크가
+#: 나쁘다는 뜻이 아니라 "캡처만으로는 로밍 체감을 말할 수 없다"는 뜻이다 —
+#: 그래서 severity가 아니라 category로 구분하고 건강도에는 넣지 않는다.
+ROAM_COVERAGE_MIN_PAIRS = 3     # 대조 표본이 이 미만이면 커버리지를 주장하지 않는다
+#: 경고 조건은 `< ROAM_COVERAGE_LOW_PCT` — **경계값 50.0%는 경고를 내지 않는다**
+#: (`test_threshold_boundary_is_not_low`가 고정). thresholds.py의 "경계값은 낮은
+#: 단계에 포함" 규약과 같은 방향이다.
+ROAM_COVERAGE_LOW_PCT = 50.0
+
+
+def coverage_is_reportable(matched, visible_pct) -> bool:
+    """커버리지를 **문장으로 단정해도 되는가** — 진단·리포트·화면의 단일 규칙.
+
+    표본이 `ROAM_COVERAGE_MIN_PAIRS` 미만이면 "pcap이 보는 건 전체의 X%"라고
+    말하지 않는다. 대조 1~2건으로 낸 비율은 중앙값이라 부르기도 민망하다.
+
+    이 술어가 필요한 이유는 실제로 당했기 때문이다(PR #31 Codex P2): 진단 이슈는
+    임계를 걸었는데 리포트(`> 0`)와 화면(`> 0`)이 각자 판단해, **같은 데이터에서
+    진단은 "주장 안 함"인데 리포트는 "26%"라고 단정**했다. 규칙을 세 곳에 복제하면
+    이렇게 갈라진다 — 이 저장소가 반복해서 당한 실패 모드다.
+
+    화면은 파이썬을 부를 수 없으므로 결과를 `summary.roaming_coverage_reportable`로
+    실어 보낸다(구버전 result엔 그 키가 없어 화면이 자체 폴백을 탄다).
+    """
+    return (
+        isinstance(matched, int) and not isinstance(matched, bool)
+        and matched >= ROAM_COVERAGE_MIN_PAIRS
+        and isinstance(visible_pct, (int, float))
+        and not isinstance(visible_pct, bool)
+    )
+
+
+def _median_ms(values) -> Optional[float]:
+    """수치 중앙값(소수 1자리). 빈 입력이면 None — 0으로 뭉개지 않는다.
+
+    `pipeline._p50`과 같은 정의(표준 중앙값, 짝수면 두 중앙값의 평균)를 쓴다.
+    같은 화면에 나란히 놓이는 `station_logs.total_ms_p50`이 그 함수 산출이라,
+    정의가 갈라지면 두 수치가 미묘하게 어긋난다. pipeline은 web.structured를
+    import하므로 역방향 재사용은 순환이라 표준 라이브러리로 정의를 맞춘다.
+
+    타입 필터는 **방어적 가드**다 — 현재 유일한 호출부(`_roam_coverage`)가 이미
+    float만 담아 넘기므로 실행되지 않는다. 다른 호출부가 생겼을 때 `median`이
+    문자열에 TypeError를 내거나 bool을 1ms로 세는 것을 막으려 남겨 둔다.
+    """
+    vals = [
+        float(v) for v in values
+        if isinstance(v, (int, float)) and not isinstance(v, bool)
+    ]
+    return round(median(vals), 1) if vals else None
+
+
+def _roam_coverage(roam_seqs):
+    """pcap이 본 로밍 구간의 비중 — `(matched, sta_p50, pcap_p50, visible_pct)`.
+
+    분모는 **STA 체감(`sta_log.total_ms`)과 pcap 전체 소요(`total_roam_ms`)를 둘 다
+    가진 시퀀스**다. 한쪽만 있는 건 대조가 성립하지 않으므로 세지 않는다 — 로그가
+    안 붙은 로밍을 분모에 넣으면 "pcap이 더 많이 본다"는 반대 방향 왜곡이 된다.
+
+    비율은 **두 중앙값의 비**다(시퀀스별 비율의 중앙값이 아니다). 화면
+    `charts.js`의 STA 로그 카드가 쓰는 정의와 같아야 같은 수치를 말한다.
+
+    대조 가능한 시퀀스가 없으면 `(0, None, None, None)` — 0%가 아니다. 0%는
+    "전부 못 봤다"는 주장이고, 여기서 참인 건 "모른다"뿐이다.
+    """
+    pairs = []
+    for s in roam_seqs or []:
+        if not isinstance(s, dict):
+            continue
+        log = s.get("sta_log")
+        if not isinstance(log, dict):
+            continue
+        sta_total, pcap_total = log.get("total_ms"), s.get("total_roam_ms")
+        # bool은 int의 서브클래스라 True가 1ms로 통과한다(GT 판정과 같은 가드).
+        if (
+            isinstance(sta_total, (int, float)) and not isinstance(sta_total, bool)
+            and isinstance(pcap_total, (int, float))
+            and not isinstance(pcap_total, bool)
+        ):
+            pairs.append((float(sta_total), float(pcap_total)))
+    if not pairs:
+        return 0, None, None, None
+    sta_p50 = _median_ms([p[0] for p in pairs])
+    pcap_p50 = _median_ms([p[1] for p in pairs])
+    # 체감 중앙값이 0이면 비율이 무한대가 된다. 로그 스탬프가 ms 단위라 극단적으로
+    # 짧은 로밍에서 0이 나올 수 있다 — 지어내지 않고 측정 불가로 둔다.
+    visible = round(pcap_p50 / sta_p50 * 100, 1) if sta_p50 else None
+    return len(pairs), sta_p50, pcap_p50, visible
+
+
 def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None, signal_stas=None,
                                    index=None, ap_macs=None):
     """유선 확정 손실 streak별 무선 대조 이슈 후보. 근거 프레임이 없으면 후보 제외.
@@ -1495,6 +1590,10 @@ def _structured_diagnosis(
             s_roam = None
         else:
             s_roam = max(0, 100 - len(sta_slow_roams) / len(sta_measurable) * 200)
+        # STA 로그 대조는 **점수에 넣지 않는다** — 관측 커버리지는 네트워크 품질이
+        # 아니라 캡처의 성질이라, 점수화하면 "로그를 안 올리면 건강해 보이는"
+        # 역전이 생긴다. 노출만 하고 가중치에서는 뺀다.
+        sta_log_matched, sta_log_p50, _, _ = _roam_coverage(sta_roams)
         _sta_weights = [(s_retry, 0.35), (s_rssi, 0.35), (s_roam, 0.3)]
         _sta_avail = [(v, w) for v, w in _sta_weights if v is not None]
         s_overall = round(
@@ -1648,6 +1747,11 @@ def _structured_diagnosis(
                     "slow_roaming": len(sta_slow_roams),
                     # 느림 판정이 선 로밍 수 — slow_roaming의 실제 분모.
                     "roaming_measurable": len(sta_measurable),
+                    # STA 로그와 대조된 로밍 수와 그 체감 중앙값. 대조 분모를 함께
+                    # 내지 않으면 체감값이 전건 기준으로 읽힌다(로그는 일부만 붙는다).
+                    # 로그가 없으면 0/None — 판정에는 쓰이지 않는다.
+                    "sta_log_matched": sta_log_matched,
+                    "sta_log_total_ms_p50": sta_log_p50,
                     "total_frames": ds.get("total_frames", 0),
                 },
                 "issues": issues,
@@ -1725,6 +1829,38 @@ def _structured_diagnosis(
                 "action": "802.11r Fast BSS Transition 활성화",
             },
             refs, window, signal_type="slow_roaming",
+        )
+    # 로밍 관측 커버리지 — pcap이 로밍의 일부만 본다는 **해석 경고**.
+    # 네트워크 문제가 아니라 측정 한계라 category를 "관측"으로 분리하고 severity도
+    # high로 올리지 않는다. 건강도에도 넣지 않는다(판정 축 불변).
+    #
+    # `signal_type`을 주지 않는 것이 의도적이다 — causality는 cluster 안 distinct
+    # signal_type 수로 confidence를 정하는데(`causality.py:282-285`), 커버리지는
+    # 특정 시각의 사건이 아니라 캡처 전체의 성질이라 time_window가 어떤 cluster와도
+    # 겹쳐 인과 confidence를 부풀린다. signal_type 없는 issue는 `_collect_signals`가
+    # 그냥 지나치며(`:158`, `:178`), STA issue 승격 경로도 이미 안 붙인다.
+    cov_matched, cov_sta_p50, cov_pcap_p50, cov_visible_pct = _roam_coverage(roam_seqs)
+    cov_reportable = coverage_is_reportable(cov_matched, cov_visible_pct)
+    if cov_reportable and cov_visible_pct < ROAM_COVERAGE_LOW_PCT:
+        matched_seqs = [
+            s for s in roam_seqs
+            if isinstance(s, dict) and isinstance(s.get("sta_log"), dict)
+        ]
+        refs, window = ev.roaming_evidence(matched_seqs)
+        _add_net_issue(
+            {
+                "severity": "medium",
+                "category": "관측",
+                "msg": (
+                    f"로밍 관측 커버리지 {cov_visible_pct}% — pcap {cov_pcap_p50}ms "
+                    f"vs STA 체감 {cov_sta_p50}ms (같은 로밍 {cov_matched}건 대조)"
+                ),
+                "action": (
+                    "느린 로밍 판정은 전파 구간 기준이다. 스캔·로밍 판단·드라이버 "
+                    "처리·키 설치는 캡처에 나타나지 않으므로 STA 로그와 함께 해석할 것"
+                ),
+            },
+            refs, window,
         )
     anom_events = anomalies.get("anomalies", [])
     for a in anom_events:
@@ -1822,6 +1958,16 @@ def _structured_diagnosis(
             # 이게 없으면 "총 N회 중 느린 M회"가 정상 비율처럼 읽힌다.
             "roaming_measurable": len(measurable_roams),
             "roaming_unmeasured": len(roam_seqs) - len(measurable_roams),
+            # STA 로그 대조 — pcap이 로밍의 몇 %를 보는가. **판정에는 쓰지 않는다**
+            # (임계의 운용 근거가 아직 없다). 두 중앙값을 함께 실어 비율의 유도를
+            # 검증할 수 있게 하고, 대조 0건이면 비율은 0%가 아니라 null이다.
+            "roaming_sta_log_matched": cov_matched,
+            "roaming_sta_total_ms_p50": cov_sta_p50,
+            "roaming_pcap_total_ms_p50": cov_pcap_p50,
+            "roaming_pcap_visible_pct": cov_visible_pct,
+            # 표본이 충분해 비율을 단정해도 되는가. 리포트·화면이 각자 판단하면
+            # 진단과 갈라지므로(PR #31 Codex P2) 판단 결과를 실어 보낸다.
+            "roaming_coverage_reportable": cov_reportable,
             "delay_zones": len(delay_zones),
             "anomaly_count": len(anom_events),
         },
