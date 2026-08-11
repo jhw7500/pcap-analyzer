@@ -233,7 +233,8 @@ class TestUploadRoute:
                 ("file", ("a.pcapng", PCAP_MAGIC, "application/octet-stream")),
                 ("file", ("b.pcapng", PCAP_MAGIC, "application/octet-stream")),
             ])
-        assert resp.status_code == 500
+        # 503 — 서버 버그(500)가 아니라 환경 의존성 부재다.
+        assert resp.status_code == 503
         assert resp.json()["code"] == "MERGECAP_MISSING"
 
     def test_too_many_split_parts_rejected(self, mock_run, _tshark, tmp_path, monkeypatch):
@@ -388,3 +389,14 @@ class TestRequestTotalBudget:
         assert resp.status_code == 413
         assert saved, "첫 조각은 저장됐어야 이 테스트가 의미를 갖는다"
         assert not [p for p in saved if Path(p).exists()], "거부 후 임시파일이 남았다"
+
+
+class TestUploadBudgetAccounting:
+    def test_rejected_chunk_is_not_charged(self):
+        """거부된 청크는 잔액에서 빠지면 안 된다 — 재시도가 생기면 정상 청크가
+        애먼 이유로 거부된다."""
+        b = upload_module._UploadBudget(limit=100)
+        assert b.add(60) and b.used == 60
+        assert not b.add(50)            # 110 > 100 → 거부
+        assert b.used == 60, "거부된 청크가 계상됐다"
+        assert b.add(40) and b.used == 100   # 남은 잔액은 그대로 쓸 수 있어야 한다

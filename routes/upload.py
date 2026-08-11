@@ -53,9 +53,15 @@ class _UploadBudget:
         self.limit = _MAX_REQUEST_TOTAL_BYTES if limit is None else limit
 
     def add(self, n: int) -> bool:
-        """n바이트를 더한다. 상한을 넘으면 False."""
+        """n바이트를 더한다. 상한을 넘으면 **더하지 않고** False.
+
+        거부된 청크를 계상하면 잔액이 실제보다 작아진다 — 지금은 거부 즉시 요청이
+        끝나 차이가 없지만, 재시도가 생기면 정상 청크가 애먼 이유로 거부된다.
+        """
+        if self.used + n > self.limit:
+            return False
         self.used += n
-        return self.used <= self.limit
+        return True
 
     @property
     def limit_gb(self) -> float:
@@ -321,8 +327,10 @@ async def _save_capture_group(files: List[UploadFile], budget=None):
     mergecap = config.detect_mergecap()
     if not mergecap:
         _cleanup_tmps(*tmps)
+        # 503: 서버 버그가 아니라 **환경 의존성 부재**다. 500으로 두면 모니터링이
+        # 애플리케이션 장애로 오탐하고, 같은 파일의 MERGE_FAILED(400)와도 어긋난다.
         return None, [], JSONResponse(
-            error_payload(ErrorCode.MERGECAP_MISSING), status_code=500)
+            error_payload(ErrorCode.MERGECAP_MISSING), status_code=503)
 
     merged = tempfile.NamedTemporaryFile(delete=False, suffix=".pcapng")
     merged.close()
