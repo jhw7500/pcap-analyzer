@@ -523,6 +523,92 @@ class TestReviewRound2Fixes:
         assert f"총 {len(long_warn)}자, 생략" in out
 
 
+class TestRoamSingleSource:
+    """PR-1.5 — 같은 규칙이 여러 곳에 복제돼 갈라지던 것들을 단일 소스로."""
+
+    def test_total_is_not_a_simple_sum(self):
+        """`roam_total_ms`는 gap + 4way의 단순 합이 아니라 핸드셰이크 종료 시각 기준."""
+        from analyzer.core.modules.roaming import roam_total_ms
+
+        total, note = roam_total_ms(1000.0, {"end_epoch": 1000.0176})
+        assert total == 17.6 and note == ""
+
+    def test_total_says_why_it_cannot_be_computed(self):
+        """값을 지어내지 않고 왜 없는지 남긴다 — 두 사유를 구분한다."""
+        from analyzer.core.modules.roaming import roam_total_ms
+
+        no_auth, note_a = roam_total_ms(None, {"end_epoch": 1000.0})
+        no_hs, note_b = roam_total_ms(1000.0, None)
+        assert no_auth is None and "Auth 프레임 미포착" in note_a
+        assert no_hs is None and "4-way" in note_b
+        assert roam_total_ms(1000.0, {})[0] is None
+
+    def test_text_and_screen_share_the_total_formula(self):
+        """텍스트 모듈과 화면이 같은 헬퍼를 쓰는지 소스로 고정.
+
+        이 저장소가 반복해서 당한 버그가 전부 "같은 식이 두 곳에 복제"였다.
+        """
+        import inspect
+
+        from analyzer.core.modules import roaming as roaming_mod
+        from analyzer.web import structured as structured_mod
+
+        text_src = inspect.getsource(roaming_mod.analyze)
+        screen_src = inspect.getsource(structured_mod._structured_roaming)
+        for src in (text_src, screen_src):
+            assert "roam_total_ms(" in src
+            # 계산식을 직접 다시 쓰면 안 된다.
+            assert "end_epoch" not in src.replace("roam_total_ms(", "")
+
+    def test_is_decided_matches_previous_behavior(self):
+        """술어 공용화가 기존 판정을 바꾸지 않는다(구버전 폴백 포함)."""
+        from analyzer.core.modules.roaming import is_decided
+
+        assert is_decided({"slow_basis": "total"}) is True
+        assert is_decided({"slow_basis": "gap_lower_bound"}) is True
+        # slow_basis 키가 있는데 None = 신버전 '판정 불가'
+        assert is_decided({"slow_basis": None, "gap_ms": 5.0}) is False
+        # 구버전 result엔 키 자체가 없다 → gap 유무로 폴백
+        assert is_decided({"gap_ms": 5.0}) is True
+        assert is_decided({"gap_ms": None}) is False
+        assert is_decided({}) is False
+
+    def test_is_decided_rejects_bool_gap(self):
+        """bool은 int의 서브클래스 — `gap_ms=True`는 측정값이 아니다."""
+        from analyzer.core.modules.roaming import is_decided
+
+        assert is_decided({"gap_ms": True}) is False
+
+    def test_both_score_paths_use_the_same_predicate(self):
+        """전체 건강도와 STA별 점수가 같은 모집단을 쓰는지 소스로 고정."""
+        import inspect
+
+        from analyzer.web import structured as structured_mod
+
+        src = inspect.getsource(structured_mod._structured_diagnosis)
+        assert src.count("is_decided(") >= 2
+        # 인라인 술어가 되살아나면 두 점수가 다른 분모를 쓰게 된다.
+        assert '"slow_basis" not in' not in src
+
+    def test_reason_is_clipped_with_disclosure(self):
+        """[Codex P2] 사유도 길이를 자른다 — warning만 잘라서는 계약을 못 지킨다."""
+        from ai.prompts import PROMPT_MAX_REASON_CHARS, _build_roaming_section
+
+        long_reason = "RSSI diff: " + "9" * 5000
+        seqs = [dict(_seq(25.0, 97.0), is_slow=True) for _ in range(2)]
+        for s in seqs:
+            s["sta_log"]["reason"] = long_reason
+        out = "\n".join(_build_roaming_section({"sequences": seqs}))
+        assert f"총 {len(long_reason)}자, 생략" in out
+        assert len(out) < PROMPT_MAX_REASON_CHARS * 4 + 2000
+
+    def test_clip_leaves_normal_values_untouched(self):
+        """정상값은 손대지 않는다 — 과잉 수정 방지."""
+        from ai.prompts import PROMPT_MAX_REASON_CHARS, _clip
+
+        assert _clip("RSSI diff: 17dB", PROMPT_MAX_REASON_CHARS) == "RSSI diff: 17dB"
+
+
 class TestPromptRendering:
     """AI 프롬프트 — 없는 데이터를 아는 척하지 않게 만드는 경고가 핵심."""
 

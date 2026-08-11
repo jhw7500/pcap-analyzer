@@ -263,6 +263,9 @@ def attach_station_to_sequences(
     로그 로밍을 찾아 붙인다. `tolerance_sec` 밖이면 붙이지 않는다 — 억지로
     붙이면 다른 로밍의 값을 보고하게 된다.
 
+    매칭은 **1:1**이다 — 로그 에피소드 하나는 시퀀스 하나에만 붙는다. 잔차가 작은
+    쌍부터 확정하므로 결과는 `sequences`의 순서에 무관하다.
+
     붙는 필드(전부 신규, 기존 키는 건드리지 않는다):
         ``sta_log``: {
             "total_ms": ROAM 명령 → CONNECTED (STA 체감 로밍 전체),
@@ -295,8 +298,22 @@ def attach_station_to_sequences(
     decisions = sorted(station.decisions, key=lambda d: d.epoch)
     dec_t = [d.epoch + binding.offset_sec for d in decisions]
 
-    attached = 0
-    for seq in sequences:
+    # **1:1 매칭** — 후보를 모두 모아 잔차가 작은 쌍부터 확정하고, 쓴 로그 에피소드는
+    # 폐기한다. 소비하지 않으면 허용오차(200ms) 안에 pcap 시퀀스가 여러 개일 때 같은
+    # 에피소드가 **전부에 붙어** 표본이 부풀고 중앙값이 왜곡된다. 로밍 짝짓기에서
+    # "앵커를 소비 즉시 폐기"로 고친 것과 같은 규칙이며, 그때는 낡은 앵커 재사용이
+    # 32초짜리 허위 gap을 만들었다.
+    #
+    # 실측(2시간 캡처·부착 837건)에서는 재사용이 **0건**이었다 — 로밍 주기(~20초)가
+    # 허용오차보다 훨씬 커서 한 에피소드 주변 200ms에 시퀀스가 둘 이상 놓이지 않는다.
+    # 즉 이 방어는 아직 발동한 적이 없고 출력도 그대로다. 로밍이 촘촘하거나 시계
+    # 정렬이 나쁜 캡처에서 조용히 틀리는 것을 선제적으로 막는다.
+    #
+    # 시퀀스 순서대로 greedy하면 앞 시퀀스가 더 먼 로그를 선점해 뒤 시퀀스가 굶는다 —
+    # 후보를 전역으로 정렬해 결과가 입력 순서에 무관하게 만든다(정렬 키에 인덱스를
+    # 넣어 동점도 결정적).
+    candidates = []      # (|잔차|, seq_idx, roam_idx, 잔차)
+    for si, seq in enumerate(sequences):
         if (seq.get("sta") or "").lower() != binding.sta_mac:
             continue
         t = seq.get("auth_epoch")
@@ -305,15 +322,23 @@ def attach_station_to_sequences(
         if not isinstance(t, (int, float)):
             continue
         i = bisect_left(roam_t_sorted, t)
-        best_i, best_r = None, None
         for j in (i - 1, i):
             if 0 <= j < len(roam_t_sorted):
                 r = t - roam_t_sorted[j]
-                if best_r is None or abs(r) < abs(best_r):
-                    best_i, best_r = order[j], r
-        if best_i is None or abs(best_r) > tolerance_sec:
+                if abs(r) <= tolerance_sec:
+                    candidates.append((abs(r), si, order[j], r))
+    candidates.sort()
+
+    attached = 0
+    used_seq: set = set()
+    used_roam: set = set()
+    for _, si, ri, best_r in candidates:
+        if si in used_seq or ri in used_roam:
             continue
-        ep = roams[best_i]
+        used_seq.add(si)
+        used_roam.add(ri)
+        seq = sequences[si]
+        ep = roams[ri]
         info: Dict[str, Any] = {
             "total_ms": round(ep.total_ms, 1),
             "assoc_ms": round(ep.assoc_procedure_ms, 1)

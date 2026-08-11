@@ -228,6 +228,64 @@ class TestAttachToSequences:
         assert attach_station_to_sequences(seqs, st, binds[0]) == 0
         assert "sta_log" not in seqs[0]
 
+    def test_one_log_episode_attaches_to_only_one_sequence(self, tmp_path):
+        """같은 로그 로밍이 여러 시퀀스에 재사용되면 안 된다 — **1:1 매칭**.
+
+        허용오차(200ms) 안에 pcap 시퀀스가 여러 개면 예전 코드는 로그 에피소드를
+        소비하지 않아 **전부에 같은 값을 붙였다**. 커버리지 표본 3건이 실제로는 로그
+        1건일 수 있고 체감 중앙값도 그만큼 왜곡된다. 로밍 짝짓기에서 "앵커를 소비
+        즉시 폐기"로 고친 것과 같은 규칙이다.
+
+        실측 2시간 캡처에서는 로밍 주기(~20초)가 허용오차보다 훨씬 커 재사용이 0건이라
+        이 경로가 밟히지 않는다 — 그래서 합성 픽스처로 조건을 직접 만들어 고정한다.
+        """
+        st = self._station(tmp_path)
+        roam_epoch = st.roams[0].cmd_epoch
+
+        class F:
+            def __init__(self, ta, ip_src):
+                self.ta, self.ip_src = ta, ip_src
+
+        frames = [F("00:50:43:18:fe:01", "192.168.0.21")] * 5
+        # 두 시퀀스가 같은 로그 로밍의 허용오차 안에 있다.
+        seqs = [
+            {"sta": "00:50:43:18:fe:01", "auth_epoch": roam_epoch + 0.05,
+             "assoc_epoch": roam_epoch + 0.06, "total_roam_ms": 25.0},
+            {"sta": "00:50:43:18:fe:01", "auth_epoch": roam_epoch + 0.15,
+             "assoc_epoch": roam_epoch + 0.16, "total_roam_ms": 27.0},
+        ]
+        binds = bind_stations([st], frames, {"00:50:43:18:fe:01": [roam_epoch + 0.05]})
+        n = attach_station_to_sequences(seqs, st, binds[0])
+        assert n == 1, "로그 에피소드 1건이므로 부착도 1건이어야 한다"
+        attached = [s for s in seqs if "sta_log" in s]
+        assert len(attached) == 1
+        # 잔차가 작은 쪽이 가져간다.
+        assert attached[0] is seqs[0]
+
+    def test_matching_is_independent_of_sequence_order(self, tmp_path):
+        """입력 순서를 바꿔도 같은 시퀀스가 매칭돼야 한다(전역 잔차 정렬)."""
+        st = self._station(tmp_path)
+        roam_epoch = st.roams[0].cmd_epoch
+
+        class F:
+            def __init__(self, ta, ip_src):
+                self.ta, self.ip_src = ta, ip_src
+
+        frames = [F("00:50:43:18:fe:01", "192.168.0.21")] * 5
+        near = {"sta": "00:50:43:18:fe:01", "auth_epoch": roam_epoch + 0.05,
+                "assoc_epoch": roam_epoch + 0.06, "tag": "near"}
+        far = {"sta": "00:50:43:18:fe:01", "auth_epoch": roam_epoch + 0.15,
+               "assoc_epoch": roam_epoch + 0.16, "tag": "far"}
+        binds = bind_stations([st], frames, {"00:50:43:18:fe:01": [roam_epoch + 0.05]})
+
+        forward = [dict(near), dict(far)]
+        reverse = [dict(far), dict(near)]
+        assert attach_station_to_sequences(forward, st, binds[0]) == 1
+        assert attach_station_to_sequences(reverse, st, binds[0]) == 1
+        won_f = [s["tag"] for s in forward if "sta_log" in s]
+        won_r = [s["tag"] for s in reverse if "sta_log" in s]
+        assert won_f == won_r == ["near"]
+
     def test_unmatched_station_reports_warning(self, tmp_path):
         st = self._station(tmp_path)
         binds = bind_stations([st], [], {})     # pcap 정보 없음

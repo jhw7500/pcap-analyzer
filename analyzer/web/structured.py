@@ -587,6 +587,7 @@ def _structured_roaming(
         MISSING_FRAME_LABELS,
         classify_slow,
         pair_roaming_sequences,
+        roam_total_ms,
     )
 
     sequences = []
@@ -610,18 +611,11 @@ def _structured_roaming(
         # 4-way를 한 번만 매칭해 duration과 종료 시각을 함께 쓴다.
         hs = match_four_way(frame.epoch, frame.ta, handshakes or [], ap=frame.ra)
         four_way_ms = hs.get("duration_ms") if hs else None
-        total_roam_ms = None
-        total_note = ""
-        hs_end = hs.get("end_epoch") if hs else None
-        if auth_frame is not None and isinstance(hs_end, (int, float)):
-            total_roam_ms = round((hs_end - auth_frame.epoch) * 1000, 1)
-        elif auth_frame is None:
-            total_note = "Auth 프레임 미포착 — 시작 시각을 몰라 전체 소요 계산 불가"
-        else:
-            total_note = (
-                "4-way 핸드셰이크가 캡처에 없어 완료 시점 불명 "
-                "(802.11r FT로 생략됐거나 모니터가 EAPOL을 놓침)"
-            )
+        # 전체 소요와 사유는 roaming.roam_total_ms(단일 소스) — 텍스트 리포트와
+        # 같은 식을 쓴다. 같은 계산이 두 곳에 있으면 한쪽만 고쳐져 갈라진다.
+        total_roam_ms, total_note = roam_total_ms(
+            auth_frame.epoch if auth_frame is not None else None, hs
+        )
         # 판정 규칙은 roaming.classify_slow(단일 소스) — 텍스트 리포트와 화면이
         # 다른 느린 로밍 건수를 말하면 안 된다(이 버그의 근원이 로직 복제였다).
         is_slow, slow_basis = classify_slow(total_roam_ms, gap_ms)
@@ -1475,6 +1469,9 @@ def _structured_diagnosis(
     issue는 근거를 댈 수 없으면 드롭한다(근거 없는 결론 금지).
     """
     from . import evidence as ev
+    # 판정 분모 술어는 roaming이 단일 정의 — 전체 점수와 STA별 점수가 같은 모집단을
+    # 쓴다. 함수 안 import는 _structured_roaming과 같은 순환 회피 패턴.
+    from ..core.modules.roaming import is_decided
 
     ov = structured.get("overview", {})
     ping = structured.get("ping", {})
@@ -1511,14 +1508,10 @@ def _structured_diagnosis(
     # 측정 불가면 만점이 나와 "캡처가 나쁠수록 건강해 보이는" 역전이 생긴다.
     # 측정된 시퀀스만 분모로 쓰고, 하나도 없으면 loss와 같이 None(측정 불가)으로
     # 두어 아래 가중치 재정규화에 태운다.
-    # "판정 가능"의 기준은 gap 유무가 아니라 **느린 로밍 판정이 섰는지**다
-    # (slow_basis). total이 있거나, total이 없어도 gap이 이미 임계를 넘어 확정된
-    # 경우가 판정 가능이다. 구버전 result에는 slow_basis가 없으므로 gap 유무로 폴백.
-    measurable_roams = [
-        seq for seq in roam_seqs
-        if seq.get("slow_basis") is not None
-        or ("slow_basis" not in seq and isinstance(seq.get("gap_ms"), (int, float)))
-    ]
+    # "판정 가능"의 기준은 gap 유무가 아니라 **느린 로밍 판정이 섰는지**다 —
+    # 술어는 roaming.is_decided(단일 소스)이며 STA별 점수도 같은 것을 쓴다
+    # (자세한 근거는 그 함수 docstring).
+    measurable_roams = [seq for seq in roam_seqs if is_decided(seq)]
     if not roam_seqs:
         roam_score = 100          # 로밍 자체가 없음 = 문제 없음
     elif not measurable_roams:
@@ -1577,13 +1570,10 @@ def _structured_diagnosis(
         s_rssi = 100
         if rssi_avg is not None:
             s_rssi = max(0, min(100, (rssi_avg + 90) * 2.5))
-        # 전체 점수와 같은 원칙 — 측정 불가는 분모에서 뺀다(계수 200이라 왜곡 폭이
-        # 전체 점수의 2배다). 전부 측정 불가면 로밍 컴포넌트를 빼고 재정규화한다.
-        sta_measurable = [
-            s for s in sta_roams
-            if s.get("slow_basis") is not None
-            or ("slow_basis" not in s and isinstance(s.get("gap_ms"), (int, float)))
-        ]
+        # 전체 점수와 **같은 술어**(roaming.is_decided)로 분모를 잡는다 — 측정 불가는
+        # 분모에서 뺀다(계수 200이라 왜곡 폭이 전체 점수의 2배다). 전부 측정 불가면
+        # 로밍 컴포넌트를 빼고 재정규화한다.
+        sta_measurable = [s for s in sta_roams if is_decided(s)]
         if not sta_roams:
             s_roam = 100
         elif not sta_measurable:
