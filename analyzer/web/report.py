@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from ..core.models import SUBTYPE_NAMES
+# 손실 판정 근거 라벨은 structured가 단일 정의 — 리포트·화면이 같은 어휘를 쓴다.
+from .structured import LOSS_BASIS_LABELS
 
 # 결합 신호 type → 한국어 라벨. JS SIGNAL_TYPE_LABEL과 의도적으로 동기화 —
 # 새 type 추가 시 charts.js의 같은 맵도 갱신.
@@ -439,7 +441,8 @@ def _health_section(diagnosis: Dict[str, Any]) -> List[str]:
         if used is None and basis is None:
             used = observed          # 구버전 result
         if used is not None:
-            label = {"wired_gt": "유선 확정", "wireless_observed": "무선 관측"}.get(basis, "")
+            # 키 출처: structured.LOSS_BASIS_WIRED / LOSS_BASIS_WIRELESS.
+            label = LOSS_BASIS_LABELS.get(basis, "")
             part = f"Ping Loss {used}%" + (f" ({label})" if label else "")
             if basis == "wired_gt" and isinstance(observed, (int, float)) and observed != used:
                 part += f" / 무선 관측 {observed}%"

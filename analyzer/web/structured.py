@@ -1214,7 +1214,13 @@ def _loss_for_judgment(ping, wireless_loss_pct, ping_available):
             and isinstance(gt_pct, (int, float)) and not isinstance(gt_pct, bool)
         ):
             return gt_pct, LOSS_BASIS_WIRED
-    if ping_available:
+    # 무선 폴백도 **값이 실제 수치일 때만** 근거를 주장한다.
+    # `ping_stats.get("loss_pct", 0)`은 키가 있고 값이 None이면 0이 아니라 None을
+    # 준다 — 이 저장소가 두 번 당한 함정이다(delay_analysis의 auth_epoch, prompts의
+    # 정렬 키). 그대로 두면 `loss_pct_used=None`인데 `loss_basis="wireless_observed"`
+    # 인 모순 상태가 리포트·AI로 흘러간다("무선으로 판정했는데 값은 없음").
+    if ping_available and isinstance(wireless_loss_pct, (int, float)) \
+            and not isinstance(wireless_loss_pct, bool):
         return wireless_loss_pct, LOSS_BASIS_WIRELESS
     return None, None
 

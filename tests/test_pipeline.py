@@ -1302,3 +1302,42 @@ class TestLossJudgedByWiredGroundTruth:
         assert d["summary"]["loss_basis"] == "wired_gt"
         assert d["summary"]["loss_pct_used"] == 0.0
         assert d["component_scores"]["loss"] == 100
+
+
+class TestLossBasisConsistency:
+    """`loss_pct_used`와 `loss_basis`는 **항상 함께** 유효하거나 함께 비어야 한다.
+
+    한쪽만 있으면 리포트·AI가 "무선으로 판정했는데 값은 없음" 같은 모순 상태를
+    읽는다. `ping_stats.get("loss_pct", 0)`은 키가 있고 값이 None이면 0이 아니라
+    None을 준다 — 이 저장소가 두 번 당한 함정이라 방어한다.
+    """
+
+    def _diag(self, stats):
+        return _structured_diagnosis({
+            "overview": {"total_frames": 1000, "retry_pct": 0},
+            "ping": {"stats": stats, "full_list": [{"status": "loss", "req_num": 1,
+                                                    "epoch": 100.0}]},
+            "roaming": {"sequences": []},
+            "signal": {"stas": {}},
+            "device_stats": {},
+            "delay_zones": {"delay_zones": []},
+            "anomaly_frames": {"anomalies": []},
+        })
+
+    def test_null_wireless_loss_does_not_claim_a_basis(self):
+        d = self._diag({"loss_pct": None, "req_total_raw": 100})
+        assert d["summary"]["loss_pct_used"] is None
+        assert d["summary"]["loss_basis"] is None, "값 없이 근거만 주장하면 안 된다"
+        assert d["component_scores"]["loss"] is None
+
+    def test_numeric_wireless_loss_claims_basis(self):
+        d = self._diag({"loss_pct": 3.0, "req_total_raw": 100})
+        assert d["summary"]["loss_pct_used"] == 3.0
+        assert d["summary"]["loss_basis"] == "wireless_observed"
+
+    def test_used_and_basis_are_paired_in_every_case(self):
+        """어떤 입력이든 둘 다 있거나 둘 다 없어야 한다."""
+        for stats in ({"loss_pct": None}, {"loss_pct": 0}, {"loss_pct": 12.5},
+                      {}, {"loss_pct": True}):
+            s = self._diag(stats)["summary"]
+            assert (s["loss_pct_used"] is None) == (s["loss_basis"] is None), stats

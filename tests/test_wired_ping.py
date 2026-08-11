@@ -897,3 +897,47 @@ def test_all_unanswered_omits_rtt_stats(tmp_path, monkeypatch):
     assert "rtt_stats" not in gt
     assert len(gt["exchanges"]) == 3
     assert all(e["rtt_ms"] is None for e in gt["exchanges"])
+
+
+class TestWarningsOutContract:
+    """`extraction_partial`이 의존하는 계약을 **동작으로** 고정한다.
+
+    `exping.extract_icmp_frames`의 `warnings_out`에는 **부분 실패 경고만** 담긴다.
+    정보성 경고를 거기 추가하면 멀쩡한 유선 GT가 `extraction_partial=True`로
+    표시돼 판정에서 조용히 빠진다 — 이 PR이 막으려는 문제(관측 한계를 사실로
+    오인)와 같은 종류의 오류를 반대 방향으로 만드는 셈이다.
+    """
+
+    def test_clean_extraction_is_not_partial(self, tmp_path):
+        gt = wired_ping.build_ground_truth(
+            "x.pcapng", tshark_path=_fake_tshark(tmp_path, _BODY_OK))
+        assert "error" not in gt
+        assert gt["extraction_partial"] is False
+        # 이후 단계의 경고(꼬리 배제 등)가 있어도 플래그는 영향받지 않는다.
+        assert gt["total"] == 3
+
+    def test_abnormal_exit_after_rows_is_partial(self, tmp_path):
+        """행을 일부 뱉고 비정상 종료 — 손실률이 과소 계상되므로 판정 불가."""
+        body = _BODY_OK + "exit 2\n"
+        gt = wired_ping.build_ground_truth(
+            "x.pcapng", tshark_path=_fake_tshark(tmp_path, body))
+        assert "error" not in gt, "프레임은 건졌으므로 error가 아니다"
+        assert gt["extraction_partial"] is True
+        assert any("exit 2" in w for w in gt["warnings"])
+
+    def test_partial_gt_is_rejected_for_judgment(self, tmp_path):
+        """플래그가 실제로 판정에서 걸러지는지 — 두 모듈의 계약이 이어지는지 확인."""
+        from analyzer.web.structured import _loss_for_judgment
+
+        gt = wired_ping.build_ground_truth(
+            "x.pcapng", tshark_path=_fake_tshark(tmp_path, _BODY_OK + "exit 2\n"))
+        used, basis = _loss_for_judgment({"ground_truth": gt}, 7.5, True)
+        assert basis == "wireless_observed" and used == 7.5
+
+    def test_clean_gt_is_used_for_judgment(self, tmp_path):
+        from analyzer.web.structured import _loss_for_judgment
+
+        gt = wired_ping.build_ground_truth(
+            "x.pcapng", tshark_path=_fake_tshark(tmp_path, _BODY_OK))
+        used, basis = _loss_for_judgment({"ground_truth": gt}, 7.5, True)
+        assert basis == "wired_gt" and used == gt["loss_pct"]
