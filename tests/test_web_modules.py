@@ -120,16 +120,47 @@ class TestSignalCliffs:
         assert len(cliffs) >= 1
         assert cliffs[0]["drop_db"] >= 10
 
-    def test_moving_average_generated(self):
+    def test_moving_average_no_longer_emitted(self):
+        # moving_avg는 소비자가 0건인데 RSSI 샘플당 dict를 만들어 대용량 캡처
+        # 결과 JSON을 크게 부풀렸다 — 제거됐다.
         timeline = [{"epoch": 1000 + i * 0.1, "rssi": -55 + (i % 3), "mcs": 7} for i in range(25)]
         result = analyze_signal_cliffs({"stas": {"STA1": {"rssi_timeline": timeline}}})
-        assert len(result["STA1"]["moving_avg"]) > 0
+        assert "moving_avg" not in result["STA1"]
 
     def test_few_points_skipped(self):
         timeline = [{"epoch": 1000 + i, "rssi": -50, "mcs": 7} for i in range(5)]
         result = analyze_signal_cliffs({"stas": {"STA1": {"rssi_timeline": timeline}}})
         assert result["STA1"]["cliffs"] == []
-        assert result["STA1"]["moving_avg"] == []
+        assert "moving_avg" not in result["STA1"]
+
+    def test_bucketed_timeline_keeps_cliff_sensitivity(self):
+        # 1초 버킷 집계 시계열(structured._bucket_rssi_timeline 스키마)에서
+        # 버킷 평균은 완만해도 버킷 내 최저(rssi_min)로 급락이 잡혀야 한다 —
+        # 평균끼리만 비교하면 이 절벽은 통째로 사라진다(과소 탐지).
+        timeline = [
+            {"epoch": 1000 + i, "rssi": -50.0, "rssi_min": -51, "rssi_max": -49, "n": 100}
+            for i in range(12)
+        ]
+        # 다음 초에 순간 -70까지 떨어졌지만 그 초의 평균은 -52에 불과하다.
+        timeline.append(
+            {"epoch": 1012, "rssi": -52.0, "rssi_min": -70, "rssi_max": -50, "n": 100}
+        )
+        result = analyze_signal_cliffs({"stas": {"STA1": {"rssi_timeline": timeline}}})
+        cliffs = result["STA1"]["cliffs"]
+        assert len(cliffs) >= 1
+        assert cliffs[0]["rssi_after"] == -70
+        assert cliffs[0]["drop_db"] >= 10
+
+    def test_legacy_raw_sample_timeline_still_supported(self):
+        # 구버전 결과(rssi_min/rssi_max 없는 프레임당 원샘플)도 분기 없이 그대로
+        # 판정된다 — serialized-result-backward-compat.
+        timeline = [{"epoch": 1000 + i * 0.1, "rssi": -50, "mcs": 7} for i in range(15)]
+        timeline += [{"epoch": 1001.5 + i * 0.1, "rssi": -70, "mcs": 3} for i in range(10)]
+        result = analyze_signal_cliffs({"stas": {"STA1": {"rssi_timeline": timeline}}})
+        cliffs = result["STA1"]["cliffs"]
+        assert len(cliffs) >= 1
+        assert cliffs[0]["rssi_before"] == -50
+        assert cliffs[0]["rssi_after"] == -70
 
 
 class TestMcsHotspotEvidence:
@@ -232,3 +263,67 @@ class TestNetworkLegacyEvidence:
         ]
         idx = FrameIndex(frames, dict(SAMPLE_ROLES))
         assert network_legacy_evidence(frames, idx) == ([], None)
+
+
+class TestIntraBucketCliff:
+    """1초 버킷 안에서 시작하고 끝난 급락도 잡아야 한다.
+
+    rssi_timeline이 1초 버킷 집계로 바뀌면서, 탐지 루프가 다음 버킷부터 비교하면
+    같은 버킷 안에서 일어난 하락(멀티패스 순간 변동)은 어느 쌍과도 비교되지 않아
+    통째로 사라진다 — 원샘플 시절에는 잡히던 하락이다. 버킷이 min/max를 함께
+    담고 있으므로 자기 버킷의 max↔min을 비교하면 복원된다.
+    """
+
+    def _flat(self, n=12, rssi=-50):
+        return [
+            {"epoch": 1000 + i, "rssi": rssi, "rssi_min": rssi, "rssi_max": rssi}
+            for i in range(n)
+        ]
+
+    def test_drop_inside_one_bucket_detected(self):
+        # 주변을 -58로 깔아 **버킷 간** 하락이 어느 쌍에서도 10dB에 못 미치게 한다
+        # (앞 버킷 max -58 → 급락 버킷 min -62 = 4dB, 급락 버킷 max -50 → 뒤 버킷
+        # min -58 = 8dB). 오직 자기 버킷의 max↔min(12dB)만 임계를 넘는다.
+        timeline = self._flat(rssi=-58)
+        timeline[5] = {"epoch": 1005, "rssi": -56, "rssi_min": -62, "rssi_max": -50}
+        cliffs = analyze_signal_cliffs(
+            {"stas": {"STA1": {"rssi_timeline": timeline}}})["STA1"]["cliffs"]
+        assert len(cliffs) == 1
+        c = cliffs[0]
+        assert c["epoch"] == 1005
+        assert c["drop_db"] == 12          # 버킷 최대 -50 → 최소 -62
+        assert c["duration_sec"] == 0.0    # 같은 버킷 = 1초 미만
+
+    def test_intra_bucket_inside_reported_cliff_is_not_double_counted(self):
+        """하강 도중의 버킷은 max-min이 크다 — 그대로 세면 절벽 하나를 반복해 센다."""
+        timeline = self._flat()
+        # 1005~1008에 걸쳐 -50 → -70으로 내려간다(각 버킷 안에서도 폭이 크다).
+        for k, (hi, lo) in enumerate([(-50, -58), (-58, -66), (-66, -70)], start=5):
+            timeline[k] = {"epoch": 1000 + k, "rssi": (hi + lo) // 2,
+                           "rssi_min": lo, "rssi_max": hi}
+        cliffs = analyze_signal_cliffs(
+            {"stas": {"STA1": {"rssi_timeline": timeline}}})["STA1"]["cliffs"]
+        spans = [(c["epoch"], c["duration_sec"]) for c in cliffs]
+        # 구간 안쪽 버킷이 중복으로 잡히면 같은 시각대에 항목이 겹쳐 쌓인다.
+        assert len(cliffs) == len({e for e, _ in spans}), spans
+
+    def test_stable_buckets_still_report_nothing(self):
+        cliffs = analyze_signal_cliffs(
+            {"stas": {"STA1": {"rssi_timeline": self._flat()}}})["STA1"]["cliffs"]
+        assert cliffs == []
+
+    def test_legacy_raw_samples_unaffected(self):
+        """구버전 result(원샘플)에는 min/max가 없어 판정이 달라지지 않아야 한다."""
+        raw = [{"epoch": 1000 + i * 0.1, "rssi": -50, "mcs": 7} for i in range(20)]
+        cliffs = analyze_signal_cliffs(
+            {"stas": {"STA1": {"rssi_timeline": raw}}})["STA1"]["cliffs"]
+        assert cliffs == []
+
+    def test_cross_bucket_drop_still_detected(self):
+        timeline = self._flat()
+        for i in range(6, 12):
+            timeline[i] = {"epoch": 1000 + i, "rssi": -66,
+                           "rssi_min": -66, "rssi_max": -66}
+        cliffs = analyze_signal_cliffs(
+            {"stas": {"STA1": {"rssi_timeline": timeline}}})["STA1"]["cliffs"]
+        assert cliffs and cliffs[0]["drop_db"] == 16

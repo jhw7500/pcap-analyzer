@@ -19,8 +19,12 @@
         <div id="drop-zone"
              class="border-2 border-dashed border-gray-600 rounded-lg p-8 text-center cursor-pointer hover:border-blue-500 transition-colors mb-4">
             <p class="text-gray-400 text-lg mb-2">pcap 파일을 드래그하거나 클릭하여 선택</p>
-            <p class="text-gray-500 text-sm">.pcap, .pcapng, .cap (최대 {{ max_upload_mb }}MB)</p>
-            <input type="file" id="pcap-file" name="file" accept=".pcap,.pcapng,.cap" class="hidden" data-max-mb="{{ max_upload_mb }}">
+            <p class="text-gray-500 text-sm">.pcap, .pcapng, .cap (조각당 최대 {{ max_upload_mb }}MB)</p>
+            <p class="text-gray-500 text-xs mt-1">
+                스니퍼 로테이션으로 쪼개진 캡처는 <span class="text-gray-400">조각을 한꺼번에 선택</span>하면
+                시간순으로 이어붙여 <span class="text-gray-400">하나의 캡처로</span> 분석합니다.
+            </p>
+            <input type="file" id="pcap-file" name="file" multiple accept=".pcap,.pcapng,.cap" class="hidden" data-max-mb="{{ max_upload_mb }}">
             <p id="file-name" class="text-blue-400 mt-2 hidden"></p>
         </div>
 
@@ -54,17 +58,48 @@
                 </div>
                 <div>
                     <label class="block text-sm text-gray-400 mb-1">유선 pcap (선택 — ping ground truth)</label>
-                    <input type="file" name="wired_file" id="wired-file" accept=".pcap,.pcapng,.cap"
+                    <input type="file" name="wired_file" id="wired-file" multiple accept=".pcap,.pcapng,.cap"
                            data-max-mb="{{ max_upload_mb }}"
                            class="w-full text-sm text-gray-300 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-gray-700 file:text-gray-300">
-                    <p class="text-gray-500 text-xs mt-1">포트 미러링 유선 캡처 — 확정 손실률(ground truth) 계산에 사용</p>
+                    <p class="text-gray-500 text-xs mt-1">포트 미러링 유선 캡처 — 확정 손실률(ground truth) 계산에 사용.
+                        분할된 경우 조각을 함께 선택하면 이어붙입니다.</p>
+                </div>
+                <div class="col-span-2">
+                    <label class="block text-sm text-gray-400 mb-1">STA 로그 (선택)</label>
+                    <div id="station-drop"
+                         class="border-2 border-dashed border-gray-600 rounded-lg px-3 py-4 text-center cursor-pointer hover:border-blue-500 transition-colors">
+                        <p class="text-gray-400 text-sm">
+                            호기들이 들어있는 <span class="text-blue-400">상위 폴더를 한 번만</span> 선택하면 전부 잡힙니다
+                        </p>
+                        <p class="text-gray-500 text-xs mt-1">
+                            (예: <span class="font-mono">TEST9</span>를 고르면 그 안의 1호기·2호기·3호기를 자동으로 인식 — pcap 등 나머지는 무시)
+                        </p>
+                        <p class="text-gray-500 text-xs mt-1">
+                            호기 폴더가 흩어져 있으면 <span class="text-blue-400">여러 폴더를 한꺼번에 드래그</span>하세요.
+                            하나씩 클릭 선택도 되지만, 파일 선택창이 직전에 고른 폴더 안에서 열려 매번 상위로 나와야 합니다.
+                        </p>
+                        <input type="file" name="station_log_files" id="station-logs" multiple webkitdirectory directory class="hidden">
+                    </div>
+                    <div class="flex items-center gap-2 mt-1">
+                        <button type="button" id="station-logs-clear"
+                                class="bg-gray-700 hover:bg-gray-600 rounded px-2 py-1 text-xs text-gray-300 hidden">선택 초기화</button>
+                    </div>
+                    <p class="text-gray-500 text-xs mt-1">
+                        스테이션의 <span class="text-gray-400">wpa.log · kern.log · logger.log</span>만 읽습니다(나머지는 무시).
+                        pcap은 전파에 나온 프레임만 보므로 로밍의 일부만 관측합니다 —
+                        실측 기준 <span class="text-gray-400">로밍 97ms 중 pcap이 보는 건 25ms</span>이고,
+                        스캔·로밍 판단·드라이버 처리는 이 로그에만 남습니다.
+                        호기 폴더를 통째로 선택하면 STA는 IP로 자동 매칭됩니다.
+                    </p>
+                    <p id="station-logs-summary" class="text-blue-400 text-xs mt-1 hidden"></p>
                 </div>
                 <div>
-                    <label class="block text-sm text-gray-400 mb-1">추가 무선 pcap (선택 — 최대 3개, 두 번째 스니퍼 등)</label>
+                    <label class="block text-sm text-gray-400 mb-1">추가 무선 스니퍼 (선택 — 최대 3대)</label>
                     <input type="file" name="wireless_files" id="wireless-files" multiple accept=".pcap,.pcapng,.cap"
                            data-max-mb="{{ max_upload_mb }}"
                            class="w-full text-sm text-gray-300 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-gray-700 file:text-gray-300">
-                    <p class="text-gray-500 text-xs mt-1">같은 채널을 다른 위치에서 캡처한 파일 — TSF 정렬 후 중복 제거 통합</p>
+                    <p class="text-gray-500 text-xs mt-1">같은 구간을 <span class="text-gray-400">다른 위치에서 동시에</span> 캡처한 파일 — TSF 정렬 후 중복 제거 통합.
+                        (한 스니퍼가 쪼갠 조각은 여기가 아니라 위 드롭존에 함께 올리세요)</p>
                 </div>
             </div>
         </details>

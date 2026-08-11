@@ -388,20 +388,76 @@
         // AP 라벨: 로밍 전 AP(prev_ap_name) → 로밍 후 AP(ap_name). 직전 AP가 없으면
         // (최초 연결 또는 재분석 전 데이터) 후 AP만 표시.
         const roamAp = s => (s.prev_ap_name ? `${s.prev_ap_name} → ${s.ap_name}` : s.ap_name);
-        Plotly.newPlot('chart-roaming-gap', [{
-            type: 'bar',
-            x: seqs.map((_, i) => i + 1),
-            y: seqs.map(s => s.gap_ms),
-            marker: {
-                color: seqs.map(s => s.is_slow ? '#ef4444' : '#3b82f6'),
+        /* gap_ms는 null(측정 불가)일 수 있다 — 그 로밍의 Auth 프레임이 캡처에
+           없어 시작 시각을 모르는 경우다. 0으로 찍으면 "지연 없음"으로 오독되므로
+           막대를 그리지 않고(null) hover에 사유를 노출한다. */
+        const gapMeasured = s => typeof s.gap_ms === 'number';
+        const missingText = s => {
+            const labels = s.missing_labels || [];
+            return labels.length ? labels.join(', ') + ' 미포착' : 'Auth 프레임 미포착';
+        };
+        /* 로밍을 **구간별 누적 막대**로 그린다. gap_ms(Auth→Reassoc)만 그리면
+           로밍 비용이 실제의 1/5로 보인다 — 실측 중앙값 기준 전체 25.1ms 중
+           gap은 5.3ms이고 나머지 대부분이 4-way다.
+           중간 구간(Reassoc 요청 → 4-way 시작)은 total에서 나머지를 빼서 얻는다.
+           total이 없으면(4-way 미포착) gap만 그린다. */
+        const xs = seqs.map((_, i) => i + 1);
+        const label = seqs.map(s => s.sta_name + ': ' + roamAp(s));
+        const segGap = seqs.map(s => gapMeasured(s) ? s.gap_ms : null);
+        const segWait = seqs.map(s => {
+            if (!gapMeasured(s) || typeof s.total_roam_ms !== 'number'
+                || typeof s.four_way_ms !== 'number') return null;
+            return Math.max(0, s.total_roam_ms - s.gap_ms - s.four_way_ms);
+        });
+        const segFour = seqs.map(s => typeof s.four_way_ms === 'number' ? s.four_way_ms : null);
+        const hoverOf = s => gapMeasured(s)
+            ? ((s.gap_ms).toFixed(1) + 'ms' + (s.gap_basis === 'auth_response' ? ' (하한)' : '')
+               + (typeof s.total_roam_ms === 'number' ? ' · 전체 ' + s.total_roam_ms.toFixed(1) + 'ms' : ''))
+            : ('측정불가 — ' + missingText(s));
+        /* STA 로그가 있으면 '체감 로밍 전체'를 **배경 영역**으로 깔고 그 안에 pcap
+           구간 막대를 그린다. 누적(stack)이 아니라 **중첩**인 게 핵심 —
+           pcap 전파구간은 STA 체감 로밍의 부분집합이지 옆에 붙는 별개 구간이
+           아니다(실측: 전체 97ms 안에 pcap 25ms가 들어간다).
+           스캔은 여기 넣지 않는다 — ROAM 명령보다 1,044ms 앞서 끝나는 별개
+           이벤트라 같은 막대에 쌓으면 로밍이 그만큼 더 걸린 것처럼 보인다. */
+        const staTotals = seqs.map(s => (s.sta_log && typeof s.sta_log.total_ms === 'number')
+            ? s.sta_log.total_ms : null);
+        const hasStaLog = staTotals.some(v => v !== null);
+        const roamTraces = [];
+        if (hasStaLog) {
+            roamTraces.push({
+                type: 'scatter', mode: 'none', name: 'STA 체감 로밍 전체',
+                x: xs, y: staTotals, fill: 'tozeroy',
+                fillcolor: 'rgba(148,163,184,0.22)',
+                hovertemplate: 'STA 체감 %{y:.1f}ms<extra></extra>',
+            });
+        }
+        roamTraces.push(
+            {
+                type: 'bar', name: 'Auth→Reassoc', x: xs, y: segGap,
+                marker: { color: seqs.map(s => s.is_slow ? '#ef4444' : '#3b82f6') },
+                text: label, customdata: seqs.map(hoverOf),
+                hovertemplate: '%{text}<br>Auth→Reassoc %{y:.1f}ms<br>%{customdata}<extra></extra>',
             },
-            text: seqs.map(s => s.sta_name + ': ' + roamAp(s)),
-            hovertemplate: '%{text}<br>%{y:.1f}ms<extra></extra>',
-        }], {
+            {
+                type: 'bar', name: 'Reassoc→4-way 시작', x: xs, y: segWait,
+                marker: { color: '#8b5cf6' }, text: label,
+                hovertemplate: '%{text}<br>연결 대기 %{y:.1f}ms<extra></extra>',
+            },
+            {
+                type: 'bar', name: '4-way', x: xs, y: segFour,
+                marker: { color: '#22c55e' }, text: label,
+                hovertemplate: '%{text}<br>4-way %{y:.1f}ms<extra></extra>',
+            },
+        );
+        Plotly.newPlot('chart-roaming-gap', roamTraces, {
+            barmode: 'stack',
+            showlegend: true,
+            legend: { orientation: 'h', y: 1.12, font: { color: '#9ca3af', size: 10 } },
             ...DARK,
             dragmode: 'zoom',
             xaxis: { title: '\ub85c\ubc0d \uc2dc\ud000\uc2a4 #' },
-            yaxis: { title: 'Auth\u2192Assoc Gap (ms)' },
+            yaxis: { title: hasStaLog ? '\ub85c\ubc0d \uc18c\uc694 (ms) — \ud68c\uc0c9=STA \uccb4\uac10 \uc804\uccb4, \uc0c9=pcap \uad6c\uac04' : '\ub85c\ubc0d \uc18c\uc694 (ms) — \uad6c\uac04 \ub204\uc801' },
             shapes: [{
                 type: 'line', x0: 0, x1: seqs.length + 1, y0: 100, y1: 100,
                 line: { color: '#ef4444', dash: 'dash', width: 1 },
@@ -424,17 +480,96 @@
                 return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${ms}`;
             };
             // 4-way(ms): 구버전 JSON엔 four_way_ms 키가 없음 — null/undefined 모두 '-'
+            // gap 셀: 측정 불가면 숫자 대신 사유를 보여준다. 여기서 s.gap_ms를
+            // 그대로 toFixed하면 null에서 TypeError로 표 전체가 렌더되지 않는다.
+            const gapCell = s => {
+                if (gapMeasured(s)) {
+                    const lower = s.gap_basis === 'auth_response'
+                        ? ` <span class="text-amber-400" title="${escapeHtml(s.gap_note || '')}">(하한)</span>`
+                        : '';
+                    return s.gap_ms.toFixed(1) + lower;
+                }
+                return `<span class="text-gray-500" title="${escapeHtml(s.gap_note || '')}">측정불가</span>`
+                     + `<span class="block text-[10px] text-gray-600">${escapeHtml(missingText(s))}</span>`;
+            };
             rTable.innerHTML = seqs.map((s, i) =>
                 `<tr class="border-b border-gray-700/50 ${s.is_slow ? 'text-red-400' : ''}">
                     <td class="py-1">${i + 1}</td>
-                    <td class="py-1 font-mono text-xs">${fmtTime(s.auth_epoch)}</td>
+                    <td class="py-1 font-mono text-xs">${typeof s.auth_epoch === 'number' ? fmtTime(s.auth_epoch) : (typeof s.assoc_epoch === 'number' ? fmtTime(s.assoc_epoch) : '-')}</td>
                     <td class="py-1 font-mono text-xs">${s.sta_name}</td>
                     <td class="py-1 font-mono text-xs">${roamAp(s)}</td>
-                    <td class="py-1 text-right">${s.gap_ms.toFixed(1)}</td>
+                    <td class="py-1 text-right">${gapCell(s)}</td>
                     <td class="py-1 text-right">${typeof s.four_way_ms === 'number' ? s.four_way_ms.toFixed(1) : '-'}</td>
+                    <td class="py-1 text-right font-semibold">${typeof s.total_roam_ms === 'number'
+                        ? s.total_roam_ms.toFixed(1)
+                        : `<span class="text-gray-500 font-normal" title="${escapeHtml(s.total_note || '')}">-</span>`}</td>
+                    <td class="py-1 text-right">${(s.sta_log && typeof s.sta_log.total_ms === 'number')
+                        ? `<span class="text-sky-300 font-semibold" title="${escapeHtml(
+                              'ROAM 명령 → CONNECTED · 출처 ' + (s.sta_log.source || '') +
+                              (s.sta_log.reason ? ' · 사유 ' + s.sta_log.reason : '') +
+                              (typeof s.sta_log.scan_ms === 'number' ? ' · 직전 스캔 ' + s.sta_log.scan_ms + 'ms' : '') +
+                              ' · 정렬 잔차 ' + s.sta_log.residual_ms + 'ms')}">${s.sta_log.total_ms.toFixed(1)}</span>`
+                        : '<span class="text-gray-600">-</span>'}</td>
                     <td class="py-1">${s.assoc_type}</td>
                 </tr>`
             ).join('');
+        }
+
+        /* STA 로그 상관 요약 — 어느 로그가 어느 STA에 붙었는지, 그리고 pcap이
+           못 보는 비중이 얼마인지. 개별 로밍의 세부 구간(드라이버 20ms 등)은
+           로그 스탬프 정밀도(±20ms대)를 넘어서므로 분포로만 낸다. */
+        const stCard = document.getElementById('station-log-card');
+        const stBody = document.getElementById('station-log-body');
+        const stInfo = DATA.station_logs;
+        if (stCard && stBody && stInfo && (stInfo.stations || []).length) {
+            const rows = stInfo.stations.map(st => {
+                const warn = (st.warnings || []).length
+                    ? `<div class="text-yellow-400 mt-0.5">${st.warnings.map(escapeHtml).join('<br>')}</div>` : '';
+                const matched = st.sta_name
+                    ? `<span class="text-sky-300">${escapeHtml(st.sta_name)}</span>
+                       <span class="text-gray-500">(${escapeHtml(st.match_method === 'ip' ? 'IP 매칭' : '시각 상관')})</span>`
+                    : '<span class="text-yellow-400">매칭 실패</span>';
+                return `<tr class="border-b border-gray-700/40">
+                    <td class="py-1 pr-3">${escapeHtml(st.name)}</td>
+                    <td class="py-1 pr-3 font-mono">${escapeHtml(st.sta_ip || '-')}</td>
+                    <td class="py-1 pr-3">${matched}${warn}</td>
+                    <td class="py-1 pr-3 text-right">${st.attached}/${st.roam_total}</td>
+                    <td class="py-1 pr-3 text-right">${st.total_ms_p50 ?? '-'}</td>
+                    <td class="py-1 pr-3 text-right">${st.scan_ms_p50 ?? '-'}</td>
+                    <td class="py-1 text-right text-gray-500">${st.residual_mad_ms ?? '-'}</td>
+                </tr>`;
+            }).join('');
+            // pcap이 못 보는 비중 — 같은 로밍끼리 대조한 중앙값 기준.
+            const paired = seqs.filter(s => s.sta_log && typeof s.sta_log.total_ms === 'number'
+                                            && typeof s.total_roam_ms === 'number');
+            let note = '';
+            if (paired.length) {
+                const med = arr => { const v = arr.slice().sort((a, b) => a - b); return v[Math.floor(v.length / 2)]; };
+                const p = med(paired.map(s => s.total_roam_ms));
+                const t = med(paired.map(s => s.sta_log.total_ms));
+                /* 체감 로밍 중앙값이 0이면 비율이 Infinity/NaN으로 찍힌다. 로그 스탬프
+                   정밀도가 ms라 극단적으로 짧은 로밍에서 0이 나올 수 있다 — 값을
+                   지어내지 않고 '측정불가'로 둔다. */
+                const outsidePct = t > 0 ? ((1 - p / t) * 100).toFixed(1) + '%' : '측정불가';
+                note = `<p class="mt-2 text-gray-400">같은 로밍 ${paired.length.toLocaleString()}건 대조 —
+                    pcap 전파구간 <span class="text-gray-200">${p.toFixed(1)}ms</span> vs
+                    STA 체감 <span class="text-sky-300">${t.toFixed(1)}ms</span>.
+                    <span class="text-gray-200">${outsidePct}</span>가 전파에 나타나지 않는 구간
+                    (스캔·로밍 판단·드라이버 처리·키 설치).</p>
+                    <p class="text-gray-500 mt-1">스캔은 ROAM 명령보다 약 1초 앞서 끝나는 별개 이벤트라 로밍 소요에 합산하지 않는다.
+                    개별 로밍의 세부 구간은 로그 스탬프 정밀도(±20ms대)를 넘어서므로 분포로만 표기한다.</p>`;
+            }
+            stBody.innerHTML = `<table class="w-full">
+                <thead class="text-gray-400"><tr>
+                    <th class="text-left py-1 pr-3">로그</th>
+                    <th class="text-left py-1 pr-3">STA IP</th>
+                    <th class="text-left py-1 pr-3">매칭된 STA</th>
+                    <th class="text-right py-1 pr-3">부착/로밍</th>
+                    <th class="text-right py-1 pr-3">체감 p50</th>
+                    <th class="text-right py-1 pr-3">스캔 p50</th>
+                    <th class="text-right py-1">정렬 MAD</th>
+                </tr></thead><tbody>${rows}</tbody></table>${note}`;
+            stCard.classList.remove('hidden');
         }
     }
 
@@ -830,10 +965,21 @@
     }
 
     /* ── Ping 분석 탭 ── */
+    /* 전수 목록·관찰 프레임 표의 페이지 크기(공용).
+       2시간 캡처는 전수 목록 41,667행 + 관찰 7,503행이라 한 번에 그리면 DOM이
+       60만 노드를 넘는다(실측) — 두 표 모두 이 크기로 나눠 그린다.
+       **선언 위치 주의**: 관찰 프레임 블록이 전수 목록 블록보다 앞에서
+       실행되므로 상수는 반드시 그보다 앞에 있어야 한다(const TDZ). */
+    const PING_PAGE_SIZE = 500;
     const ping = DATA.ping || {};
-    const pairs = ping.pairs || [];
-    const losses = ping.losses || [];
     const fullList = ping.full_list || [];
+    // pairs/losses는 full_list와 같은 entry를 담은 부분수열이라 결과 JSON에서
+    // 제거됐다(2시간 캡처에서 ping 32.8MB의 절반이 이 중복이었다 —
+    // analyzer/web/structured.py `_structured_ping`). 여기서 full_list를 status로
+    // 걸러 파생한다. 구버전 result에는 두 키가 남아 있으므로 있으면 그대로 쓴다.
+    const isLossStatus = s => s === 'loss' || s === 'loss_gap';
+    const pairs = ping.pairs || fullList.filter(p => p.status === 'matched');
+    const losses = ping.losses || fullList.filter(p => isLossStatus(p.status));
     const pingStatsData = ping.stats || {};
 
     // RTT 손실 X 클릭 시 전체 목록 행으로 점프하기 위한 인덱스 병행 보존.
@@ -1302,8 +1448,18 @@
             if (pingFlowSel && pingFlowSel.value !== '') { pingFlowSel.value = ''; needRender = true; }
             if (pingRetryChk && pingRetryChk.checked) { pingRetryChk.checked = false; needRender = true; }
         }
-        if (needRender) {
-            if (currentPingSource === 'wired') renderPingFullTableWired(); else renderPingFullTable();
+        if (needRender) renderCurrentPingTable();   // 필터 초기화분 먼저 반영
+        // 전수 목록은 페이지 단위로만 그려지므로(4만 행 DOM 방지) 대상 행이
+        // 현재 페이지 밖일 수 있다 — 그 행이 있는 페이지로 먼저 이동한다.
+        // pingRowsCache는 방금 렌더가 채운 "현재 필터 적용 행 목록"이고,
+        // 유선/무선이 각각 idx/fi 키로 원본 인덱스를 들고 있다.
+        const keyOf = currentPingSource === 'wired' ? (r => r.idx) : (r => r.fi);
+        const pos = pingRowsCache.findIndex(r => keyOf(r) === idx);
+        if (pos < 0) return;   // 현재 필터에서 사라진 행 — 무동작 (throw 금지)
+        const targetPage = Math.floor(pos / PING_PAGE_SIZE);
+        if (targetPage !== pingPage) {
+            pingPage = targetPage;
+            renderCurrentPingTable();
         }
         const row = document.querySelector(`#ping-full-table tbody tr[${attrName}="${idx}"]`);
         if (!row) return;   // 탐색 실패 시 무동작 (throw 금지)
@@ -1386,6 +1542,43 @@
         // 흐름 표시 정규화 — reply 프레임의 src/dst가 tshark multi-value(콤마 결합)로
         // 잡히면 첫 IP만 취해 흐름 라벨·옵션·필터를 하나로 합친다.
         const firstIp = ip => String(ip || '').split(',')[0].trim();
+        /* 전수 목록과 동일한 이유로 페이지 단위 렌더 — 2시간 캡처는 관찰
+           프레임만 7,503건이라 한 번에 그리면 그만큼 DOM이 늘어난다. */
+        const obsPager = document.getElementById('ping-obs-pager');
+        const obsPagePrev = document.getElementById('ping-obs-page-prev');
+        const obsPageNext = document.getElementById('ping-obs-page-next');
+        const obsPageLabel = document.getElementById('ping-obs-page-label');
+        const obsScroll = document.getElementById('ping-obs-scroll');
+        let obsPage = 0;
+        let obsRowsCache = [];
+
+        function obsPageCount() {
+            return Math.max(1, Math.ceil(obsRowsCache.length / PING_PAGE_SIZE));
+        }
+        function updateObsPager() {
+            if (!obsPager) return;
+            const total = obsRowsCache.length;
+            if (total <= PING_PAGE_SIZE) { obsPager.classList.add('hidden'); return; }
+            obsPager.classList.remove('hidden');
+            const from = obsPage * PING_PAGE_SIZE + 1;
+            const to = Math.min(total, (obsPage + 1) * PING_PAGE_SIZE);
+            if (obsPageLabel) {
+                obsPageLabel.textContent =
+                    `${from.toLocaleString()}–${to.toLocaleString()} (${obsPage + 1}/${obsPageCount()}쪽)`;
+            }
+            if (obsPagePrev) obsPagePrev.disabled = obsPage <= 0;
+            if (obsPageNext) obsPageNext.disabled = obsPage >= obsPageCount() - 1;
+        }
+        function moveObsPage(delta) {
+            const next = Math.min(Math.max(0, obsPage + delta), obsPageCount() - 1);
+            if (next === obsPage) return;
+            obsPage = next;
+            renderObsTable();
+            if (obsScroll) obsScroll.scrollTop = 0;
+        }
+        if (obsPagePrev) obsPagePrev.addEventListener('click', () => moveObsPage(-1));
+        if (obsPageNext) obsPageNext.addEventListener('click', () => moveObsPage(1));
+
         function renderObsTable() {
             if (!obsTable) return;
             const fDir = obsDirSel ? obsDirSel.value : '';      // ''=전체 | reply(응답) | request(요청)
@@ -1396,11 +1589,16 @@
                 return true;
             });
             if (obsFilterCount) obsFilterCount.textContent = `${rows.length.toLocaleString()} / ${observations.length.toLocaleString()}건`;
+            obsRowsCache = rows;
+            if (obsPage > obsPageCount() - 1) obsPage = obsPageCount() - 1;
+            updateObsPager();
             if (rows.length === 0) {
                 obsTable.innerHTML = '<tr><td colspan="9" class="text-gray-500 text-center py-6">조건에 맞는 항목이 없습니다.</td></tr>';
                 return;
             }
-            obsTable.innerHTML = rows.map((o, i) => {
+            const obsStart = obsPage * PING_PAGE_SIZE;
+            obsTable.innerHTML = rows.slice(obsStart, obsStart + PING_PAGE_SIZE).map((o, i0) => {
+                const i = obsStart + i0;   // 순번은 전체 기준 유지
                 const dirBadge = o.direction === 'request'
                     ? '<span class="bg-blue-900 text-blue-300 px-1.5 py-0.5 rounded text-xs">req</span>'
                     : '<span class="bg-purple-900 text-purple-300 px-1.5 py-0.5 rounded text-xs">reply</span>';
@@ -1423,7 +1621,7 @@
             obsFlowSel.insertAdjacentHTML('beforeend',
                 flows.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join(''));
         }
-        [obsDirSel, obsFlowSel].forEach(el => { if (el) el.addEventListener('change', renderObsTable); });
+        [obsDirSel, obsFlowSel].forEach(el => { if (el) el.addEventListener('change', () => { obsPage = 0; renderObsTable(); }); });
         renderObsTable();
     } else if (obsDetails) {
         obsDetails.style.display = 'none';
@@ -1435,6 +1633,58 @@
     const pingFlowSel = document.getElementById('ping-filter-flow');
     const pingRetryChk = document.getElementById('ping-filter-retry');
     const pingFullCount = document.getElementById('ping-full-count');
+    const pingPager = document.getElementById('ping-pager');
+    const pingPagePrev = document.getElementById('ping-page-prev');
+    const pingPageNext = document.getElementById('ping-page-next');
+    const pingPageLabel = document.getElementById('ping-page-label');
+    const pingScroll = document.getElementById('ping-full-scroll');
+
+    /* 전수 목록 페이지네이션.
+       2시간 캡처는 필터 없이 41,667행이라 한 번에 그리면 DOM 노드가 60만을
+       넘고(실측) 페이지 로드가 그만큼 느려진다. 화면에는 한 페이지만 그리고
+       나머지는 필요할 때 그린다. 손실 마커 클릭 내비(jumpToPingRow)는 대상
+       행이 속한 페이지로 먼저 이동한 뒤 스크롤한다. */
+    let pingPage = 0;               // 현재 페이지(0-base)
+    let pingRowsCache = [];         // 현재 필터가 적용된 행 목록(페이지 계산·점프용)
+
+    function pingPageCount() {
+        return Math.max(1, Math.ceil(pingRowsCache.length / PING_PAGE_SIZE));
+    }
+
+    function updatePingPager() {
+        if (!pingPager) return;
+        const total = pingRowsCache.length;
+        const pages = pingPageCount();
+        if (total <= PING_PAGE_SIZE) {
+            pingPager.classList.add('hidden');
+            return;
+        }
+        pingPager.classList.remove('hidden');
+        const from = pingPage * PING_PAGE_SIZE + 1;
+        const to = Math.min(total, (pingPage + 1) * PING_PAGE_SIZE);
+        if (pingPageLabel) {
+            pingPageLabel.textContent =
+                `${from.toLocaleString()}–${to.toLocaleString()} (${pingPage + 1}/${pages}쪽)`;
+        }
+        if (pingPagePrev) pingPagePrev.disabled = pingPage <= 0;
+        if (pingPageNext) pingPageNext.disabled = pingPage >= pages - 1;
+    }
+
+    function renderCurrentPingTable() {
+        if (currentPingSource === 'wired') renderPingFullTableWired();
+        else renderPingFullTable();
+    }
+
+    function movePingPage(delta) {
+        const next = Math.min(Math.max(0, pingPage + delta), pingPageCount() - 1);
+        if (next === pingPage) return;
+        pingPage = next;
+        renderCurrentPingTable();
+        if (pingScroll) pingScroll.scrollTop = 0;
+    }
+
+    if (pingPagePrev) pingPagePrev.addEventListener('click', () => movePingPage(-1));
+    if (pingPageNext) pingPageNext.addEventListener('click', () => movePingPage(1));
 
     const WIRED_FULL_THEAD = `<tr class="text-gray-400 border-b border-gray-700">
         <th class="text-left py-2 px-1">#</th>
@@ -1464,11 +1714,16 @@
             rows.push({ e, idx });
         });
         if (pingFullCount) pingFullCount.textContent = `${rows.length.toLocaleString()} / ${gtExchanges.length.toLocaleString()}건`;
+        pingRowsCache = rows;
+        if (pingPage > pingPageCount() - 1) pingPage = pingPageCount() - 1;
+        updatePingPager();
         if (!rows.length) {
             pingFullTable.innerHTML = '<tr><td colspan="5" class="text-gray-500 text-center py-6">조건에 맞는 항목이 없습니다.</td></tr>';
             return;
         }
-        pingFullTable.innerHTML = rows.map(({ e, idx }, i) => {
+        const pageStart = pingPage * PING_PAGE_SIZE;
+        pingFullTable.innerHTML = rows.slice(pageStart, pageStart + PING_PAGE_SIZE).map(({ e, idx }, i0) => {
+            const i = pageStart + i0;   // 표의 순번은 전체 기준을 유지
             const isLoss = e.rtt_ms == null;
             const badge = isLoss
                 ? '<span class="bg-red-900 text-red-300 px-1.5 py-0.5 rounded text-xs font-bold">LOSS</span>'
@@ -1502,11 +1757,16 @@
             return true;
         });
         if (pingFullCount) pingFullCount.textContent = `${rows.length.toLocaleString()} / ${fullList.length.toLocaleString()}건`;
+        pingRowsCache = rows;
+        if (pingPage > pingPageCount() - 1) pingPage = pingPageCount() - 1;
+        updatePingPager();
         if (rows.length === 0) {
             pingFullTable.innerHTML = '<tr><td colspan="10" class="text-gray-500 text-center py-6">조건에 맞는 항목이 없습니다.</td></tr>';
             return;
         }
-        pingFullTable.innerHTML = rows.map(({ p, fi }, i) => {
+        const pageStart = pingPage * PING_PAGE_SIZE;
+        pingFullTable.innerHTML = rows.slice(pageStart, pageStart + PING_PAGE_SIZE).map(({ p, fi }, i0) => {
+            const i = pageStart + i0;   // 표의 순번은 전체 기준을 유지
             const isLoss = p.status === 'loss' || p.status === 'loss_gap';
             const isGap = p.status === 'loss_gap';
             const rowClass = isLoss ? 'text-red-400 bg-red-900/20' : (p.has_retry ? 'text-yellow-400' : '');
@@ -1543,8 +1803,8 @@
     }
     [pingStatusSel, pingFlowSel, pingRetryChk].forEach(el => {
         if (el) el.addEventListener('change', () => {
-            if (currentPingSource === 'wired') renderPingFullTableWired();
-            else renderPingFullTable();
+            pingPage = 0;   // 필터가 바뀌면 행 집합이 달라진다 — 1쪽부터
+            renderCurrentPingTable();
         });
     });
     // 초기 전체 목록 렌더는 아래 srcToggle 초기화의 renderPingSource(...)가
@@ -1834,7 +2094,10 @@
                 <div class="space-y-1.5 mb-3">
                     ${miniBar('Retry', scores.retry || 0)}
                     ${miniBar('RSSI', scores.rssi || 0)}
-                    ${miniBar('\ub85c\ubc0d', scores.roaming || 0)}
+                    ${typeof scores.roaming === 'number'
+                        ? miniBar('\ub85c\ubc0d', scores.roaming)
+                        : `<div class="flex items-center gap-2 text-xs"><span class="w-12 text-gray-400">\ub85c\ubc0d</span>
+                             <span class="text-gray-500" title="\uc774 STA\uc758 \ub85c\ubc0d\uc774 \uc804\ubd80 \ud310\uc815 \ubd88\uac00(4-way \ubbf8\ud3ec\ucc29)">\uce21\uc815\ubd88\uac00</span></div>`}
                 </div>
                 <div class="grid grid-cols-2 gap-1 text-xs text-gray-400 mb-3">
                     <div>Retry: ${m.retry_pct || 0}%</div>

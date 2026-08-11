@@ -15,6 +15,8 @@ from ..core.ping_matching import (
     PING_MATCH_WINDOW_SEC,
     build_ping_matches,
     find_time_streaks,
+    ping_losses as _ping_losses,
+    ping_pairs as _ping_pairs,
 )
 from ..core.thresholds import (
     LOSS_DANGER_PCT,
@@ -291,6 +293,69 @@ def _retry_per_sec(device_frames: List[Frame]) -> List[Dict[str, Any]]:
     ]
 
 
+def _bucket_rssi_timeline(tx_frames: List[Frame]) -> List[Dict[str, Any]]:
+    """RSSI 샘플을 **1초 버킷**으로 집계한 시계열.
+
+    프레임당 1항목(원샘플)으로 내보내면 2시간·143만 프레임 캡처에서 이 필드
+    하나가 결과 JSON의 53MB를 차지했다. 프론트(timeline.js)는 어차피 장치당
+    RSSI_SCATTER_MAX(800)점으로 솎아 그리므로 그 전송량의 대부분이 버려졌다.
+
+    항목 스키마:
+        {"epoch": 초(int), "rssi": 버킷 평균(소수1), "rssi_min", "rssi_max",
+         "n": 샘플 수, "mcs": 버킷 최빈 MCS}
+
+    `epoch`/`rssi` 키와 그 의미("그 시점의 대표 RSSI")를 구버전 원샘플 항목과
+    똑같이 유지하는 게 핵심이다 — timeline.js, timeline_series.project_rssi_series,
+    signal_cliff, evidence의 축 계산이 구버전 결과와 신버전 결과를 분기 없이
+    그대로 읽는다 (메모리 serialized-result-backward-compat).
+
+    `rssi_min`/`rssi_max`를 함께 남기는 이유는 signal_cliff가 '5초 내 10dB 하락'을
+    판정할 때 버킷 평균만 보면 순간 급락을 놓치기 때문이다(그쪽 docstring 참조).
+
+    손상 epoch(None/NaN/Inf)은 제외한다 — int() 예외 방어
+    (_structured_per_second와 동일 원칙).
+    """
+    buckets: Dict[int, Dict[str, Any]] = {}
+    for f in tx_frames:
+        epoch = f.epoch
+        if epoch is None or not math.isfinite(epoch):
+            continue
+        rssi = f.rssi_first
+        if rssi is None:
+            continue
+        sec = int(epoch)
+        b = buckets.get(sec)
+        if b is None:
+            b = buckets[sec] = {
+                "sum": 0, "n": 0, "min": rssi, "max": rssi, "mcs": Counter(),
+            }
+        b["sum"] += rssi
+        b["n"] += 1
+        if rssi < b["min"]:
+            b["min"] = rssi
+        if rssi > b["max"]:
+            b["max"] = rssi
+        m = f.mcs_int
+        if m is not None:
+            b["mcs"][m] += 1
+
+    timeline: List[Dict[str, Any]] = []
+    for sec in sorted(buckets):
+        b = buckets[sec]
+        top_mcs = b["mcs"].most_common(1)
+        timeline.append(
+            {
+                "epoch": sec,
+                "rssi": round(b["sum"] / b["n"], 1),
+                "rssi_min": b["min"],
+                "rssi_max": b["max"],
+                "n": b["n"],
+                "mcs": top_mcs[0][0] if top_mcs else None,
+            }
+        )
+    return timeline
+
+
 def _structured_signal(
     frames: List[Frame], roles: Dict[str, Dict[str, Any]], index
 ) -> Dict[str, Any]:
@@ -313,10 +378,7 @@ def _structured_signal(
             device_frames = [f for f in frames if f.ta == mac]
         tx_frames = [f for f in device_frames if f.rssi_first is not None]
 
-        rssi_timeline = [
-            {"epoch": f.epoch, "rssi": f.rssi_first, "mcs": f.mcs_int}
-            for f in tx_frames
-        ]
+        rssi_timeline = _bucket_rssi_timeline(tx_frames)
         rssi_values = [f.rssi_first for f in tx_frames if f.rssi_first is not None]
         entry = {
             "mac": mac,
@@ -479,6 +541,16 @@ def _structured_ping(
     ping = build_ping_matches(frames, roles, PING_MATCH_WINDOW_SEC)
     ping["timeline"] = _ping_per_sec(ping.get("full_list", []))
     ping["loss_streaks"] = _ping_loss_streaks(ping.get("full_list", []))
+    # pairs/losses는 full_list와 **같은 entry 객체**를 담은 부분수열이라
+    # (build_ping_matches의 lockstep 불변식) 파이썬 메모리에선 참조 공유로
+    # 공짜지만, JSON에서는 full_list가 통째로 두 번 더 직렬화된다 — 2시간
+    # 캡처 실측에서 structured.ping 32.8MB의 절반이 이 중복이었다. 결과에서
+    # 빼고 소비자는 ping_pairs()/ping_losses()로 파생한다(status 필터가 곧
+    # 원래 부분수열이라 lockstep은 구성상 성립). 구버전 result에는 두 키가
+    # 남아 있고 헬퍼가 그때는 저장된 값을 그대로 쓴다 —
+    # serialized-result-backward-compat.
+    ping.pop("pairs", None)
+    ping.pop("losses", None)
     return ping
 
 
@@ -494,7 +566,7 @@ def _structured_roaming(
     assoc 직후 첫 4-way duration(four_way_ms)을 부착한다(매칭 실패 시 None).
     """
     from ..core.detector import mac_name
-    from ..core.modules.eapol import match_four_way_ms
+    from ..core.modules.eapol import match_four_way
 
     roaming_frames = [f for f in frames if f.is_roaming_related]
     sta_macs = {mac for mac, role in roles.items() if role.get("role") == "STA"}
@@ -506,50 +578,102 @@ def _structured_roaming(
         info = ap_ch.get(mac)
         return info.get(key) if info else None
 
+    # 짝짓기 규칙은 roaming.pair_roaming_sequences(단일 소스) — 텍스트 모듈과
+    # 같은 시퀀스를 봐야 한다. 이전에는 이 로직이 양쪽에 복제돼 있었고, 그래서
+    # "앵커를 소비 후 지우지 않아 수십 초 전 Auth와 짝지어지는" 결함도 양쪽에
+    # 똑같이 있었다(자세한 근거는 그 함수 docstring).
+    from ..core.modules.roaming import (
+        MISSING_FRAME_LABELS,
+        classify_slow,
+        pair_roaming_sequences,
+    )
+
     sequences = []
-    auth_events: Dict[str, Frame] = {}
-    for frame in roaming_frames:
-        if frame.subtype == "11" and frame.ta in sta_macs:
-            auth_events[frame.ta] = frame
-        elif frame.subtype in ("0", "2") and frame.ta in sta_macs:
-            auth_frame = auth_events.get(frame.ta)
-            if auth_frame is None:
-                continue
-            gap_ms = (frame.epoch - auth_frame.epoch) * 1000
-            prev_ap = frame.current_ap or ""
-            prev_band = _ch_of(prev_ap, "band") if prev_ap else None
-            new_band = _ch_of(frame.ra, "band")
-            # 양쪽 밴드를 모두 알 때만 전환 여부 판정, 아니면 None(정보 없음).
-            band_change = (
-                prev_band != new_band
-                if prev_band is not None and new_band is not None
-                else None
+    for pairing in pair_roaming_sequences(roaming_frames, sta_macs):
+        frame = pairing.assoc
+        auth_frame = pairing.auth
+        # gap_ms는 **None일 수 있다**(이 로밍의 Auth가 캡처에 없어 시작 시각을
+        # 모르는 경우). 시퀀스 자체는 남긴다 — 로밍은 실제로 일어났으므로 횟수에서
+        # 빠지면 안 되고, 대신 gap을 지어내지 않는다(정직한 공백). 소비자는
+        # gap_ms is None을 반드시 처리해야 한다.
+        gap_ms = pairing.gap_ms
+        prev_ap = frame.current_ap or ""
+        prev_band = _ch_of(prev_ap, "band") if prev_ap else None
+        new_band = _ch_of(frame.ra, "band")
+        # 양쪽 밴드를 모두 알 때만 전환 여부 판정, 아니면 None(정보 없음).
+        band_change = (
+            prev_band != new_band
+            if prev_band is not None and new_band is not None
+            else None
+        )
+        # 4-way를 한 번만 매칭해 duration과 종료 시각을 함께 쓴다.
+        hs = match_four_way(frame.epoch, frame.ta, handshakes or [], ap=frame.ra)
+        four_way_ms = hs.get("duration_ms") if hs else None
+        total_roam_ms = None
+        total_note = ""
+        hs_end = hs.get("end_epoch") if hs else None
+        if auth_frame is not None and isinstance(hs_end, (int, float)):
+            total_roam_ms = round((hs_end - auth_frame.epoch) * 1000, 1)
+        elif auth_frame is None:
+            total_note = "Auth 프레임 미포착 — 시작 시각을 몰라 전체 소요 계산 불가"
+        else:
+            total_note = (
+                "4-way 핸드셰이크가 캡처에 없어 완료 시점 불명 "
+                "(802.11r FT로 생략됐거나 모니터가 EAPOL을 놓침)"
             )
-            sequences.append(
-                {
-                    "sta": frame.ta,
-                    "sta_name": mac_name(frame.ta, roles),
-                    "prev_ap": prev_ap,
-                    "prev_ap_name": mac_name(prev_ap, roles) if prev_ap else "",
-                    "ap": frame.ra,
-                    "ap_name": mac_name(frame.ra, roles),
-                    "auth_epoch": auth_frame.epoch,
-                    "assoc_epoch": frame.epoch,
-                    "auth_fnum": auth_frame.number,
-                    "assoc_fnum": frame.number,
-                    "gap_ms": round(gap_ms, 1),
-                    "assoc_type": frame.subtype_name,
-                    "is_slow": gap_ms > ROAM_GAP_DANGER_MS,
-                    "prev_ap_channel": _ch_of(prev_ap, "channel") if prev_ap else None,
-                    "prev_ap_band": prev_band,
-                    "ap_channel": _ch_of(frame.ra, "channel"),
-                    "ap_band": new_band,
-                    "band_change": band_change,
-                    "four_way_ms": match_four_way_ms(
-                        frame.epoch, frame.ta, handshakes or [], ap=frame.ra
-                    ),
-                }
-            )
+        # 판정 규칙은 roaming.classify_slow(단일 소스) — 텍스트 리포트와 화면이
+        # 다른 느린 로밍 건수를 말하면 안 된다(이 버그의 근원이 로직 복제였다).
+        is_slow, slow_basis = classify_slow(total_roam_ms, gap_ms)
+        sequences.append(
+            {
+                "sta": frame.ta,
+                "sta_name": mac_name(frame.ta, roles),
+                "prev_ap": prev_ap,
+                "prev_ap_name": mac_name(prev_ap, roles) if prev_ap else "",
+                "ap": frame.ra,
+                "ap_name": mac_name(frame.ra, roles),
+                "auth_epoch": auth_frame.epoch if auth_frame else None,
+                "assoc_epoch": frame.epoch,
+                "auth_fnum": auth_frame.number if auth_frame else None,
+                "assoc_fnum": frame.number,
+                "gap_ms": round(gap_ms, 1) if gap_ms is not None else None,
+                "assoc_type": frame.subtype_name,
+                # 느린 로밍 판정은 **로밍 전체 소요(total_roam_ms)** 기준이다.
+                # gap_ms(Auth→Reassoc)에만 임계를 걸면 전체 25.2ms 중 5.3ms
+                # 구간만 보게 돼, 4-way가 길어 실제로 느린 로밍을 놓친다
+                # (실측: gap 6.3ms인데 4-way 41.7ms로 전체 105ms인 건이 있다).
+                #
+                # total이 없어도(4-way 미포착) **total ≥ gap이 항상 성립**하므로
+                # gap이 이미 임계를 넘으면 그 로밍은 확정적으로 느리다 — 아는
+                # 정보를 버리지 않는다. 둘 다 아니면 판정 불가(slow_basis=None)로
+                # 두고, 건강도 분모에서 제외한다.
+                "is_slow": is_slow,
+                "slow_basis": slow_basis,
+                # gap을 무엇을 기준으로 쟀는지 / 무엇이 없어서 못 쟀는지.
+                "gap_basis": pairing.basis,
+                "missing": list(pairing.missing),
+                "missing_labels": [
+                    MISSING_FRAME_LABELS.get(code, code) for code in pairing.missing
+                ],
+                "gap_note": pairing.note,
+                "prev_ap_channel": _ch_of(prev_ap, "channel") if prev_ap else None,
+                "prev_ap_band": prev_band,
+                "ap_channel": _ch_of(frame.ra, "channel"),
+                "ap_band": new_band,
+                "band_change": band_change,
+                "four_way_ms": four_way_ms,
+                # 로밍 **전체** 소요: Auth 요청 → 4-way 완료.
+                # gap_ms(Auth→Reassoc 요청)는 전체의 일부에 불과하다 — 실측
+                # 중앙값이 전체 25.1ms 중 5.3ms로, 나머지 대부분이 4-way다.
+                # gap+four_way 단순 합이 아니라 실제 종료 시각에서 계산한다
+                # (Reassoc 요청 ~ 4-way 시작 사이 대기가 빠지기 때문).
+                "total_roam_ms": total_roam_ms,
+                # 4-way를 못 찾으면 전체 소요를 알 수 없다(FT로 생략됐거나
+                # 모니터가 EAPOL을 놓쳤거나) — 지어내지 않고 None.
+                "total_basis": "four_way" if total_roam_ms is not None else None,
+                "total_note": total_note,
+            }
+        )
 
     return {
         "roaming_frame_count": len(roaming_frames),
@@ -681,9 +805,8 @@ def _device_entry_stats(dev_frames, is_tx, mac: str, role: str) -> Dict[str, Any
     retry_peaks: list = []
     # 손상 epoch(None/NaN/Inf) 프레임은 버킷 계산에서 제외 — int() 예외와 비교
     # TypeError 방어. span이 상한을 넘으면(먼 미래 epoch 등) 버킷 통계 자체를
-    # 생략한다(정직한 공백) — range(...,10) × 버킷별 전체 재스캔이 사실상 무한
-    # 루프가 되는 경로 차단 (_SNIFFER_FILL_MAX_SPAN_SEC 동일 원칙, PR #27 리뷰.
-    # O(span×frames) 구조 개선 자체는 백로그 ⑥에 남음).
+    # 생략한다(정직한 공백) — 버킷 수 자체가 폭발하는 경로 차단
+    # (_SNIFFER_FILL_MAX_SPAN_SEC 동일 원칙, PR #27 리뷰).
     finite_frames = [
         f for f in dev_frames if f.epoch is not None and math.isfinite(f.epoch)
     ]
@@ -695,40 +818,78 @@ def _device_entry_stats(dev_frames, is_tx, mac: str, role: str) -> Dict[str, Any
         start_epoch = int(_lo)
         end_epoch = int(_hi)
         bucket_size = 10  # 10초 구간
-        for bucket_start in range(start_epoch, end_epoch + 1, bucket_size):
-            bucket_end = bucket_start + bucket_size
-            bucket_frames = [
-                f for f in finite_frames if bucket_start <= f.epoch < bucket_end
-            ]
-            total = len(bucket_frames)
-            retries = sum(1 for f in bucket_frames if f.retry)
+        bucket_count = (end_epoch - start_epoch) // bucket_size + 1
+        # 버킷별 집계를 **단일 패스**로 채운다 (백로그 ⑥). 이전 구현은 버킷마다
+        # finite_frames를 통째로 재스캔해 O(span/10 × frames)였다 — 2시간
+        # (719버킷)·143만 프레임 실측에서 장치별+전체 통계에만 315초가 들었다.
+        # 프레임마다 자기 버킷 인덱스를 한 번 계산해 누적하면 O(frames + 버킷수)로
+        # 같은 결과를 낸다. 누적 순서가 프레임 순서 그대로라 Counter 삽입 순서도
+        # 보존되어 most_common(5)의 동점 순서까지 이전과 동일하다.
+        agg: List[Optional[Dict[str, Any]]] = [None] * bucket_count
+        for f in finite_frames:
+            bi = int((f.epoch - start_epoch) // bucket_size)
+            if bi < 0 or bi >= bucket_count:
+                # 구 루프의 `bucket_start <= f.epoch < bucket_end`도 범위 밖
+                # 프레임(음수 epoch 등 int() 절삭 경계)은 어느 버킷에도 넣지
+                # 않았다 — 그 동작을 그대로 유지한다.
+                continue
+            b = agg[bi]
+            if b is None:
+                b = agg[bi] = {
+                    "total": 0, "retry": 0, "tx_total": 0,
+                    "phy_mcs": Counter(), "legacy": Counter(),
+                    "phy_mode": Counter(), "mcs_sum": 0, "mcs_n": 0,
+                }
+            b["total"] += 1
+            if f.retry:
+                b["retry"] += 1
             # bucket별 MCS / PHY 통계 (송신 프레임 기준)
-            bucket_tx = [f for f in bucket_frames if is_tx(f)]
-            phy_mcs_counts: "Counter[str]" = Counter()
-            legacy_counts: "Counter[str]" = Counter()
-            phy_mode_dist: "Counter[str]" = Counter()
-            mcs_sum, mcs_n = 0, 0
-            for f in bucket_tx:
-                phy = getattr(f, "mcs_phy", "") or ""
-                if phy in ("HT", "VHT", "HE", "EHT"):
-                    m = f.mcs_int
-                    if m is not None:
-                        phy_mcs_counts[f"{phy} MCS{m}"] += 1
-                        phy_mode_dist[phy] += 1
-                        mcs_sum += m
-                        mcs_n += 1
-                else:
-                    rate = (getattr(f, "data_rate", "") or "").split(",")[0].strip()
-                    if rate:
-                        legacy_counts[f"Legacy {rate}Mbps"] += 1
-                        phy_mode_dist["Legacy"] += 1
-            combined = phy_mcs_counts + legacy_counts
+            if not is_tx(f):
+                continue
+            b["tx_total"] += 1
+            phy = getattr(f, "mcs_phy", "") or ""
+            if phy in ("HT", "VHT", "HE", "EHT"):
+                m = f.mcs_int
+                if m is not None:
+                    b["phy_mcs"][f"{phy} MCS{m}"] += 1
+                    b["phy_mode"][phy] += 1
+                    b["mcs_sum"] += m
+                    b["mcs_n"] += 1
+            else:
+                rate = (getattr(f, "data_rate", "") or "").split(",")[0].strip()
+                if rate:
+                    b["legacy"][f"Legacy {rate}Mbps"] += 1
+                    b["phy_mode"]["Legacy"] += 1
+
+        for bi in range(bucket_count):
+            bucket_start = start_epoch + bi * bucket_size
+            b = agg[bi]
+            if b is None:
+                # 관측 프레임이 없는 구간 — 구 루프의 빈 버킷 출력과 동일.
+                per_bucket.append(
+                    {
+                        "epoch": bucket_start,
+                        "total": 0,
+                        "retry": 0,
+                        "retry_pct": 0,
+                        "mcs_breakdown": "",
+                        "avg_mcs": None,
+                        "legacy_pct": 0,
+                        "tx_total": 0,
+                        "phy_mode_dist": {},
+                    }
+                )
+                continue
+            total = b["total"]
+            retries = b["retry"]
+            combined = b["phy_mcs"] + b["legacy"]
             mcs_breakdown = ", ".join(
                 f"{k}×{v:,}" for k, v in combined.most_common(5)
             )
-            avg_mcs = round(mcs_sum / mcs_n, 1) if mcs_n else None
-            tx_total = len(bucket_tx)
-            legacy_n = sum(legacy_counts.values())
+            mcs_n = b["mcs_n"]
+            avg_mcs = round(b["mcs_sum"] / mcs_n, 1) if mcs_n else None
+            tx_total = b["tx_total"]
+            legacy_n = sum(b["legacy"].values())
             legacy_pct = round(legacy_n * 100 / tx_total, 1) if tx_total else 0
             per_bucket.append(
                 {
@@ -740,7 +901,7 @@ def _device_entry_stats(dev_frames, is_tx, mac: str, role: str) -> Dict[str, Any
                     "avg_mcs": avg_mcs,
                     "legacy_pct": legacy_pct,
                     "tx_total": tx_total,
-                    "phy_mode_dist": dict(phy_mode_dist),
+                    "phy_mode_dist": dict(b["phy_mode"]),
                 }
             )
 
@@ -1178,7 +1339,8 @@ def _structured_diagnosis(
     anomalies = structured.get("anomaly_frames", {})
 
     frames = frames or []
-    ping_losses = ping.get("losses", [])
+    # 결과 JSON에는 losses 키가 없다(full_list 중복이라 제거) — 헬퍼가 파생한다.
+    ping_loss_items = _ping_losses(ping)
 
     total_frames = ov.get("total_frames", 0)
     retry_pct = ov.get("retry_pct", 0)
@@ -1193,14 +1355,30 @@ def _structured_diagnosis(
     # 구버전 직렬화 result에는 req_total_raw 류 키가 없을 수 있어 pairs/losses
     # 존재 여부를 함께 본다.
     ping_available = bool(
-        ping.get("pairs") or ping_losses
+        _ping_pairs(ping) or ping_loss_items
         or ping_stats.get("req_total_raw") or ping_stats.get("reply_total_raw")
     )
 
     retry_score = max(0, 100 - retry_pct * 5)
-    roam_score = 100
-    if len(roam_seqs) > 0:
-        slow_ratio = len(slow_roams) / len(roam_seqs) * 100
+    # gap 측정 불가 시퀀스는 느린지 아닌지 **알 수 없다**. 분모에 그대로 넣으면
+    # "느린 로밍 비율"이 희석돼 점수가 낙관적으로 부풀려진다 — 극단적으로 전량
+    # 측정 불가면 만점이 나와 "캡처가 나쁠수록 건강해 보이는" 역전이 생긴다.
+    # 측정된 시퀀스만 분모로 쓰고, 하나도 없으면 loss와 같이 None(측정 불가)으로
+    # 두어 아래 가중치 재정규화에 태운다.
+    # "판정 가능"의 기준은 gap 유무가 아니라 **느린 로밍 판정이 섰는지**다
+    # (slow_basis). total이 있거나, total이 없어도 gap이 이미 임계를 넘어 확정된
+    # 경우가 판정 가능이다. 구버전 result에는 slow_basis가 없으므로 gap 유무로 폴백.
+    measurable_roams = [
+        seq for seq in roam_seqs
+        if seq.get("slow_basis") is not None
+        or ("slow_basis" not in seq and isinstance(seq.get("gap_ms"), (int, float)))
+    ]
+    if not roam_seqs:
+        roam_score = 100          # 로밍 자체가 없음 = 문제 없음
+    elif not measurable_roams:
+        roam_score = None         # 로밍은 있으나 전부 측정 불가 = 판정 불가
+    else:
+        slow_ratio = len(slow_roams) / len(measurable_roams) * 100
         roam_score = max(0, 100 - slow_ratio * 2)
     loss_score = max(0, 100 - loss_pct * 10) if ping_available else None
 
@@ -1240,12 +1418,24 @@ def _structured_diagnosis(
         s_rssi = 100
         if rssi_avg is not None:
             s_rssi = max(0, min(100, (rssi_avg + 90) * 2.5))
-        s_roam = (
-            100
-            if not sta_roams
-            else max(0, 100 - len(sta_slow_roams) / max(len(sta_roams), 1) * 200)
+        # 전체 점수와 같은 원칙 — 측정 불가는 분모에서 뺀다(계수 200이라 왜곡 폭이
+        # 전체 점수의 2배다). 전부 측정 불가면 로밍 컴포넌트를 빼고 재정규화한다.
+        sta_measurable = [
+            s for s in sta_roams
+            if s.get("slow_basis") is not None
+            or ("slow_basis" not in s and isinstance(s.get("gap_ms"), (int, float)))
+        ]
+        if not sta_roams:
+            s_roam = 100
+        elif not sta_measurable:
+            s_roam = None
+        else:
+            s_roam = max(0, 100 - len(sta_slow_roams) / len(sta_measurable) * 200)
+        _sta_weights = [(s_retry, 0.35), (s_rssi, 0.35), (s_roam, 0.3)]
+        _sta_avail = [(v, w) for v, w in _sta_weights if v is not None]
+        s_overall = round(
+            sum(v * w for v, w in _sta_avail) / sum(w for _, w in _sta_avail)
         )
-        s_overall = round(s_retry * 0.35 + s_rssi * 0.35 + s_roam * 0.3)
 
         issues = []
 
@@ -1354,7 +1544,10 @@ def _structured_diagnosis(
             _add_issue(
                 {
                     "severity": "high",
-                    "msg": f"느린 로밍 {len(sta_slow_roams)}회 (>{ROAM_GAP_DANGER_MS}ms)",
+                    "msg": (
+                        f"느린 로밍 {len(sta_slow_roams)}회 "
+                        f"(전체 소요 >{ROAM_GAP_DANGER_MS}ms)"
+                    ),
                     "action": "802.11r/k/v 설정 확인, 로밍 히스테리시스 조정",
                 },
                 refs, window, signal_type="slow_roaming",
@@ -1378,7 +1571,10 @@ def _structured_diagnosis(
                 "scores": {
                     "retry": round(s_retry),
                     "rssi": round(s_rssi),
-                    "roaming": round(s_roam),
+                    # 그 STA의 로밍이 전부 판정 불가면 None(측정 불가) — 전체
+                    # component_scores.roaming과 같은 규약이다. 0으로도 100으로도
+                    # 쓰면 안 된다(모르는 값을 점수로 단정하는 것).
+                    "roaming": round(s_roam) if s_roam is not None else None,
                 },
                 "metrics": {
                     "retry_pct": sta_retry,
@@ -1386,6 +1582,8 @@ def _structured_diagnosis(
                     "rssi_min": rssi_min,
                     "roaming_count": len(sta_roams),
                     "slow_roaming": len(sta_slow_roams),
+                    # 느림 판정이 선 로밍 수 — slow_roaming의 실제 분모.
+                    "roaming_measurable": len(sta_measurable),
                     "total_frames": ds.get("total_frames", 0),
                 },
                 "issues": issues,
@@ -1436,7 +1634,7 @@ def _structured_diagnosis(
             refs, window, signal_type="legacy_heavy",
         )
     if loss_pct > LOSS_DANGER_PCT:
-        refs, window = ev.ping_loss_evidence(ping_losses)
+        refs, window = ev.ping_loss_evidence(ping_loss_items)
         _add_net_issue(
             {
                 "severity": "high",
@@ -1480,7 +1678,7 @@ def _structured_diagnosis(
                 if isinstance(v, (int, float)):
                     dz_epochs.append(float(v))
         dz_window = ev._window(dz_epochs)
-        dz_refs, _ = ev.ping_loss_evidence(ping_losses)
+        dz_refs, _ = ev.ping_loss_evidence(ping_loss_items)
         if not dz_refs:
             # ping loss 근거가 없으면 로밍을 fallback으로 쓰되, refs와 window를
             # 함께 받아 일치시킨다. 로밍 프레임의 epoch은 지연 구간 window 밖일 수
@@ -1535,7 +1733,8 @@ def _structured_diagnosis(
             # None = 측정 불가(ICMP 없음). JSON에는 null로 직렬화되며 구버전
             # result(숫자)와 소비자(charts.js/report.py)가 모두 분기 처리한다.
             "loss": round(loss_score) if loss_score is not None else None,
-            "roaming": round(roam_score),
+            # 측정 불가면 None — loss와 동일 규약(소비자가 분기 처리).
+            "roaming": round(roam_score) if roam_score is not None else None,
         },
         "summary": {
             "total_frames": total_frames,
@@ -1543,6 +1742,10 @@ def _structured_diagnosis(
             "loss_pct": loss_pct if ping_available else None,
             "roaming_total": len(roam_seqs),
             "roaming_slow": len(slow_roams),
+            # 느린 로밍 비율의 실제 분모와, 판정 불가 건수를 숨기지 않는다 —
+            # 이게 없으면 "총 N회 중 느린 M회"가 정상 비율처럼 읽힌다.
+            "roaming_measurable": len(measurable_roams),
+            "roaming_unmeasured": len(roam_seqs) - len(measurable_roams),
             "delay_zones": len(delay_zones),
             "anomaly_count": len(anom_events),
         },

@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 import config
 from app import app
+from tests.conftest import remove_analysis_files
 from routes import upload as upload_module
 
 client = TestClient(app)
@@ -241,7 +242,7 @@ class TestUploadAnalysisOutcomes:
     def test_run_analysis_success_writes_result(self):
         fake_id = "test_upload_success_zzz"
         result_path = config.ensure_data_dir() / f"{fake_id}.json"
-        result_path.unlink(missing_ok=True)
+        remove_analysis_files(result_path)
         fake_result = {
             "id": fake_id,
             "frame_count": 10,
@@ -262,7 +263,7 @@ class TestUploadAnalysisOutcomes:
             assert "job_id" in body
             assert result_path.exists()
         finally:
-            result_path.unlink(missing_ok=True)
+            remove_analysis_files(result_path)
 
 
 class TestPruneJobs:

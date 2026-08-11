@@ -63,7 +63,14 @@ def retry_severity(pct) -> str:
 
 
 def roam_gap_severity(gap_ms) -> str:
-    """로밍 gap(ms) → 'good'|'warn'|'danger'."""
+    """로밍 gap(ms) → 'good'|'warn'|'danger'|'unknown'.
+
+    gap_ms는 **None일 수 있다** — 그 로밍의 Auth 프레임이 캡처에 없어 시작 시각을
+    모르는 경우다(roaming.pair_roaming_sequences). 모르는 값을 'good'으로 낙관하면
+    실제로 느렸을 수도 있는 로밍이 정상으로 보고되므로 'unknown'으로 분리한다.
+    """
+    if gap_ms is None:
+        return "unknown"
     return _severity_high_bad(gap_ms, ROAM_GAP_WARN_MS, ROAM_GAP_DANGER_MS)
 
 

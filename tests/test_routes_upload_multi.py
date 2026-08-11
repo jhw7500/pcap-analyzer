@@ -66,8 +66,8 @@ def test_wireless_bad_magic_cleans_up_prior_tmps(_tshark):
     original_save = upload_module._save_pcap_upload
     captured = []
 
-    async def capturing_save(file):
-        tmp_name, err = await original_save(file)
+    async def capturing_save(file, budget=None):
+        tmp_name, err = await original_save(file, budget)
         if tmp_name:
             captured.append(tmp_name)
         return tmp_name, err

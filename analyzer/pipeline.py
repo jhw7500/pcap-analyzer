@@ -102,6 +102,81 @@ def _derived_ip_filter(frames, mac_filter: str) -> str:
     return ",".join(sorted(ips))
 
 
+def _correlate_station_logs(
+    station_logs: List[Dict[str, Any]],
+    frames: List[Any],
+    roles: Dict[str, Any],
+    roaming: Dict[str, Any],
+) -> Dict[str, Any]:
+    """STA 로그 세트를 파싱해 pcap 로밍 시퀀스에 붙이고 요약을 만든다.
+
+    `station_logs` 각 항목: ``{"name": 표시명, "files": {"wpa.log": 경로, ...}}``.
+
+    붙이기 실패(매칭 불가·오프셋 추정 실패)는 조용히 넘어가지 않고 warnings로
+    표면화한다 — 로그를 올렸는데 아무 데도 안 붙으면 사용자는 이유를 알아야 한다.
+    """
+    from .core.station_log import parse_station_logs
+    from .core.station_match import attach_station_to_sequences, bind_stations
+
+    sequences = roaming.get("sequences") or []
+    roam_by_sta: Dict[str, List[float]] = {}
+    for seq in sequences:
+        t = seq.get("auth_epoch")
+        if not isinstance(t, (int, float)):
+            t = seq.get("assoc_epoch")
+        if isinstance(t, (int, float)):
+            roam_by_sta.setdefault((seq.get("sta") or "").lower(), []).append(t)
+
+    stations = [
+        parse_station_logs(entry.get("files") or {}, name=entry.get("name") or "?")
+        for entry in station_logs
+    ]
+    bindings = bind_stations(stations, frames, roam_by_sta)
+
+    from .core.detector import mac_name
+
+    out_stations: List[Dict[str, Any]] = []
+    for st, b in zip(stations, bindings):
+        attached = attach_station_to_sequences(sequences, st, b)
+        ok_roams = [r for r in st.roams if not r.failed and r.total_ms is not None]
+        scans = [s.duration_ms for s in st.scans]
+        out_stations.append({
+            "name": st.name,
+            "sta_ip": st.sta_ip,
+            "sta_mac": b.sta_mac,
+            "sta_name": mac_name(b.sta_mac, roles) if b.sta_mac else "",
+            "match_method": b.method,
+            "offset_sec": round(b.offset_sec, 4) if b.offset_sec is not None else None,
+            "residual_mad_ms": round(b.residual_mad_ms, 1)
+            if b.residual_mad_ms != float("inf") else None,
+            "roam_total": len(st.roams),
+            "roam_failed": sum(1 for r in st.roams if r.failed),
+            "scan_count": len(st.scans),
+            "orphan_scan_completed": st.orphan_scan_completed,
+            "attached": attached,
+            # 요약 분포 — 개별 로밍의 세부 구간은 로그 스탬프 정밀도(±20ms대)를
+            # 넘어서므로 분포로만 낸다(그 근거는 station_match 참조).
+            "total_ms_p50": _p50([r.total_ms for r in ok_roams]),
+            "assoc_ms_p50": _p50(
+                [r.assoc_procedure_ms for r in ok_roams
+                 if r.assoc_procedure_ms is not None]
+            ),
+            "scan_ms_p50": _p50(scans),
+            "warnings": list(st.warnings) + list(b.warnings),
+        })
+    return {"stations": out_stations}
+
+
+def _p50(values: List[float]) -> Optional[float]:
+    """중앙값(소수 1자리). 빈 입력이면 None — 0으로 뭉개지 않는다."""
+    vals = sorted(v for v in values if isinstance(v, (int, float)))
+    if not vals:
+        return None
+    mid = len(vals) // 2
+    med = vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
+    return round(med, 1)
+
+
 def run_analysis(
     pcap_path: str,
     ssid: str = "",
@@ -112,6 +187,7 @@ def run_analysis(
     ip_filter: str = "",
     wireless_paths: Optional[List[str]] = None,
     wired_path: str = "",
+    station_logs: Optional[List[Dict[str, Any]]] = None,
     progress_cb: Optional[Callable[[str, int], None]] = None,
     cancel_event: Optional[Any] = None,
 ) -> Dict[str, Any]:
@@ -470,6 +546,17 @@ def run_analysis(
     )
     if _cancelled():
         return {"cancelled": True}
+
+    # STA(스테이션) 로그가 있으면 pcap 로밍에 상관시킨다. pcap은 전파에 나온
+    # 프레임만 보므로 로밍의 일부만 관측한다(실측: 전체 97ms 중 25ms) — 스캔·
+    # 로밍 판단·드라이버 상태 전이·키 설치는 STA 로그에만 남는다.
+    if station_logs:
+        _progress("STA 로그 상관 중...", 95)
+        structured["station_logs"] = _correlate_station_logs(
+            station_logs, frames, roles, structured["roaming"]
+        )
+        if _cancelled():
+            return {"cancelled": True}
 
     _progress("시각화: 초당 통계 생성 중...", 95)
     structured["per_second"] = _structured_per_second(frames)

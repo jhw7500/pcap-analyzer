@@ -5,6 +5,7 @@ import threading
 from fastapi.testclient import TestClient
 
 from app import app
+from tests.conftest import remove_analysis_files
 import config
 from routes.upload import _sanitize_job_id, _jobs, _jobs_lock
 
@@ -147,7 +148,7 @@ class TestAnalysisWithData:
             assert "Casefile 보기" in resp.text
             assert f"/analysis/{fake_id}/casefile" in resp.text
         finally:
-            path.unlink(missing_ok=True)
+            remove_analysis_files(path)
 
     def test_api_json(self):
         fake_id, path = _create_fake_analysis()
@@ -157,7 +158,7 @@ class TestAnalysisWithData:
             data = resp.json()
             assert data["frame_count"] == 100
         finally:
-            path.unlink(missing_ok=True)
+            remove_analysis_files(path)
 
     def test_api_text(self):
         fake_id, path = _create_fake_analysis()
@@ -166,7 +167,7 @@ class TestAnalysisWithData:
             assert resp.status_code == 200
             assert "100프레임" in resp.text
         finally:
-            path.unlink(missing_ok=True)
+            remove_analysis_files(path)
 
     def test_api_report_md(self):
         """마크다운 리포트 엔드포인트 — 정상 응답 + 다운로드 헤더."""
@@ -181,7 +182,7 @@ class TestAnalysisWithData:
             assert resp.text.startswith("# WLAN Pcap 종합 분석 리포트")
             assert "test.pcap" in resp.text
         finally:
-            path.unlink(missing_ok=True)
+            remove_analysis_files(path)
 
     def test_api_report_md_not_found(self):
         resp = client.get("/api/analysis/nonexistent_id_12345/report.md")
@@ -209,7 +210,7 @@ class TestAnalysisWithData:
             assert "ping" in data
             assert "layers" in data
         finally:
-            path.unlink(missing_ok=True)
+            remove_analysis_files(path)
 
     def test_api_casefile_text(self):
         fake_id, path = _create_fake_analysis()
@@ -218,7 +219,7 @@ class TestAnalysisWithData:
             assert resp.status_code == 200
             assert fake_id in resp.text
         finally:
-            path.unlink(missing_ok=True)
+            remove_analysis_files(path)
 
     def test_api_casefile_invalid_incident(self):
         fake_id, path = _create_fake_analysis()
@@ -229,7 +230,7 @@ class TestAnalysisWithData:
             assert resp.status_code == 404
             assert resp.json()["code"] == "INCIDENT_NOT_FOUND"
         finally:
-            path.unlink(missing_ok=True)
+            remove_analysis_files(path)
 
     def test_api_casefile_unavailable_without_timeout(self):
         fake_id, path = _create_fake_analysis(with_timeout=False)
@@ -238,7 +239,7 @@ class TestAnalysisWithData:
             assert resp.status_code == 422
             assert resp.json()["code"] == "CASEFILE_UNAVAILABLE"
         finally:
-            path.unlink(missing_ok=True)
+            remove_analysis_files(path)
 
     def test_index_lists_analyses(self):
         fake_id, path = _create_fake_analysis()
@@ -247,7 +248,7 @@ class TestAnalysisWithData:
             assert resp.status_code == 200
             assert "test.pcap" in resp.text
         finally:
-            path.unlink(missing_ok=True)
+            remove_analysis_files(path)
 
 
 class TestSettingsPost:
@@ -311,7 +312,7 @@ class TestReportPrintView:
             assert "WLAN Pcap 종합 분석 리포트" in resp.text
             assert "@page" in resp.text
         finally:
-            path.unlink(missing_ok=True)
+            remove_analysis_files(path)
 
     def test_print_view_not_found(self):
         resp = client.get("/analysis/nonexistent_id_12345/report")
@@ -337,7 +338,7 @@ class TestReportPdf:
             assert data["code"] == "PDF_EXPORT_UNAVAILABLE"
             assert data["hint"]
         finally:
-            path.unlink(missing_ok=True)
+            remove_analysis_files(path)
 
     def test_pdf_success(self, monkeypatch):
         import routes.analysis as analysis_routes
@@ -356,7 +357,7 @@ class TestReportPdf:
             assert f"report_{fake_id}.pdf" in disp
             assert resp.content.startswith(b"%PDF")
         finally:
-            path.unlink(missing_ok=True)
+            remove_analysis_files(path)
 
     def test_pdf_render_failed_500(self, monkeypatch):
         import routes.analysis as analysis_routes
@@ -374,7 +375,7 @@ class TestReportPdf:
             assert resp.status_code == 500
             assert resp.json()["code"] == "PDF_RENDER_FAILED"
         finally:
-            path.unlink(missing_ok=True)
+            remove_analysis_files(path)
 
     def test_pdf_not_found(self):
         resp = client.get("/api/analysis/nonexistent_id_12345/report.pdf")
@@ -400,7 +401,7 @@ class TestAnalysisPagePdfButton:
             assert "인쇄용 리포트" in resp.text
             assert f"/analysis/{fake_id}/report" in resp.text
         finally:
-            path.unlink(missing_ok=True)
+            remove_analysis_files(path)
 
     def test_pdf_button_hidden_when_unavailable(self, monkeypatch):
         import routes.analysis as analysis_routes
@@ -413,7 +414,7 @@ class TestAnalysisPagePdfButton:
             assert "PDF 다운로드" not in resp.text
             assert "인쇄용 리포트" in resp.text
         finally:
-            path.unlink(missing_ok=True)
+            remove_analysis_files(path)
 
 
 class TestJobIdSanitize:

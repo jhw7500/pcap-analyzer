@@ -128,6 +128,17 @@ def _flow_key_for_reply_swapped(f: Frame) -> Tuple[str, str, str]:
     return (f.ip_dst, f.ip_src, f.icmp_ident)
 
 
+#: full_list entry의 `status` 어휘 — **생성부와 파생부가 함께 쓰는 단일 정의**.
+#: pairs/losses는 결과 JSON에서 빠지고 이 status로 full_list에서 파생되므로
+#: (ping_pairs/ping_losses), 생성부가 리터럴을 쓰면 한쪽만 바뀌었을 때 조용히
+#: 빈 목록이 된다 — 예외도 로그도 없이 ping 근거가 통째로 사라진다.
+MATCHED_STATUS = "matched"
+LOSS_STATUS = "loss"
+LOSS_GAP_STATUS = "loss_gap"
+LOSS_STATUSES = (LOSS_STATUS, LOSS_GAP_STATUS)
+OBSERVED_STATUS = "observed"
+
+
 def _entry_from_frame(
     f: Frame,
     roles: Dict[str, Dict[str, Any]],
@@ -243,7 +254,7 @@ def build_ping_matches(
             if match is not None:
                 matched_req_ids.add(id(req))
                 matched_reply_ids.add(id(match))
-                entry = _entry_from_frame(req, roles, "matched", reply=match)
+                entry = _entry_from_frame(req, roles, MATCHED_STATUS, reply=match)
                 full_list.append(entry)
                 pairs.append(entry)
 
@@ -284,7 +295,7 @@ def build_ping_matches(
             # 확정 무선 손실 후보: req는 보였는데 같은 seq의 reply가 캡처 어디에도 없음
             for req in reqs:
                 if req.icmp_seq in reply_missing_set and id(req) not in matched_req_ids:
-                    entry = _entry_from_frame(req, roles, "loss")
+                    entry = _entry_from_frame(req, roles, LOSS_STATUS)
                     full_list.append(entry)
                     losses.append(entry)
 
@@ -358,7 +369,7 @@ def build_ping_matches(
     losses.sort(key=lambda x: x["epoch"])
     observations.sort(key=lambda x: x["epoch"])
 
-    # 캡처 모드 판정
+    # 캡처 모드 판정 (아래 헬퍼 MATCHED_STATUS/LOSS_STATUSES와 같은 status 어휘)
     if bidirectional_flows and len(bidirectional_flows) == len(request_flows):
         capture_mode = "bidirectional"
     elif bidirectional_flows:
@@ -417,7 +428,7 @@ def _observation_entry(
     direction: "request" (echo request만 캡처) | "reply" (echo reply만 캡처)
     """
     return {
-        "status": "observed",
+        "status": OBSERVED_STATUS,
         "direction": direction,
         "icmp_type": f.icmp_type,  # "8"=request, "0"=reply
         "seq": f.icmp_seq,
@@ -460,7 +471,7 @@ def _record_phantom_loss(
             anchor = f
     entry = {
         "seq": str(missing_seq),
-        "status": "loss_gap",
+        "status": LOSS_GAP_STATUS,
         "epoch": anchor.epoch,
         "rtt_ms": None,
         "req_num": None,
@@ -481,3 +492,43 @@ def _record_phantom_loss(
     }
     full_list.append(entry)
     losses.append(entry)
+
+
+
+def ping_pairs(ping: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """ping dict에서 매칭(RTT 측정) 목록.
+
+    `pairs` 키가 있으면 그대로, 없으면 `full_list`에서 파생한다.
+
+    build_ping_matches는 같은 entry **객체**를 full_list와 pairs/losses에 동시
+    append한 뒤 각각 epoch 기준 안정 정렬한다 — 즉 pairs/losses는 full_list의
+    status 필터 부분수열과 순서까지 동일하다(lockstep 불변식, PR #26,
+    tests/test_ping_matching.py::TestLossesFullListLockstep). 파이썬 메모리에선
+    참조 공유라 공짜지만 JSON으로는 full_list가 통째로 두 번 더 직렬화된다 —
+    2시간 캡처 실측에서 structured.ping 32.8MB의 절반이 이 중복이었다.
+
+    그래서 `_structured_ping`은 직렬화 결과에서 두 키를 빼고, 소비자는 이
+    헬퍼로 파생한다. 필터가 곧 원래 부분수열이라 lockstep은 **구성상** 성립한다.
+    구버전 result에는 두 키가 그대로 있으므로 그때는 저장된 값을 쓴다.
+    """
+    got = ping.get("pairs")
+    if got is not None:
+        return got
+    return [
+        e for e in (ping.get("full_list") or [])
+        if isinstance(e, dict) and e.get("status") == MATCHED_STATUS
+    ]
+
+
+def ping_losses(ping: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """ping dict에서 손실 목록(확정 loss + seq gap 추정 loss_gap).
+
+    파생 규칙과 하위호환 근거는 `ping_pairs` docstring 참조.
+    """
+    got = ping.get("losses")
+    if got is not None:
+        return got
+    return [
+        e for e in (ping.get("full_list") or [])
+        if isinstance(e, dict) and e.get("status") in LOSS_STATUSES
+    ]

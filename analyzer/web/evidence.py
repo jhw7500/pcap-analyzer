@@ -11,6 +11,7 @@ frame.number(`frame_refs`)와 시간 구간(`time_window` = {start_epoch, end_ep
 블록의 frames도 합집합 후 상한(`DEBUG_FRAME_CAP`)을 둔다. 시계열은
 timeline_series의 project_* 함수로 공유 시간축 위에 다운샘플해 bounded하게 유지.
 """
+from bisect import bisect_left
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..core.models import Frame
@@ -236,10 +237,18 @@ def cliff_evidence(
     ]
     if not cliff_epochs:
         return [], None
+    # cliff_epochs를 정렬해 프레임마다 **가장 가까운 cliff 2개만** bisect로 본다.
+    # 이전 구현은 프레임 × cliff 전수 비교(any())라 O(N×K)였다 — 2시간·143만
+    # 프레임 실측에서 진단/디버그 블록 69초의 주 원인이었다. 정렬돼 있으면 좌우
+    # 이웃이 pad_sec 밖일 때 나머지도 전부 밖이라 결과는 완전히 동일하다.
+    sorted_eps = sorted(cliff_epochs)
     nums: List[int] = []
     for f in sta_tx:
-        if any(abs(f.epoch - ep) <= pad_sec for ep in cliff_epochs):
-            nums.append(f.number)
+        i = bisect_left(sorted_eps, f.epoch)
+        for j in (i - 1, i):
+            if 0 <= j < len(sorted_eps) and abs(f.epoch - sorted_eps[j]) <= pad_sec:
+                nums.append(f.number)
+                break
     if not nums:
         # fallback: 가장 큰 drop을 가진 cliff 근처의 STA 최저 RSSI 프레임.
         worst = max(

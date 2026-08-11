@@ -256,14 +256,20 @@
     </div>
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
         <h3 class="text-sm font-semibold text-gray-400 mb-2">로밍 이벤트 상세</h3>
+        <div id="station-log-card" class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4 hidden">
+            <h3 class="text-sm font-semibold text-gray-300 mb-2">STA 로그 상관</h3>
+            <div id="station-log-body" class="text-xs text-gray-300"></div>
+        </div>
         <table class="w-full text-sm" id="roaming-table">
             <thead class="text-gray-400 border-b border-gray-700">
                 <tr><th class="text-left py-2">#</th>
                     <th class="text-left py-2">시각 (Auth)</th>
                     <th class="text-left py-2">STA</th>
                     <th class="text-left py-2">AP (이전→이후)</th>
-                    <th class="text-right py-2">Gap(ms)</th>
-                    <th class="text-right py-2">4-way(ms)</th>
+                    <th class="text-right py-2" title="Auth 요청 → Reassoc 요청 구간만">Gap(ms)</th>
+                    <th class="text-right py-2" title="EAPOL 4-way 핸드셰이크 소요">4-way(ms)</th>
+                    <th class="text-right py-2" title="Auth 요청 → 4-way 완료 (pcap이 보는 전부)">pcap(ms)</th>
+                    <th class="text-right py-2" title="STA 로그 기준 ROAM 명령 → CONNECTED (전파 밖 포함)">STA 체감(ms)</th>
                     <th class="text-left py-2">Type</th></tr>
             </thead>
             <tbody></tbody>
@@ -338,9 +344,18 @@
                     <input type="checkbox" id="ping-filter-retry" class="accent-blue-500"> Retry만
                 </label>
                 <span id="ping-full-count" class="text-gray-500 tabular-nums"></span>
+                <!-- 페이지 이동 — 2시간 캡처는 전수 목록이 4만 행을 넘어 한 번에
+                     그리면 DOM이 60만 노드가 된다(실측). 페이지 단위로만 그린다. -->
+                <span id="ping-pager" class="flex items-center gap-1 ml-auto hidden">
+                    <button type="button" id="ping-page-prev"
+                            class="bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed rounded px-2 py-1">◀</button>
+                    <span id="ping-page-label" class="text-gray-400 tabular-nums px-1"></span>
+                    <button type="button" id="ping-page-next"
+                            class="bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed rounded px-2 py-1">▶</button>
+                </span>
             </div>
         </div>
-        <div class="overflow-x-auto max-h-[600px] overflow-y-auto">
+        <div class="overflow-x-auto max-h-[600px] overflow-y-auto" id="ping-full-scroll">
             <table class="w-full text-xs font-mono" id="ping-full-table">
                 <thead class="text-gray-400 border-b border-gray-700 sticky top-0 bg-gray-800" id="ping-full-thead">
                     <tr>
@@ -383,8 +398,15 @@
                     </select>
                 </label>
                 <span id="ping-obs-filter-count" class="text-gray-500 tabular-nums"></span>
+                <span id="ping-obs-pager" class="flex items-center gap-1 ml-auto hidden">
+                    <button type="button" id="ping-obs-page-prev"
+                            class="bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed rounded px-2 py-1">◀</button>
+                    <span id="ping-obs-page-label" class="text-gray-400 tabular-nums px-1"></span>
+                    <button type="button" id="ping-obs-page-next"
+                            class="bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed rounded px-2 py-1">▶</button>
+                </span>
             </div>
-            <div class="overflow-x-auto max-h-[600px] overflow-y-auto">
+            <div class="overflow-x-auto max-h-[600px] overflow-y-auto" id="ping-obs-scroll">
                 <table class="w-full text-xs font-mono" id="ping-observations-table">
                     <thead class="text-gray-400 border-b border-gray-700 sticky top-0 bg-gray-800">
                         <tr>
