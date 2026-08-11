@@ -309,7 +309,9 @@ def _build_diagnosis_section(diagnosis: Any) -> list:
     if isinstance(summary, dict) and summary:
         summary_parts = []
         for k in (
-            "total_frames", "retry_pct", "loss_pct",
+            # loss_pct_used/loss_basis를 함께 넘긴다 — 유선 GT가 있으면 판정은
+            # 그 값으로 났으므로, AI가 무선 관측값만 보고 다른 결론을 내면 안 된다.
+            "total_frames", "retry_pct", "loss_pct", "loss_pct_used", "loss_basis",
             "roaming_total", "roaming_slow", "delay_zones", "anomaly_count",
         ):
             if summary.get(k) is not None:

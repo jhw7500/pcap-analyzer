@@ -1174,6 +1174,36 @@ def _sender_sta_macs_by_target(frames, sender, ap_macs=None, targets=None):
     return dict(by_target)
 
 
+#: 손실 판정의 근거 — 어느 관측을 썼는지. summary/report/AI가 함께 읽는다.
+LOSS_BASIS_WIRED = "wired_gt"          # 유선 확정(1차)
+LOSS_BASIS_WIRELESS = "wireless_observed"   # 무선 관측(유선 없을 때만)
+LOSS_BASIS_LABELS = {
+    LOSS_BASIS_WIRED: "유선 확정",
+    LOSS_BASIS_WIRELESS: "무선 관측",
+}
+
+
+def _loss_for_judgment(ping, wireless_loss_pct, ping_available):
+    """손실 판정에 쓸 `(loss_pct, basis)`. 판정 불가면 `(None, None)`.
+
+    유선 ground truth가 **쓸 수 있는 상태**면 그 값을 쓴다 — `error`가 없고
+    모집단(`total`)이 1건 이상이어야 한다. `total == 0`이면 시간창·IP 필터를
+    거친 뒤 남은 교환이 없다는 뜻이라 손실률 0.0이 "손실 없음"을 의미하지 않는다
+    (판정 근거가 없는 0이다) → 무선 관측으로 폴백한다.
+
+    구버전 result에는 `ground_truth` 자체가 없으므로 자동으로 무선 경로를 탄다.
+    """
+    gt = ping.get("ground_truth")
+    if isinstance(gt, dict) and "error" not in gt:
+        total = gt.get("total")
+        gt_pct = gt.get("loss_pct")
+        if isinstance(total, int) and total > 0 and isinstance(gt_pct, (int, float)):
+            return gt_pct, LOSS_BASIS_WIRED
+    if ping_available:
+        return wireless_loss_pct, LOSS_BASIS_WIRELESS
+    return None, None
+
+
 def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None, signal_stas=None,
                                    index=None, ap_macs=None):
     """유선 확정 손실 streak별 무선 대조 이슈 후보. 근거 프레임이 없으면 후보 제외.
@@ -1380,7 +1410,20 @@ def _structured_diagnosis(
     else:
         slow_ratio = len(slow_roams) / len(measurable_roams) * 100
         roam_score = max(0, 100 - slow_ratio * 2)
-    loss_score = max(0, 100 - loss_pct * 10) if ping_available else None
+
+    # 손실 판정은 **유선 ground truth가 있으면 그것을 쓴다**(프로젝트 대원칙:
+    # 판정 유선 1차·해석 무선 보조). 무선 관측 손실률은 모니터가 놓친 프레임까지
+    # 손실로 세므로 실제보다 크다 — 실측 2시간 캡처에서 유선 0.38% vs 무선 8.24%로
+    # **20배** 차이였고, 가중치가 가장 큰 축(0.4)이라 건강도가 통째로 달라진다.
+    # 무선 값으로 판정하면 "모니터가 나쁠수록 네트워크가 나빠 보이는" 역전이다
+    # (측정 불가를 정상으로 세던 로밍 분모 오염과 같은 종류의 오류).
+    #
+    # 무선 관측값도 버리지 않는다 — summary에 그대로 남겨 두 값의 차이가 곧
+    # 캡처 커버리지를 말해준다. 어느 쪽으로 판정했는지는 `loss_basis`로 드러낸다.
+    loss_pct_used, loss_basis = _loss_for_judgment(ping, loss_pct, ping_available)
+    loss_score = (
+        max(0, 100 - loss_pct_used * 10) if loss_pct_used is not None else None
+    )
 
     # 컴포넌트 가중치 단일 정의 — 측정 불가(None) 컴포넌트는 제외하고
     # 가용 가중치 합으로 정규화한다. 컴포넌트 추가/가중치 변경 시 이 dict만 수정.
@@ -1633,13 +1676,20 @@ def _structured_diagnosis(
             },
             refs, window, signal_type="legacy_heavy",
         )
-    if loss_pct > LOSS_DANGER_PCT:
+    # 건강도와 **같은 값**으로 판정한다 — 점수는 유선 확정으로 계산해 놓고 이슈만
+    # 무선 관측으로 올리면, 리포트가 "손실 96점"과 "Ping Loss 8.24% high"를 나란히
+    # 말하는 자기모순이 된다. 근거 프레임은 무선에서만 소싱할 수 있으므로(유선
+    # frame.number를 섞으면 프레임 테이블 조회가 깨진다) 무선 손실 근거가 없으면
+    # `_add_net_issue`가 이 이슈를 드롭한다 — 유선 확정 손실의 상세는
+    # `_ground_truth_issue_candidates`가 streak별로 따로 낸다.
+    if loss_pct_used is not None and loss_pct_used > LOSS_DANGER_PCT:
         refs, window = ev.ping_loss_evidence(ping_loss_items)
+        basis_label = LOSS_BASIS_LABELS.get(loss_basis, "")
         _add_net_issue(
             {
                 "severity": "high",
                 "category": "Ping",
-                "msg": f"Ping Loss {loss_pct}%",
+                "msg": f"Ping Loss {loss_pct_used}%" + (f" ({basis_label})" if basis_label else ""),
                 "action": "네트워크 안정성 점검, 로밍 구간 확인",
             },
             refs, window, signal_type="high_loss",
@@ -1739,7 +1789,12 @@ def _structured_diagnosis(
         "summary": {
             "total_frames": total_frames,
             "retry_pct": retry_pct,
+            # 무선 관측값 — 기존 키·의미 그대로 유지(구버전 소비자 호환).
             "loss_pct": loss_pct if ping_available else None,
+            # 건강도·이슈가 **실제로 판정에 쓴** 값과 그 근거. 유선 GT가 있으면
+            # loss_pct와 다르며, 두 값의 차이가 곧 캡처 커버리지를 말해준다.
+            "loss_pct_used": loss_pct_used,
+            "loss_basis": loss_basis,
             "roaming_total": len(roam_seqs),
             "roaming_slow": len(slow_roams),
             # 느린 로밍 비율의 실제 분모와, 판정 불가 건수를 숨기지 않는다 —

@@ -327,3 +327,44 @@ class TestIntraBucketCliff:
         cliffs = analyze_signal_cliffs(
             {"stas": {"STA1": {"rssi_timeline": timeline}}})["STA1"]["cliffs"]
         assert cliffs and cliffs[0]["drop_db"] == 16
+
+
+class TestReportLossBasis:
+    """리포트 요약이 **판정에 쓴 값**과 그 근거를 드러내야 한다.
+
+    유선 확정과 무선 관측이 다를 때 하나만 적으면 독자가 어느 쪽을 본 건지 모른다 —
+    실측에서 유선 0.38% vs 무선 8.24%로 20배 차이가 난다.
+    """
+
+    def _section(self, summary):
+        from analyzer.web.report import _health_section
+
+        diag = {
+            "health": {"score": 90, "grade": "양호"},
+            "component_scores": {"retry": 90, "loss": 96, "roaming": 100},
+            "summary": summary,
+            "issues": [],
+            "sta_diags": [],
+        }
+        return "\n".join(_health_section(diag))
+
+    def test_wired_basis_shows_both_numbers(self):
+        out = self._section({
+            "retry_pct": 3, "loss_pct": 8.24,
+            "loss_pct_used": 0.38, "loss_basis": "wired_gt",
+        })
+        assert "Ping Loss 0.38% (유선 확정)" in out
+        assert "무선 관측 8.24%" in out, "커버리지 차이를 감추면 안 된다"
+
+    def test_wireless_basis_labeled(self):
+        out = self._section({
+            "retry_pct": 3, "loss_pct": 8.24,
+            "loss_pct_used": 8.24, "loss_basis": "wireless_observed",
+        })
+        assert "Ping Loss 8.24% (무선 관측)" in out
+        assert "무선 관측 8.24%" not in out.replace("(무선 관측)", "")
+
+    def test_legacy_result_without_basis(self):
+        """구버전 result에는 loss_pct_used/loss_basis가 없다 — 기존처럼 찍혀야 한다."""
+        out = self._section({"retry_pct": 3, "loss_pct": 8.24})
+        assert "Ping Loss 8.24%" in out

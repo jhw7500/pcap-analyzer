@@ -1142,3 +1142,87 @@ class TestCasefileBuilder:
 
         with pytest.raises(ValueError):
             build_casefile(result)
+
+
+class TestLossJudgedByWiredGroundTruth:
+    """손실 판정은 **유선 ground truth 1차**다.
+
+    무선 관측 손실률은 모니터가 놓친 프레임까지 손실로 세므로 실제보다 크다 —
+    실측 2시간 캡처에서 유선 0.38% vs 무선 8.24%로 **20배** 차이였고, 가중치가
+    가장 큰 축(0.4)이라 건강도가 통째로 달라진다. 무선으로 판정하면 "모니터가
+    나쁠수록 네트워크가 나빠 보이는" 역전이다.
+    """
+
+    def _structured(self, *, wireless_loss=8.24, gt=None):
+        ping = {
+            "stats": {"loss_pct": wireless_loss, "req_total_raw": 100},
+            "full_list": [{"status": "loss"}] * 8 + [{"status": "matched"}] * 92,
+        }
+        if gt is not None:
+            ping["ground_truth"] = gt
+        return {
+            "overview": {"total_frames": 1000, "retry_pct": 0},
+            "ping": ping,
+            "roaming": {"sequences": []},
+            "signal": {"stas": {}},
+            "device_stats": {},
+            "delay_zones": {"delay_zones": []},
+            "anomaly_frames": {"anomalies": []},
+        }
+
+    def test_wired_gt_wins_over_wireless_observation(self):
+        d = _structured_diagnosis(self._structured(
+            gt={"total": 41667, "ok": 41509, "ng": 158, "loss_pct": 0.38}))
+        assert d["summary"]["loss_basis"] == "wired_gt"
+        assert d["summary"]["loss_pct_used"] == 0.38
+        # 무선 관측값은 그대로 남는다 — 두 값의 차이가 캡처 커버리지 정보다.
+        assert d["summary"]["loss_pct"] == 8.24
+        # 100 - 0.38*10 = 96.2 (무선이면 100 - 82.4 = 17.6)
+        assert d["component_scores"]["loss"] == 96
+
+    def test_without_gt_uses_wireless(self):
+        """구버전 result(ground_truth 키 없음)는 기존 동작 그대로."""
+        d = _structured_diagnosis(self._structured())
+        assert d["summary"]["loss_basis"] == "wireless_observed"
+        assert d["summary"]["loss_pct_used"] == 8.24
+        assert d["component_scores"]["loss"] == 18       # 100 - 82.4
+
+    def test_empty_gt_population_falls_back(self):
+        """total==0이면 손실률 0.0은 '손실 없음'이 아니라 **근거 없는 0**이다.
+
+        시간창·IP 필터를 거친 뒤 남은 교환이 없다는 뜻이라, 그걸로 만점을 주면
+        "필터를 좁힐수록 건강해지는" 역전이 된다.
+        """
+        d = _structured_diagnosis(self._structured(
+            gt={"total": 0, "ok": 0, "ng": 0, "loss_pct": 0.0}))
+        assert d["summary"]["loss_basis"] == "wireless_observed"
+        assert d["component_scores"]["loss"] == 18
+
+    def test_failed_gt_falls_back(self):
+        d = _structured_diagnosis(self._structured(
+            gt={"error": "tshark 를 찾을 수 없다", "warnings": []}))
+        assert d["summary"]["loss_basis"] == "wireless_observed"
+
+    def test_gt_reports_loss_that_wireless_missed(self):
+        """반대 방향도 성립해야 한다 — 유선이 손실을 보는데 무선이 못 본 경우."""
+        d = _structured_diagnosis(self._structured(
+            wireless_loss=0.0, gt={"total": 1000, "ok": 880, "ng": 120, "loss_pct": 12.0}))
+        assert d["summary"]["loss_basis"] == "wired_gt"
+        assert d["component_scores"]["loss"] == 0        # 100 - 120 → 0으로 클램프
+
+    def test_no_ping_at_all_stays_unmeasurable(self):
+        """ICMP도 GT도 없으면 여전히 판정 불가(None) — 만점 부풀림 금지."""
+        structured = self._structured(wireless_loss=0)
+        structured["ping"] = {"stats": {"loss_pct": 0}, "full_list": []}
+        d = _structured_diagnosis(structured)
+        assert d["summary"]["loss_basis"] is None
+        assert d["summary"]["loss_pct_used"] is None
+        assert d["component_scores"]["loss"] is None
+
+    def test_issue_and_score_agree(self):
+        """점수는 유선으로, 이슈는 무선으로 내면 리포트가 자기모순이 된다."""
+        d = _structured_diagnosis(self._structured(
+            gt={"total": 41667, "ok": 41509, "ng": 158, "loss_pct": 0.38}))
+        loss_issues = [i for i in d["issues"] if i.get("category") == "Ping"]
+        # 유선 확정 0.38%는 임계(5%) 미만이라 이슈가 뜨면 안 된다.
+        assert not [i for i in loss_issues if "Loss" in i.get("msg", "")], loss_issues
