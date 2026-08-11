@@ -463,6 +463,13 @@ def extract_icmp_frames(
     그 사실을 알 길이 없어, 잘린/손상 pcap 이 아무 경고 없이 "성공한 ground
     truth" 로 게시된다(손실률이 실제보다 낮게 나온다). stderr 출력은 그대로
     유지되므로 CLI 동작은 불변이다.
+
+    **계약: `warnings_out` 에 담기는 것은 부분 실패 경고뿐이다.** 정상 추출이면
+    비어 있다. `wired_ping.build_ground_truth` 가 이 리스트의 **비어 있음 여부만으로**
+    `extraction_partial`(= 손실률 과소 계상 가능 → 1차 판정에 쓸 수 없음)을 정하므로,
+    정보성 경고를 여기에 섞으면 멀쩡한 유선 GT 가 조용히 판정에서 빠진다. 다른
+    종류의 경고가 필요하면 **별도 채널**을 쓸 것.
+    회귀 고정: `tests/test_wired_ping.py::TestWarningsOutContract`.
     """
     if cancel_event is not None and cancel_event.is_set():
         # 이미 취소된 뒤라면 자식을 띄우지도 않는다.

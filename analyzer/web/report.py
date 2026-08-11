@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from ..core.models import SUBTYPE_NAMES
+# 손실 판정 근거 라벨은 structured가 단일 정의 — 리포트·화면이 같은 어휘를 쓴다.
+from .structured import LOSS_BASIS_LABELS, LOSS_BASIS_WIRED
 
 # 결합 신호 type → 한국어 라벨. JS SIGNAL_TYPE_LABEL과 의도적으로 동기화 —
 # 새 type 추가 시 charts.js의 같은 맵도 갱신.
@@ -430,8 +432,22 @@ def _health_section(diagnosis: Dict[str, Any]) -> List[str]:
         s_parts = []
         if summary.get("retry_pct") is not None:
             s_parts.append(f"전체 Retry {summary['retry_pct']}%")
-        if summary.get("loss_pct") is not None:
-            s_parts.append(f"Ping Loss {summary['loss_pct']}%")
+        # 판정에 쓴 값을 먼저 쓰고, 유선 확정이면 무선 관측값을 괄호로 병기한다 —
+        # 두 값이 다른 건 캡처 커버리지 정보라 감추지 않는다(실측 유선 0.38% vs
+        # 무선 8.24%). 구버전 result에는 loss_pct_used가 없어 기존 키로 폴백한다.
+        used = summary.get("loss_pct_used")
+        basis = summary.get("loss_basis")
+        observed = summary.get("loss_pct")
+        if used is None and basis is None:
+            used = observed          # 구버전 result
+        if used is not None:
+            # 키 출처: structured.LOSS_BASIS_WIRED / LOSS_BASIS_WIRELESS.
+            label = LOSS_BASIS_LABELS.get(basis, "")
+            part = f"Ping Loss {used}%" + (f" ({label})" if label else "")
+            if (basis == LOSS_BASIS_WIRED
+                    and isinstance(observed, (int, float)) and observed != used):
+                part += f" / 무선 관측 {observed}%"
+            s_parts.append(part)
         rt, rs = summary.get("roaming_total"), summary.get("roaming_slow")
         if rt is not None:
             s_parts.append(

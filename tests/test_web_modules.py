@@ -327,3 +327,77 @@ class TestIntraBucketCliff:
         cliffs = analyze_signal_cliffs(
             {"stas": {"STA1": {"rssi_timeline": timeline}}})["STA1"]["cliffs"]
         assert cliffs and cliffs[0]["drop_db"] == 16
+
+
+class TestReportLossBasis:
+    """리포트 요약이 **판정에 쓴 값**과 그 근거를 드러내야 한다.
+
+    유선 확정과 무선 관측이 다를 때 하나만 적으면 독자가 어느 쪽을 본 건지 모른다 —
+    실측에서 유선 0.38% vs 무선 8.24%로 20배 차이가 난다.
+    """
+
+    def _section(self, summary):
+        from analyzer.web.report import _health_section
+
+        diag = {
+            "health": {"score": 90, "grade": "양호"},
+            "component_scores": {"retry": 90, "loss": 96, "roaming": 100},
+            "summary": summary,
+            "issues": [],
+            "sta_diags": [],
+        }
+        return "\n".join(_health_section(diag))
+
+    def test_wired_basis_shows_both_numbers(self):
+        out = self._section({
+            "retry_pct": 3, "loss_pct": 8.24,
+            "loss_pct_used": 0.38, "loss_basis": "wired_gt",
+        })
+        assert "Ping Loss 0.38% (유선 확정)" in out
+        assert "무선 관측 8.24%" in out, "커버리지 차이를 감추면 안 된다"
+
+    def test_wireless_basis_labeled(self):
+        out = self._section({
+            "retry_pct": 3, "loss_pct": 8.24,
+            "loss_pct_used": 8.24, "loss_basis": "wireless_observed",
+        })
+        assert "Ping Loss 8.24% (무선 관측)" in out
+        assert "무선 관측 8.24%" not in out.replace("(무선 관측)", "")
+
+    def test_legacy_result_without_basis(self):
+        """구버전 result에는 loss_pct_used/loss_basis가 없다 — 기존처럼 찍혀야 한다."""
+        out = self._section({"retry_pct": 3, "loss_pct": 8.24})
+        assert "Ping Loss 8.24%" in out
+
+
+class TestLossBasisVocabularyParity:
+    """판정 근거 어휘가 Python·JS 양쪽에서 갈라지지 않는지 고정한다.
+
+    JS는 Python 상수를 import할 수 없어 `charts.js`가 같은 키·라벨을 손으로 들고
+    있다. 주석으로 안내는 했지만 강제 수단이 없으면 라벨을 한쪽만 고쳤을 때
+    화면만 달라지는 **무음 회귀**가 된다 — 그 순간을 이 테스트가 잡는다.
+    """
+
+    def _js_map(self):
+        import re
+        from pathlib import Path
+
+        src = Path("static/js/charts.js").read_text(encoding="utf-8")
+        m = re.search(r"const LOSS_BASIS_LABEL = \{([^}]*)\}", src)
+        assert m, "charts.js에서 LOSS_BASIS_LABEL 정의를 찾지 못했다"
+        return dict(re.findall(r"(\w+)\s*:\s*'([^']*)'", m.group(1)))
+
+    def test_keys_and_labels_match_python(self):
+        from analyzer.web.structured import LOSS_BASIS_LABELS
+
+        assert self._js_map() == LOSS_BASIS_LABELS
+
+    def test_report_uses_the_same_labels(self):
+        """report.py도 같은 정의를 쓰는지 — 자체 dict로 갈라진 적이 있다."""
+        import inspect
+
+        from analyzer.web import report
+
+        src = inspect.getsource(report._health_section)
+        assert "LOSS_BASIS_LABELS" in src
+        assert '"유선 확정"' not in src and '"무선 관측"' not in src

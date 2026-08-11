@@ -1999,9 +1999,26 @@
     const barsEl = document.getElementById('health-bars');
     if (barsEl) {
         const sm = diag.summary || {};
+        /* 판정에 쓴 값(loss_pct_used)을 보여준다 — 유선 GT가 있으면 무선 관측과
+           다르고, 점수는 그 값으로 계산됐다. 두 값이 다르면 무선 관측도 함께 적어
+           캡처 커버리지 차이를 감추지 않는다. 구버전 result는 loss_pct로 폴백.
+           `|| 0`을 쓰지 않는 이유: 0%가 실제 값일 수 있어 null과 구분해야 한다. */
+        /* 키는 structured.LOSS_BASIS_WIRED / LOSS_BASIS_WIRELESS와 같아야 한다
+           (analyzer/web/structured.py). 바꾸면 여기와 report.py도 함께 고칠 것. */
+        const LOSS_BASIS_LABEL = { wired_gt: '유선 확정', wireless_observed: '무선 관측' };
+        const lossUsed = (typeof sm.loss_pct_used === 'number') ? sm.loss_pct_used
+            : (typeof sm.loss_pct === 'number' ? sm.loss_pct : null);
+        let lossText = (lossUsed == null) ? '측정불가' : `${lossUsed}%`;
+        if (LOSS_BASIS_LABEL[sm.loss_basis]) {
+            lossText += ` (${LOSS_BASIS_LABEL[sm.loss_basis]})`;
+        }
+        if (sm.loss_basis === 'wired_gt' && typeof sm.loss_pct === 'number'
+            && sm.loss_pct !== lossUsed) {
+            lossText += ` · 무선 관측 ${sm.loss_pct}%`;
+        }
         const lossSub = (compScores.loss == null)
             ? ''
-            : `<p class="text-xs text-gray-500 ml-24">Loss ${sm.loss_pct || 0}%</p>`;
+            : `<p class="text-xs text-gray-500 ml-24">Loss ${escapeHtml(lossText)}</p>`;
         barsEl.innerHTML = [
             scoreBar('Retry', compScores.retry ?? 0, '\u{1F504}') + `<p class="text-xs text-gray-500 ml-24">전체 ${sm.retry_pct || 0}%</p>`,
             scoreBar('Ping Loss', compScores.loss ?? null, '\u{1F4E1}') + lossSub,

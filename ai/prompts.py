@@ -10,6 +10,7 @@
 from typing import Any
 
 from analyzer.core.ping_matching import ping_losses, ping_pairs
+from analyzer.web.structured import LOSS_BASIS_WIRED
 from analyzer.core.thresholds import ROAM_GAP_DANGER_MS
 
 
@@ -309,13 +310,32 @@ def _build_diagnosis_section(diagnosis: Any) -> list:
     if isinstance(summary, dict) and summary:
         summary_parts = []
         for k in (
-            "total_frames", "retry_pct", "loss_pct",
+            # loss_pct_used/loss_basis를 함께 넘긴다 — 유선 GT가 있으면 판정은
+            # 그 값으로 났으므로, AI가 무선 관측값만 보고 다른 결론을 내면 안 된다.
+            "total_frames", "retry_pct", "loss_pct", "loss_pct_used", "loss_basis",
             "roaming_total", "roaming_slow", "delay_zones", "anomaly_count",
         ):
             if summary.get(k) is not None:
                 summary_parts.append(f"{k}={summary[k]}")
         if summary_parts:
             lines.append(f"- 핵심 지표: {', '.join(summary_parts)}")
+        # 두 손실률이 함께 실리면 AI가 어느 쪽을 근거로 삼아야 하는지 명시한다 —
+        # 값이 20배까지 벌어질 수 있어(실측 유선 0.38% vs 무선 8.24%) 안내 없이는
+        # 모순된 진단이 나온다.
+        if summary.get("loss_basis") == LOSS_BASIS_WIRED:
+            lines.append(
+                "  · 손실 판정 근거는 loss_pct_used(유선 확정)다. loss_pct(무선 관측)와의"
+                " 차이는 네트워크 문제가 아니라 **모니터가 못 본 프레임**의 양이다 —"
+                " 무선 값으로 손실을 논하지 말 것."
+            )
+        elif summary.get("loss_pct") is not None:
+            # 구버전 result에는 loss_basis 자체가 없다. 안내가 없으면 무선 관측값을
+            # 확정 손실로 읽어 "위험"으로 오판한다 — 실측에서 무선은 유선보다 20배
+            # 높게 나왔다. 유선 확정이 없을 때는 상한으로만 읽도록 명시한다.
+            lines.append(
+                "  · loss_pct는 **무선 관측**이라 모니터가 놓친 프레임까지 손실로 센다"
+                " — 유선 확정치가 없으므로 실제 손실의 **상한**으로만 읽을 것."
+            )
     issues = diagnosis.get("issues") or diagnosis.get("findings") or []
     if issues:
         lines.append("")
