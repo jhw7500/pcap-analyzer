@@ -1235,7 +1235,10 @@ def _loss_for_judgment(ping, wireless_loss_pct, ping_available):
 #: 나쁘다는 뜻이 아니라 "캡처만으로는 로밍 체감을 말할 수 없다"는 뜻이다 —
 #: 그래서 severity가 아니라 category로 구분하고 건강도에는 넣지 않는다.
 ROAM_COVERAGE_MIN_PAIRS = 3     # 대조 표본이 이 미만이면 커버리지를 주장하지 않는다
-ROAM_COVERAGE_LOW_PCT = 50.0    # 이 값 **미만**이면 경고(경계값은 낮은 단계에 포함)
+#: 경고 조건은 `< ROAM_COVERAGE_LOW_PCT` — **경계값 50.0%는 경고를 내지 않는다**
+#: (`test_threshold_boundary_is_not_low`가 고정). thresholds.py의 "경계값은 낮은
+#: 단계에 포함" 규약과 같은 방향이다.
+ROAM_COVERAGE_LOW_PCT = 50.0
 
 
 def _median_ms(values) -> Optional[float]:
@@ -1245,6 +1248,10 @@ def _median_ms(values) -> Optional[float]:
     같은 화면에 나란히 놓이는 `station_logs.total_ms_p50`이 그 함수 산출이라,
     정의가 갈라지면 두 수치가 미묘하게 어긋난다. pipeline은 web.structured를
     import하므로 역방향 재사용은 순환이라 표준 라이브러리로 정의를 맞춘다.
+
+    타입 필터는 **방어적 가드**다 — 현재 유일한 호출부(`_roam_coverage`)가 이미
+    float만 담아 넘기므로 실행되지 않는다. 다른 호출부가 생겼을 때 `median`이
+    문자열에 TypeError를 내거나 bool을 1ms로 세는 것을 막으려 남겨 둔다.
     """
     vals = [
         float(v) for v in values

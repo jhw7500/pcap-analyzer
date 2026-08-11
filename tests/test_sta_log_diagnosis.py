@@ -304,6 +304,137 @@ class TestReportRendering:
         assert "## STA 로그" not in self._report([_seq(25.0, None)])
 
 
+class TestReviewRound1Fixes:
+    """PR #31 라운드 1 지적 반영분 — 전부 블로킹 미만이었으나 사실로 확인된 것들."""
+
+    def _station(self, **kw):
+        base = {
+            "name": "1호기", "sta_ip": "192.168.0.21", "sta_name": "STA2",
+            "match_method": "ip", "attached": 281, "roam_total": 306,
+            "total_ms_p50": 96.5, "scan_ms_p50": 61.7, "residual_mad_ms": 20.7,
+            "warnings": [],
+        }
+        base.update(kw)
+        return base
+
+    def test_failed_binding_claims_no_method(self):
+        """[Codex P2] 매칭 실패에 방법 라벨을 붙이면 하지도 않은 근거를 주장한다.
+
+        `bind_stations`는 실패 시 `match_method=""`를 준다(`station_match.py:163`).
+        이걸 "시각 상관"으로 렌더하면 AI가 시각 상관으로 매칭됐다고 믿는다.
+        """
+        from ai.prompts import _build_station_log_section
+
+        out = "\n".join(_build_station_log_section({"stations": [
+            self._station(sta_name="", match_method="", total_ms_p50=None),
+        ]}))
+        assert "매칭 실패" in out
+        assert "시각 상관" not in out
+
+    def test_time_binding_is_labeled_time(self):
+        """성공한 시각 상관 매칭은 그대로 "시각 상관"이어야 한다(과잉 수정 방지)."""
+        from ai.prompts import _build_station_log_section
+
+        out = "\n".join(_build_station_log_section({"stations": [
+            self._station(match_method="time"),
+        ]}))
+        assert "시각 상관" in out and "매칭 실패" not in out
+
+    def test_unknown_method_claims_nothing(self):
+        """모르는 method 값은 방법을 주장하지 않는다 — 라벨 맵에 없으면 생략."""
+        from ai.prompts import _build_station_log_section
+
+        out = "\n".join(_build_station_log_section({"stations": [
+            self._station(match_method="telepathy"),
+        ]}))
+        assert "STA2" in out
+        assert "telepathy" not in out and "시각 상관" not in out
+
+    def test_report_failed_binding_claims_no_method(self):
+        """리포트도 같은 규약 — 라벨 맵 단일 소스."""
+        from analyzer.web.report import _station_log_section
+
+        out = "\n".join(_station_log_section(
+            {"station_logs": {"stations": [
+                self._station(sta_name="", match_method=""),
+            ]}}, {},
+        ))
+        assert "매칭 실패" in out and "시각 상관" not in out
+
+    def test_prompt_station_section_is_capped(self):
+        """[Codex P2] 업로드는 호기 로그 60개까지 받는다 — 4000토큰 계약을 넘기면 안 된다."""
+        from ai.prompts import PROMPT_MAX_STATIONS, _build_station_log_section
+
+        many = [self._station(name=f"{i}호기") for i in range(PROMPT_MAX_STATIONS + 5)]
+        out = "\n".join(_build_station_log_section({"stations": many}))
+        assert out.count("호기 →") == PROMPT_MAX_STATIONS
+        # 생략을 숨기면 LLM이 전건을 봤다고 오해한다.
+        assert f"총 {len(many)}개 호기" in out
+
+    def test_prompt_warnings_are_capped_and_disclosed(self):
+        from ai.prompts import PROMPT_MAX_STATION_WARNINGS, _build_station_log_section
+
+        n = PROMPT_MAX_STATION_WARNINGS + 4
+        out = "\n".join(_build_station_log_section({"stations": [
+            self._station(warnings=[f"경고{i}" for i in range(n)]),
+        ]}))
+        assert out.count("· 주의: ") == PROMPT_MAX_STATION_WARNINGS
+        assert f"{n - PROMPT_MAX_STATION_WARNINGS}건 추가(생략)" in out
+
+    def test_report_station_section_is_capped(self):
+        from analyzer.web.report import REPORT_MAX_STATIONS, _station_log_section
+
+        many = [self._station(name=f"{i}호기") for i in range(REPORT_MAX_STATIONS + 3)]
+        out = "\n".join(_station_log_section(
+            {"station_logs": {"stations": many}}, {}))
+        assert out.count("| 192.168.0.21 |") == REPORT_MAX_STATIONS
+        assert f"총 {len(many)}개 호기" in out
+
+    def test_scan_note_only_when_scan_exists(self):
+        """[Claude LOW] 스캔 값이 하나도 없으면 스캔 주의 문구도 나오지 않는다."""
+        from ai.prompts import _build_station_log_section
+
+        with_scan = "\n".join(_build_station_log_section({"stations": [self._station()]}))
+        without = "\n".join(_build_station_log_section({"stations": [
+            self._station(scan_ms_p50=None),
+        ]}))
+        assert "스캔은 ROAM 명령보다" in with_scan
+        assert "스캔은 ROAM 명령보다" not in without
+
+    def test_over_100_pct_is_flagged_not_capped(self):
+        """[Gemini MEDIUM] 100% 초과는 정렬 이상 신호다 — 캡핑해 숨기면 안 된다.
+
+        체감은 pcap 구간의 상위집합이라 정상이면 100%를 넘을 수 없다. 100으로
+        잘라내면 "정상인데 딱 맞았다"로 읽혀 이상 신호가 사라진다.
+        """
+        from analyzer.web.report import _station_log_section
+
+        diagnosis = {"summary": {
+            "roaming_sta_log_matched": 10,
+            "roaming_sta_total_ms_p50": 20.0,
+            "roaming_pcap_total_ms_p50": 24.0,
+            "roaming_pcap_visible_pct": 120.0,
+        }}
+        out = "\n".join(_station_log_section(
+            {"station_logs": {"stations": [self._station()]}}, diagnosis))
+        assert "120.0%" in out                      # 값을 숨기지 않는다
+        assert "100%를 넘었다" in out
+        assert "근거로 쓸 수 없다" in out
+        assert "전파에 나타나지 않는다" not in out   # 정상 문구로 오독되면 안 된다
+
+    def test_bool_is_not_a_measurement_in_display_paths(self):
+        """[Claude MEDIUM] bool 가드를 집계 경로에만 두면 표시 경로가 True를 1ms로 찍는다."""
+        from ai.prompts import _build_roaming_section
+        from analyzer.web.report import _roaming_section
+
+        seqs = [_seq(25.0, True), _seq(25.0, None)]
+        md = "\n".join(_roaming_section({"roaming": {"sequences": seqs}}))
+        header = [ln for ln in md.splitlines() if ln.startswith("| # | 시각(Auth)")][0]
+        assert "STA 체감" not in header     # bool뿐이면 열 자체가 생기지 않는다
+        prompt = "\n".join(_build_roaming_section({"sequences": seqs}))
+        assert "sta_log.total_ms" not in prompt
+
+
 class TestPromptRendering:
     """AI 프롬프트 — 없는 데이터를 아는 척하지 않게 만드는 경고가 핵심."""
 

@@ -14,8 +14,14 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from ..core.models import SUBTYPE_NAMES
+# 바인딩 방법 라벨은 station_match가 단일 정의 — 리포트·AI 프롬프트가 같은 어휘를 쓴다.
+from ..core.station_match import MATCH_METHOD_LABELS
 # 손실 판정 근거 라벨은 structured가 단일 정의 — 리포트·화면이 같은 어휘를 쓴다.
 from .structured import LOSS_BASIS_LABELS, LOSS_BASIS_WIRED
+
+#: STA 로그 표에 실을 호기 수 상한. 로밍 표(`seqs[:20]`)와 같은 값 — 업로드가
+#: 호기 로그를 최대 60개 파일까지 받으므로 단말이 많으면 리포트가 통제 없이 길어진다.
+REPORT_MAX_STATIONS = 20
 
 # 결합 신호 type → 한국어 라벨. JS SIGNAL_TYPE_LABEL과 의도적으로 동기화 —
 # 새 type 추가 시 charts.js의 같은 맵도 갱신.
@@ -581,7 +587,7 @@ def _roaming_section(structured: Dict[str, Any]) -> List[str]:
     # 깨지는 것을 구조적으로 막는다 — 세 곳 수기 동기가 열 추가 때 가장 잘 깨진다.
     has_sta_log = any(
         isinstance(s, dict) and isinstance(s.get("sta_log"), dict)
-        and isinstance(s["sta_log"].get("total_ms"), (int, float))
+        and _is_measure(s["sta_log"].get("total_ms"))
         for s in seqs
     )
     # Gap은 Auth→Reassoc 구간만이라 로밍 전체 소요와 다르다 — 둘 다 싣는다.
@@ -628,9 +634,7 @@ def _roaming_section(structured: Dict[str, Any]) -> List[str]:
             st_total = log.get("total_ms") if isinstance(log, dict) else None
             # "-"로 두면 지연이 없었던 것처럼 읽힌다 — 측정불가 표기와 같은 원칙으로
             # 왜 값이 없는지(로그가 안 붙었다)를 밝힌다.
-            cells.append(
-                f"{st_total}" if isinstance(st_total, (int, float)) else "로그 미매칭"
-            )
+            cells.append(f"{st_total}" if _is_measure(st_total) else "로그 미매칭")
         cells.append(bc_str)
         lines.append("| " + " | ".join(cells) + " |")
     lines.append("")
@@ -668,20 +672,25 @@ def _station_log_section(
     이유다.
     """
     blk = structured.get("station_logs") or {}
-    stations = blk.get("stations") if isinstance(blk, dict) else None
-    if not isinstance(stations, list) or not stations:
+    raw = blk.get("stations") if isinstance(blk, dict) else None
+    if not isinstance(raw, list):
+        return []
+    stations = [st for st in raw if isinstance(st, dict)]
+    if not stations:
         return []
     lines = ["## STA 로그 (단말 관점 로밍)", ""]
     lines.append("| 로그 | STA IP | 매칭 | 부착/로밍 | 체감 p50(ms) | 스캔 p50(ms) | 정렬 MAD(ms) |")
     lines.append("|---|---|---|---|---|---|---|")
-    for st in stations:
-        if not isinstance(st, dict):
-            continue
+    # 로밍 표(seqs[:20])와 같은 상한 — 업로드가 호기 로그를 최대 60개 파일까지
+    # 받으므로 단말이 많은 환경에서 리포트가 통제 없이 길어질 수 있다.
+    for st in stations[:REPORT_MAX_STATIONS]:
         name = _clean_cell(st.get("name", "?"))
         ip = _clean_cell(st.get("sta_ip") or "-")
+        # 성공/실패를 먼저 가른다 — 실패에 방법 라벨을 붙이면 하지도 않은 근거를
+        # 주장하게 된다(라벨 맵에 실패 항목이 없는 이유).
         if st.get("sta_name"):
-            method = "IP" if st.get("match_method") == "ip" else "시각 상관"
-            matched = f"{_clean_cell(st['sta_name'])} ({method})"
+            method = MATCH_METHOD_LABELS.get(st.get("match_method"))
+            matched = _clean_cell(st["sta_name"]) + (f" ({method})" if method else "")
         else:
             matched = "매칭 실패"
         att = f"{_fmt_count(st.get('attached'))}/{_fmt_count(st.get('roam_total'))}"
@@ -691,11 +700,12 @@ def _station_log_section(
             f"{_num_or_dash(st.get('scan_ms_p50'))} | "
             f"{_num_or_dash(st.get('residual_mad_ms'))} |"
         )
+    if len(stations) > REPORT_MAX_STATIONS:
+        # 생략을 숨기지 않는다 — 조용히 자르면 전건을 본 것처럼 읽힌다.
+        lines.append(f"_(총 {len(stations)}개 호기 중 앞 {REPORT_MAX_STATIONS}개만 표시)_")
     lines.append("")
     warned = False
-    for st in stations:
-        if not isinstance(st, dict):
-            continue
+    for st in stations[:REPORT_MAX_STATIONS]:
         for w in st.get("warnings") or []:
             lines.append(f"> ⚠ {_clean_cell(st.get('name', '?'))}: {_clean_cell(w)}")
             warned = True
@@ -708,14 +718,28 @@ def _station_log_section(
     sta_p50 = summary.get("roaming_sta_total_ms_p50")
     if (
         isinstance(matched_n, int) and matched_n > 0
-        and isinstance(visible, (int, float))
-        and isinstance(pcap_p50, (int, float)) and isinstance(sta_p50, (int, float))
+        and _is_measure(visible) and _is_measure(pcap_p50) and _is_measure(sta_p50)
     ):
-        lines.append(
+        head = (
             f"같은 로밍 {_fmt_count(matched_n)}건 대조 — pcap 전파구간 **{pcap_p50}ms** vs "
-            f"STA 체감 **{sta_p50}ms**. pcap이 보는 건 전체의 **{visible}%**이고 나머지는 "
-            "스캔·로밍 판단·드라이버 처리·키 설치로 전파에 나타나지 않는다."
+            f"STA 체감 **{sta_p50}ms**."
         )
+        if visible > 100:
+            # 체감은 pcap 구간의 상위집합이라 정상이면 100%를 넘을 수 없다. 넘었다면
+            # 두 시계의 정렬이 틀어졌거나 엉뚱한 로밍끼리 짝지어진 것이다.
+            # 100%로 캡핑하면 그 이상 신호를 지워 "정상인데 딱 맞았다"로 읽힌다 —
+            # 값은 그대로 두고 근거로 쓸 수 없음을 밝힌다.
+            lines.append(
+                head + f" 계산상 **{visible}%**로 100%를 넘었다 — 체감은 pcap 구간을 "
+                "포함하므로 정상이면 나올 수 없는 값이다. 두 값은 서로 다른 시계로 재니 "
+                "위 표의 **정렬 MAD**를 먼저 확인할 것. 이 상태의 커버리지 비율은 근거로 "
+                "쓸 수 없다."
+            )
+        else:
+            lines.append(
+                head + f" pcap이 보는 건 전체의 **{visible}%**이고 나머지는 "
+                "스캔·로밍 판단·드라이버 처리·키 설치로 전파에 나타나지 않는다."
+            )
         lines.append("")
         lines.append(
             "> 스캔은 ROAM 명령보다 약 1초 앞서 끝나는 별개 이벤트라 로밍 소요에 "
@@ -726,9 +750,19 @@ def _station_log_section(
     return lines
 
 
+def _is_measure(v: Any) -> bool:
+    """실제 측정값인가 — 수치이되 bool이 아님.
+
+    bool은 int의 서브클래스라 `True`가 1ms로 통과한다. `_roam_coverage`가 집계
+    경로에서 쓰는 가드와 **같은 규약**을 표시 경로에도 적용해, 데이터 이상이
+    "1.0ms 로밍"처럼 그럴듯한 값으로 렌더되지 않게 한다.
+    """
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
 def _num_or_dash(v: Any) -> str:
     """수치면 그대로, 아니면 `-`. None을 'None'으로 찍지 않기 위한 셀 포매터."""
-    return f"{v}" if isinstance(v, (int, float)) and not isinstance(v, bool) else "-"
+    return f"{v}" if _is_measure(v) else "-"
 
 
 def _ping_section(structured: Dict[str, Any]) -> List[str]:

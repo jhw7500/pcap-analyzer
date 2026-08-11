@@ -10,8 +10,16 @@
 from typing import Any
 
 from analyzer.core.ping_matching import ping_losses, ping_pairs
+from analyzer.core.station_match import MATCH_METHOD_LABELS
 from analyzer.web.structured import LOSS_BASIS_WIRED
 from analyzer.core.thresholds import ROAM_GAP_DANGER_MS
+
+#: STA 로그 섹션 상한. 업로드는 호기 로그를 최대 60개 파일까지 받고
+#: (`routes/upload._MAX_STATION_LOG_FILES`), 이 프롬프트는 **4000토큰 계약**을
+#: 지켜야 한다(`ai/AGENTS.md`). 로밍 표가 `seqs[:20]`으로 상한을 두는 것과 같은
+#: 이유이며, 생략분은 반드시 건수로 밝혀 LLM이 전건을 봤다고 오해하지 않게 한다.
+PROMPT_MAX_STATIONS = 8
+PROMPT_MAX_STATION_WARNINGS = 3
 
 
 def _fmt_int(v: Any, default: str = "-") -> str:
@@ -160,10 +168,13 @@ def _build_roaming_section(roaming: dict) -> list:
         )
     # STA 로그 체감 — pcap이 원리적으로 못 보는 구간까지 포함한 실제 로밍 소요.
     # 실측 776건 대조에서 pcap 25.1ms vs 체감 97.0ms로 74.1%가 전파 밖이었다.
+    # bool 배제는 `_roam_coverage`와 같은 규약 — True가 1ms로 통과하면 통계가
+    # 조용히 오염된다(표시 경로에도 같은 가드를 둔다).
     sta_totals = [
         s["sta_log"]["total_ms"] for s in seqs
         if isinstance(s.get("sta_log"), dict)
         and isinstance(s["sta_log"].get("total_ms"), (int, float))
+        and not isinstance(s["sta_log"]["total_ms"], bool)
     ]
     if sta_totals:
         lines.append(
@@ -205,7 +216,8 @@ def _build_roaming_section(roaming: dict) -> list:
             extra += f", 전체={tot:.1f}ms"
         # STA 체감은 있을 때만 — 4-way/밴드 전환과 같은 조건부 표기 방식.
         log = s.get("sta_log")
-        if isinstance(log, dict) and isinstance(log.get("total_ms"), (int, float)):
+        if (isinstance(log, dict) and isinstance(log.get("total_ms"), (int, float))
+                and not isinstance(log["total_ms"], bool)):
             extra += f", STA체감={log['total_ms']:.1f}ms"
             if log.get("reason"):
                 extra += f", 사유={log['reason']}"
@@ -237,14 +249,23 @@ def _build_station_log_section(station_logs: dict) -> list:
     )
     if not isinstance(stations, list) or not stations:
         return []
+    stations = [st for st in stations if isinstance(st, dict)]
+    if not stations:
+        return []
     lines = ["", "## STA 로그 (단말 관점)"]
-    for st in stations:
-        if not isinstance(st, dict):
-            continue
-        who = st.get("sta_name") or "매칭 실패"
-        method = "IP" if st.get("match_method") == "ip" else "시각 상관"
+    shown = stations[:PROMPT_MAX_STATIONS]
+    any_scan = False
+    for st in shown:
+        # 매칭 성공/실패를 **먼저** 가른다. 실패인데 방법 라벨을 붙이면
+        # "매칭 실패(시각 상관)"처럼 하지도 않은 근거를 AI에게 주장하게 된다.
+        sta_name = st.get("sta_name")
+        if sta_name:
+            method = MATCH_METHOD_LABELS.get(st.get("match_method"))
+            who = f"{sta_name}({method})" if method else f"{sta_name}"
+        else:
+            who = "매칭 실패 — 어느 STA에도 붙지 않음(이 호기 값은 근거로 쓸 수 없다)"
         parts = [
-            f"{st.get('name', '?')} → {who}({method})",
+            f"{st.get('name', '?')} → {who}",
             f"부착 {st.get('attached', 0)}/{st.get('roam_total', 0)}",
         ]
         for key, label in (
@@ -255,13 +276,27 @@ def _build_station_log_section(station_logs: dict) -> list:
             v = st.get(key)
             if isinstance(v, (int, float)) and not isinstance(v, bool):
                 parts.append(f"{label}={v}ms")
+                if key == "scan_ms_p50":
+                    any_scan = True
         lines.append(f"- {', '.join(parts)}")
-        for w in st.get("warnings") or []:
+        # warnings도 station당 상한 — 파서 경고는 한 호기에서 수십 건 나올 수 있다.
+        warns = [w for w in (st.get("warnings") or [])]
+        for w in warns[:PROMPT_MAX_STATION_WARNINGS]:
             lines.append(f"  · 주의: {w}")
-    lines.append(
-        "  · 스캔은 ROAM 명령보다 약 1초 앞서 끝나는 별개 이벤트라 로밍 소요에 "
-        "합산하지 않는다. 스캔 소요는 커널 monotonic 기준이라 호기 간 비교 금지"
-    )
+        if len(warns) > PROMPT_MAX_STATION_WARNINGS:
+            lines.append(
+                f"  · 주의 {len(warns) - PROMPT_MAX_STATION_WARNINGS}건 추가(생략)"
+            )
+    if len(stations) > PROMPT_MAX_STATIONS:
+        # 생략을 숨기지 않는다 — 조용히 자르면 LLM이 전건을 봤다고 오해한다.
+        lines.append(
+            f"- (총 {len(stations)}개 호기 중 앞 {PROMPT_MAX_STATIONS}개만 표시)"
+        )
+    if any_scan:
+        lines.append(
+            "  · 스캔은 ROAM 명령보다 약 1초 앞서 끝나는 별개 이벤트라 로밍 소요에 "
+            "합산하지 않는다. 스캔 소요는 커널 monotonic 기준이라 호기 간 비교 금지"
+        )
     return lines
 
 

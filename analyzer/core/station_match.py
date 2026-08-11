@@ -34,6 +34,16 @@ MIN_MATCHES = 5
 #: 잘못 스냅하지 않도록 OFFSET_SEARCH_SEC를 넘는 차이에만 적용한다.
 TZ_SNAP_SEC = 900.0
 
+#: 바인딩 방법(`StationBinding.method`) → 표시 라벨. 리포트·AI 프롬프트·화면이
+#: 같은 어휘를 쓰도록 여기 한 곳에만 둔다.
+#:
+#: **실패(`""`)는 의도적으로 이 맵에 없다.** 실패를 방법 이름으로 렌더하면
+#: "매칭 실패(시각 상관)"처럼 **하지도 않은 근거를 주장**하게 된다(PR #31 Codex P2 —
+#: prompts.py가 `== "ip"`가 아니면 전부 "시각 상관"으로 찍어 AI에게 거짓 근거를
+#: 줬다). 소비자는 `sta_name` 유무로 성공/실패를 **먼저** 가른 뒤 이 맵을 쓰고,
+#: 모르는 값은 `.get()`으로 걸러 방법을 주장하지 않는다.
+MATCH_METHOD_LABELS = {"ip": "IP", "time": "시각 상관"}
+
 
 def pcap_ip_bindings(frames: Sequence[Any]) -> Dict[str, str]:
     """pcap 프레임에서 관측한 **IP → 송신 MAC** 바인딩.

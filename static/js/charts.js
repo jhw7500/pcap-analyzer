@@ -562,14 +562,22 @@
             if (pairedN > 0 && typeof p === 'number' && typeof t === 'number') {
                 /* 체감 로밍 중앙값이 0이면 비율이 Infinity/NaN으로 찍힌다. 로그 스탬프
                    정밀도가 ms라 극단적으로 짧은 로밍에서 0이 나올 수 있다 — 값을
-                   지어내지 않고 '측정불가'로 둔다. */
-                const outsidePct = typeof visiblePct === 'number'
-                    ? (100 - visiblePct).toFixed(1) + '%' : '측정불가';
+                   지어내지 않고 '측정불가'로 둔다.
+                   체감은 pcap 구간의 상위집합이라 정상이면 100%를 넘을 수 없다. 넘으면
+                   (다른 시계로 잰 두 값이라 정렬이 틀어진 경우) 여기서 '전파 밖'이
+                   음수로 찍힌다 — 캡핑해 숨기지 않고 정렬 이상으로 알린다. */
+                const tail = (typeof visiblePct === 'number' && visiblePct > 100)
+                    ? `계산상 <span class="text-yellow-400">${visiblePct.toFixed(1)}%</span>로 100%를 초과했다 —
+                       체감이 pcap 구간을 포함하므로 정상이면 나올 수 없는 값이다.
+                       위 표의 <span class="text-gray-200">정렬 MAD</span>를 먼저 확인할 것
+                       (이 상태의 비율은 근거로 쓸 수 없다).`
+                    : `<span class="text-gray-200">${typeof visiblePct === 'number'
+                          ? (100 - visiblePct).toFixed(1) + '%' : '측정불가'}</span>가 전파에 나타나지 않는 구간
+                       (스캔·로밍 판단·드라이버 처리·키 설치).`;
                 note = `<p class="mt-2 text-gray-400">같은 로밍 ${pairedN.toLocaleString()}건 대조 —
                     pcap 전파구간 <span class="text-gray-200">${p.toFixed(1)}ms</span> vs
                     STA 체감 <span class="text-sky-300">${t.toFixed(1)}ms</span>.
-                    <span class="text-gray-200">${outsidePct}</span>가 전파에 나타나지 않는 구간
-                    (스캔·로밍 판단·드라이버 처리·키 설치).</p>
+                    ${tail}</p>
                     <p class="text-gray-500 mt-1">스캔은 ROAM 명령보다 약 1초 앞서 끝나는 별개 이벤트라 로밍 소요에 합산하지 않는다.
                     개별 로밍의 세부 구간은 로그 스탬프 정밀도(±20ms대)를 넘어서므로 분포로만 표기한다.</p>`;
             }
