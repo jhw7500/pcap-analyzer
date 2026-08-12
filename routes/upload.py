@@ -19,6 +19,11 @@ from analyzer.errors import ErrorCode, error_payload
 from analyzer.core.split_merge import merge_split_captures, merged_display_name
 from analyzer.core.station_log import STATION_LOG_FILES
 from analyzer.pipeline import run_analysis
+from routes.independent_validation import (
+    IndependentValidationCancelled,
+    failed_validation_payload,
+    run_independent_web_validation,
+)
 
 _UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB
 _JOBS_MAX = 100  # 최근 N개만 유지
@@ -472,11 +477,18 @@ async def upload_pcap(
     ip_filter: str = Form(""),
     time_start: str = Form(""),
     time_end: str = Form(""),
+    independent_validation: bool = Form(False),
     client_job_id: str = Form(""),
 ):
     tshark = config.detect_tshark()
     if not tshark:
         return JSONResponse(error_payload(ErrorCode.TSHARK_MISSING), status_code=500)
+    if independent_validation and any(
+        value.strip() for value in (mac_filter, ip_filter, time_start, time_end)
+    ):
+        return JSONResponse(
+            error_payload(ErrorCode.INDEPENDENT_VALIDATION_FILTERED), status_code=400
+        )
 
     # 브라우저는 미선택 file input도 빈 filename 파트로 보낸다 — filename으로 판별
     valid_wireless_files = [wf for wf in wireless_files if wf is not None and (wf.filename or "")]
@@ -575,7 +587,13 @@ async def upload_pcap(
         _set_progress(job_id, msg, pct, active=True)
 
     def _run():
-        return run_analysis(
+        analysis_progress = progress_cb
+        if independent_validation:
+            # 독립 검증 몫 15%를 남겨, 분석 완료 100% 뒤 85%로 되감기는 UI를 막는다.
+            def analysis_progress(msg, pct):
+                progress_cb(msg, min(85, int(pct * 0.85)))
+
+        result = run_analysis(
             tmp_name,
             ssid=ssid,
             passphrase=passphrase,
@@ -587,8 +605,40 @@ async def upload_pcap(
             wired_path=wired_tmp,
             station_logs=station_entries,
             cancel_event=cancel_event,
-            progress_cb=progress_cb,
+            progress_cb=analysis_progress,
         )
+        if (
+            not independent_validation
+            or result.get("error")
+            or result.get("cancelled")
+        ):
+            return result
+        if cancel_event.is_set():
+            return {"cancelled": True}
+        try:
+            result["independent_validation"] = run_independent_web_validation(
+                tmp_name,
+                wireless_tmps,
+                station_entries,
+                result,
+                tshark=tshark,
+                source_names=[name, *wireless_names],
+                progress_cb=lambda msg, pct: progress_cb(
+                    f"독립 검증: {msg}", 85 + min(14, int(pct * 0.14))
+                ),
+                cancelled=cancel_event.is_set,
+            )
+        except IndependentValidationCancelled:
+            return {"cancelled": True}
+        except (OSError, RuntimeError, ValueError) as exc:
+            # 독립 검증은 교차확인 기능이다. 실패해도 이미 완료된 본 분석은 버리지
+            # 않고 결과 화면에 실패 사유를 표시한다.
+            result["independent_validation"] = failed_validation_payload(
+                exc,
+                [tmp_name, *wireless_tmps, *station_tmps],
+            )
+        progress_cb("독립 검증 결과 저장 중...", 99)
+        return result
 
     try:
         loop = asyncio.get_running_loop()

@@ -54,6 +54,23 @@ python3 scripts/roaming_independent_verify.py \
 
 종료 코드는 성공 0, 입력·tshark·정렬 실패 1, `--strict` 비교 불일치 2다.
 
+## 웹에서 실행
+
+1. 메인 화면에서 무선 pcap과 필요하면 추가 스니퍼·STA 로그를 선택한다.
+2. **분석 옵션**의 **독립 로밍 교차검증 실행**을 체크한다.
+3. 분석을 시작한다. 본 분석이 끝난 뒤 같은 임시 원본으로 독립 검증이 이어진다.
+4. 결과 화면 상단의 교차검증 패널에서 일치 여부와 주요 수치를 확인한다.
+5. **검증 JSON** 또는 **검증 Markdown**으로 원장을 내려받을 수 있다.
+
+웹 실행은 명시적 opt-in이다. 체크하지 않으면 추가 tshark 실행이나 처리 시간 변화가
+없다. 원본 업로드는 보안·용량상 분석 후 삭제되므로 **기존 분석 결과에 사후 실행은
+불가능**하며 새로 업로드해야 한다. 또한 원본 전체와 분석기 결과를 같은 범위에서
+대조하기 위해 MAC/IP/시작·종료 시간 필터와 동시 사용은 차단한다.
+
+독립 검증이 실패해도 이미 완료된 본 분석 결과는 폐기하지 않는다. 결과 화면에 실패
+사유를 표시하며, 공통 Beacon TSF가 없는 다중 스니퍼 입력이나 STA 로그 매핑 실패를
+확인할 수 있다.
+
 ## TEST14 기준 결과
 
 2026-08-12에 `tmp/20260723_CFI/TEST14`의 주 무선 3조각, DFK 7조각, 1~3호기
@@ -77,6 +94,7 @@ python3 scripts/roaming_independent_verify.py \
 
 - `tmp/test14_validation/independent-result.json`
 - `tmp/test14_validation/independent-result.md`
+- `tmp/test14_validation/web-independent-result.json` (웹 어댑터 경로)
 
 ## 한계
 

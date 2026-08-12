@@ -23,7 +23,7 @@ import statistics
 import subprocess
 import sys
 import time
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 
 EVENT_FILTER = (
@@ -304,15 +304,12 @@ def align_and_dedup(
 
 
 def detect_station_macs(events: list[PacketEvent]) -> list[str]:
-    counts = Counter(
-        event.ta for event in events if event.subtype in {0, 2} and event.ta
+    # 802.11 Assoc Request(0)·Reassoc Request(2)는 STA→AP 방향으로 정의된다.
+    # 빈도 휴리스틱을 더하면 로밍이 1회뿐인 작은 캡처를 조용히 누락하므로, 해당
+    # subtype의 송신자를 전부 STA로 취급하는 것이 패킷 의미에도 전수검사에도 맞다.
+    return sorted(
+        {event.ta for event in events if event.subtype in {0, 2} and event.ta}
     )
-    if not counts:
-        return []
-    # 반복 로밍 시험에서는 STA가 수백 회 나타난다. 작은 일반 캡처도 지원하기 위해
-    # 최대치의 10% 이상이면서 최소 2회인 송신자를 STA 후보로 둔다.
-    threshold = max(2, int(max(counts.values()) * 0.1))
-    return sorted(mac for mac, count in counts.items() if count >= threshold)
 
 
 def build_packet_ledger(
@@ -908,6 +905,87 @@ def build_report(
     }
 
 
+def run_verification(
+    sources: "OrderedDict[str, list[Path]]",
+    station_paths: dict[str, Path],
+    *,
+    analyzer_result: Optional[dict[str, Any]] = None,
+    reference: Optional[str] = None,
+    explicit_bindings: Optional[dict[str, str]] = None,
+    tshark: str = "tshark",
+    station_utc_offset: str = DEFAULT_STATION_UTC_OFFSET,
+    dedup_ms: float = DEFAULT_DEDUP_MS,
+    assoc_attempt_ms: float = DEFAULT_ASSOC_ATTEMPT_MS,
+    sta_match_ms: float = DEFAULT_STA_MATCH_MS,
+    compare_ms: float = DEFAULT_COMPARE_MS,
+    progress_cb: Optional[Callable[[str, int], None]] = None,
+) -> dict[str, Any]:
+    """원시 입력에서 독립 검증 보고서를 만든다.
+
+    CLI와 웹 통합이 공유하는 유일한 orchestration 함수다. ``analyzer_result``는
+    마지막 비교 단계에서만 소비하며, 패킷/STA 원장 계산에는 전달하지 않는다.
+    ``progress_cb``의 백분율은 이 검증 단계 내부의 0~100 범위다.
+    """
+    if not sources:
+        raise ValueError("무선 source가 하나 이상 필요하다")
+    selected_reference = reference or next(iter(sources))
+    if selected_reference not in sources:
+        raise ValueError(f"기준 소스가 없다: {selected_reference}")
+    station_timezone = _parse_utc_offset(station_utc_offset)
+    started = time.time()
+
+    def progress(message: str, pct: int) -> None:
+        if progress_cb is not None:
+            progress_cb(message, pct)
+
+    progress("tshark 로밍/EAPOL 전수 추출", 5)
+    per_source, packet_counts = extract_packet_events(sources, tshark)
+    progress("Beacon TSF 독립 시각 정렬", 30)
+    beacons = extract_beacons(sources, tshark)
+    offsets = estimate_tsf_offsets(beacons, selected_reference)
+    progress("관측점 간 중복 제거 및 패킷 로밍 원장", 55)
+    merged, duplicates = align_and_dedup(per_source, offsets, dedup_ms)
+    sta_macs = detect_station_macs(merged)
+    transactions, packet_meta = build_packet_ledger(merged, sta_macs, assoc_attempt_ms)
+    progress("wpa.log ROAM→CONNECTED 원장", 70)
+    station_ledgers = {
+        name: parse_wpa_log(path, name, station_timezone)
+        for name, path in station_paths.items()
+    }
+    bindings, matrix = bind_stations(
+        station_ledgers, transactions, explicit_bindings, sta_match_ms
+    )
+    correlation = correlate_station_logs(
+        station_ledgers, transactions, bindings, sta_match_ms
+    )
+    classify_transactions(transactions)
+    progress("분석기 결과와 독립 원장 비교", 90)
+    comparison = None
+    if analyzer_result is not None:
+        comparison = compare_analyzer(
+            analyzer_result, transactions, correlation["matched"], compare_ms
+        )
+    report = build_report(
+        sources=sources,
+        station_paths=station_paths,
+        packet_counts=packet_counts,
+        offsets=offsets,
+        merged_count=len(merged),
+        duplicates=duplicates,
+        transactions=transactions,
+        packet_meta=packet_meta,
+        station_ledgers=station_ledgers,
+        bindings=bindings,
+        binding_matrix=matrix,
+        correlation=correlation,
+        analyzer_comparison=comparison,
+        station_utc_offset=station_utc_offset,
+        elapsed_sec=time.time() - started,
+    )
+    progress("독립 검증 완료", 100)
+    return report
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     packet = report["packet"]
     station = report["station_logs"]
@@ -1029,7 +1107,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    started = time.time()
     try:
         sources = _parse_assignment(args.source, "--source")
         station_groups = _parse_assignment(args.station, "--station")
@@ -1037,61 +1114,33 @@ def main(argv: Optional[list[str]] = None) -> int:
         if any(len(paths) != 1 for paths in station_groups.values()):
             raise ValueError("--station NAME에는 wpa.log 하나만 지정해야 한다")
         reference = args.reference or next(iter(sources))
-        if reference not in sources:
-            raise ValueError(f"--reference가 --source에 없다: {reference}")
-        station_timezone = _parse_utc_offset(args.station_utc_offset)
-
-        print("[1/6] tshark 로밍/EAPOL 전수 추출", file=sys.stderr)
-        per_source, packet_counts = extract_packet_events(sources, args.tshark)
-        print("[2/6] Beacon TSF 독립 시각 정렬", file=sys.stderr)
-        beacons = extract_beacons(sources, args.tshark)
-        offsets = estimate_tsf_offsets(beacons, reference)
-        print("[3/6] 관측점 간 중복 제거 및 패킷 로밍 원장", file=sys.stderr)
-        merged, duplicates = align_and_dedup(per_source, offsets, args.dedup_ms)
-        sta_macs = detect_station_macs(merged)
-        transactions, packet_meta = build_packet_ledger(
-            merged, sta_macs, args.assoc_attempt_ms
-        )
-        print("[4/6] wpa.log ROAM→CONNECTED 원장", file=sys.stderr)
-        station_ledgers = {
-            name: parse_wpa_log(path, name, station_timezone)
-            for name, path in station_paths.items()
-        }
         explicit = _parse_bindings(args.bind) if args.bind else None
-        bindings, matrix = bind_stations(
-            station_ledgers, transactions, explicit, args.sta_match_ms
-        )
-        correlation = correlate_station_logs(
-            station_ledgers, transactions, bindings, args.sta_match_ms
-        )
-        classify_transactions(transactions)
-        print("[5/6] 분석기 결과 비교", file=sys.stderr)
-        comparison = None
+        analyzer_result = None
         if args.analyzer_result:
             analyzer_result = json.loads(
                 args.analyzer_result.read_text(encoding="utf-8")
             )
-            comparison = compare_analyzer(
-                analyzer_result, transactions, correlation["matched"], args.compare_ms
-            )
-        report = build_report(
+        step = 0
+
+        def print_progress(message: str, _pct: int) -> None:
+            nonlocal step
+            step += 1
+            print(f"[{step}/6] {message}", file=sys.stderr)
+
+        report = run_verification(
             sources=sources,
             station_paths=station_paths,
-            packet_counts=packet_counts,
-            offsets=offsets,
-            merged_count=len(merged),
-            duplicates=duplicates,
-            transactions=transactions,
-            packet_meta=packet_meta,
-            station_ledgers=station_ledgers,
-            bindings=bindings,
-            binding_matrix=matrix,
-            correlation=correlation,
-            analyzer_comparison=comparison,
+            analyzer_result=analyzer_result,
+            reference=reference,
+            explicit_bindings=explicit,
+            tshark=args.tshark,
             station_utc_offset=args.station_utc_offset,
-            elapsed_sec=time.time() - started,
+            dedup_ms=args.dedup_ms,
+            assoc_attempt_ms=args.assoc_attempt_ms,
+            sta_match_ms=args.sta_match_ms,
+            compare_ms=args.compare_ms,
+            progress_cb=print_progress,
         )
-        print("[6/6] 결과 저장", file=sys.stderr)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -1100,6 +1149,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         markdown.parent.mkdir(parents=True, exist_ok=True)
         markdown.write_text(render_markdown(report), encoding="utf-8")
         print(render_markdown(report), end="")
+        comparison = report.get("analyzer_comparison")
         if args.strict and comparison is not None and not comparison["clean"]:
             return 2
         return 0

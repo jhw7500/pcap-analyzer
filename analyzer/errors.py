@@ -21,6 +21,9 @@ class ErrorCode(str, Enum):
     INVALID_ANALYSIS_ID = "INVALID_ANALYSIS_ID"
     INCIDENT_NOT_FOUND = "INCIDENT_NOT_FOUND"
     CASEFILE_UNAVAILABLE = "CASEFILE_UNAVAILABLE"
+    INDEPENDENT_VALIDATION_NOT_FOUND = "INDEPENDENT_VALIDATION_NOT_FOUND"
+    INDEPENDENT_VALIDATION_FAILED = "INDEPENDENT_VALIDATION_FAILED"
+    INDEPENDENT_VALIDATION_FILTERED = "INDEPENDENT_VALIDATION_FILTERED"
     AI_REVIEW_FAILED = "AI_REVIEW_FAILED"
     PDF_EXPORT_UNAVAILABLE = "PDF_EXPORT_UNAVAILABLE"
     PDF_RENDER_FAILED = "PDF_RENDER_FAILED"
@@ -90,6 +93,18 @@ ERROR_CATALOG: Dict[ErrorCode, Dict[str, str]] = {
     ErrorCode.CASEFILE_UNAVAILABLE: {
         "message": "casefile을 생성할 수 없습니다.",
         "hint": "분석 JSON의 structured.ping 필드 유효성을 확인하세요.",
+    },
+    ErrorCode.INDEPENDENT_VALIDATION_NOT_FOUND: {
+        "message": "독립 로밍 검증 결과가 없습니다.",
+        "hint": "새 분석 업로드 시 '독립 로밍 교차검증 실행'을 선택하세요. 원본 pcap은 분석 후 삭제되므로 기존 결과에는 사후 실행할 수 없습니다.",
+    },
+    ErrorCode.INDEPENDENT_VALIDATION_FAILED: {
+        "message": "독립 로밍 검증 보고서를 생성하지 못했습니다.",
+        "hint": "분석 결과 화면의 검증 실패 사유를 확인하고, 무선 pcap과 STA wpa.log를 포함해 다시 실행하세요.",
+    },
+    ErrorCode.INDEPENDENT_VALIDATION_FILTERED: {
+        "message": "필터가 적용된 분석에는 독립 전수검증을 함께 실행할 수 없습니다.",
+        "hint": "MAC/IP/시작·종료 시간 필터를 비우거나 독립 로밍 교차검증 선택을 해제하세요. 전수검증은 원본 전체 구간을 분석기 결과와 대조해야 합니다.",
     },
     ErrorCode.AI_REVIEW_FAILED: {
         "message": "AI 리뷰 실행에 실패했습니다.",

@@ -107,6 +107,16 @@ def test_cross_source_dedup_keeps_retry_distinction():
     assert {event.retry for event in events} == {False, True}
 
 
+def test_single_association_request_is_a_station_candidate():
+    sta, ap = "00:00:00:00:00:01", "00:00:00:00:00:aa"
+
+    candidates = verify.detect_station_macs(
+        [packet(epoch=1.0, subtype=2, ta=sta, ra=ap)]
+    )
+
+    assert candidates == [sta]
+
+
 def test_packet_ledger_collapses_same_attempt_even_when_retry_arrives_first():
     sta, ap = "00:00:00:00:00:01", "00:00:00:00:00:aa"
     events = [
