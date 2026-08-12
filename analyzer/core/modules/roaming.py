@@ -127,6 +127,57 @@ def classify_slow(
     return False, None
 
 
+def roam_total_ms(
+    auth_epoch: Optional[float], handshake: Optional[Dict[str, Any]]
+) -> Tuple[Optional[float], str]:
+    """로밍 전체 소요(Auth 요청 → 4-way 완료)와 계산 불가 사유. **단일 소스.**
+
+    `gap + four_way`의 **단순 합이 아니다** — Reassoc 요청과 4-way 시작 사이의 대기
+    (실측 ~2ms)가 빠지기 때문이다(gap 4.0 + 4way 11.6 = 15.6인데 실제 전체는 17.6).
+    그래서 핸드셰이크의 **실제 종료 시각**에서 계산한다.
+
+    `roaming.analyze`(텍스트)와 `structured._structured_roaming`(화면)이 이 값을 각자
+    계산하고 있었다 — 같은 식이 두 곳에 있으면 한쪽만 고쳐져 두 화면이 다른 숫자를
+    말하게 된다(`classify_slow`를 단일 소스로 만든 것과 같은 이유).
+
+    Returns:
+        `(total_ms, note)`. 계산 불가면 `(None, 사유)` — 값을 지어내지 않고 왜 없는지
+        남긴다. 텍스트 모듈처럼 note가 필요 없으면 무시하면 된다.
+    """
+    hs_end = handshake.get("end_epoch") if handshake else None
+    if auth_epoch is not None and isinstance(hs_end, (int, float)):
+        return round((hs_end - auth_epoch) * 1000, 1), ""
+    if auth_epoch is None:
+        return None, "Auth 프레임 미포착 — 시작 시각을 몰라 전체 소요 계산 불가"
+    return None, (
+        "4-way 핸드셰이크가 캡처에 없어 완료 시점 불명 "
+        "(802.11r FT로 생략됐거나 모니터가 EAPOL을 놓침)"
+    )
+
+
+def is_decided(seq: Dict[str, Any]) -> bool:
+    """느린 로밍 **판정이 선** 시퀀스인가 — 건강도 분모의 기준. **단일 소스.**
+
+    판정 가능의 기준은 gap 유무가 아니라 `slow_basis`다: total을 알거나, total은
+    몰라도 gap이 이미 임계를 넘어 확정된 경우가 판정 가능이다. 판정 불가를 분모에
+    넣으면 "느린 비율"이 희석돼 **캡처가 나쁠수록 건강해 보이는** 역전이 생긴다.
+
+    구버전 result에는 `slow_basis` 키가 없으므로 gap 유무로 폴백한다. `bool`은
+    `int`의 서브클래스라 `gap_ms=True`가 측정값으로 통과하는 것을 막는다.
+
+    전체 건강도와 STA별 점수가 이 술어를 각자 인라인으로 갖고 있었다 — 한쪽만
+    고치면 두 점수가 다른 모집단을 쓰게 된다.
+    """
+    if seq.get("slow_basis") is not None:
+        return True
+    gap = seq.get("gap_ms")
+    return (
+        "slow_basis" not in seq
+        and isinstance(gap, (int, float))
+        and not isinstance(gap, bool)
+    )
+
+
 def pair_roaming_sequences(
     roaming_frames: List[FrameType], sta_macs: Any
 ) -> List[RoamPairing]:
@@ -356,10 +407,11 @@ def analyze(
     for pairing in pair_roaming_sequences(roaming_frames, sta_macs):
         assoc = pairing.assoc
         hs = match_four_way(assoc.epoch, assoc.ta, handshakes, ap=assoc.ra)
-        hs_end = hs.get("end_epoch") if hs else None
-        total = None
-        if pairing.auth is not None and isinstance(hs_end, (int, float)):
-            total = round((hs_end - pairing.auth.epoch) * 1000, 1)
+        # 전체 소요 계산은 roam_total_ms(단일 소스) — 화면(structured)과 같은 식을
+        # 쓴다. 텍스트 섹션은 사유(note)를 싣지 않으므로 값만 받는다.
+        total, _ = roam_total_ms(
+            pairing.auth.epoch if pairing.auth is not None else None, hs
+        )
         gap = pairing.gap_ms
         _, basis = classify_slow(total, gap)   # 판정 규칙 단일 소스
         sequences.append(SequenceInfo(
