@@ -27,6 +27,9 @@ from analyzer.errors import ErrorCode, error_payload
 from analyzer.web.pdf import PdfRenderError, is_pdf_available, render_pdf_from_html
 from analyzer.web.report import build_report_markdown
 from analyzer.web.report_html import render_report_html
+from scripts.roaming_independent_verify import (
+    render_markdown as render_validation_markdown,
+)
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
@@ -210,6 +213,47 @@ async def analysis_data(analysis_id: str):
     if error is not None:
         return error
     return JSONResponse(result)
+
+
+@router.get("/api/analysis/{analysis_id}/independent-validation")
+async def independent_validation_data(analysis_id: str):
+    """분석 결과에 내장된 독립 검증 원장을 JSON으로 내보낸다."""
+    result, error = _load_result_checked(analysis_id)
+    if error is not None:
+        return error
+    assert result is not None
+    validation = result.get("independent_validation")
+    if not isinstance(validation, dict):
+        return JSONResponse(
+            error_payload(ErrorCode.INDEPENDENT_VALIDATION_NOT_FOUND), status_code=404
+        )
+    return JSONResponse(validation)
+
+
+@router.get("/api/analysis/{analysis_id}/independent-validation.md")
+async def independent_validation_markdown(analysis_id: str):
+    """독립 검증 결과의 사람이 읽는 Markdown 다운로드."""
+    result, error = _load_result_checked(analysis_id)
+    if error is not None:
+        return error
+    assert result is not None
+    validation = result.get("independent_validation")
+    if not isinstance(validation, dict):
+        return JSONResponse(
+            error_payload(ErrorCode.INDEPENDENT_VALIDATION_NOT_FOUND), status_code=404
+        )
+    if validation.get("status") != "complete":
+        return JSONResponse(
+            error_payload(ErrorCode.INDEPENDENT_VALIDATION_FAILED), status_code=422
+        )
+    safe_id = _safe_filename_id(analysis_id)
+    return PlainTextResponse(
+        render_validation_markdown(validation),
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="independent_validation_{safe_id}.md"',
+        },
+    )
 
 
 @router.delete("/api/analysis/{analysis_id}")

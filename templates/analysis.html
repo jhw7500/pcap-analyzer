@@ -75,6 +75,57 @@
     </div>
 </div>
 
+{% set _validation = result.get('independent_validation') %}
+{% if _validation %}
+  {% if _validation.get('status') == 'complete' %}
+    {% set _comparison = _validation.get('analyzer_comparison') or {} %}
+    {% set _packet = _validation.get('packet') or {} %}
+    {% set _station = _validation.get('station_logs') or {} %}
+    {% set _totals = _station.get('total_ms') or {} %}
+    <div class="rounded-lg border p-4 mb-6 {% if _comparison.get('clean') %}bg-green-950/40 border-green-700{% else %}bg-red-950/40 border-red-700{% endif %}"
+         id="independent-validation-panel">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+                <h2 class="font-bold {% if _comparison.get('clean') %}text-green-300{% else %}text-red-300{% endif %}">
+                    독립 로밍 교차검증 — {% if _comparison.get('clean') %}분석기와 일치{% else %}차이 발견{% endif %}
+                </h2>
+                <p class="text-xs text-gray-400 mt-1">
+                    analyzer import 없이 tshark 원시 필드와 wpa.log 원문으로 재계산 ·
+                    {{ '%.1f'|format(_validation.get('elapsed_sec', 0)) }}초
+                </p>
+            </div>
+            <div class="flex gap-2">
+                <a href="/api/analysis/{{ result.id }}/independent-validation" target="_blank" rel="noopener noreferrer"
+                   class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs">검증 JSON</a>
+                <a href="/api/analysis/{{ result.id }}/independent-validation.md"
+                   class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs">검증 Markdown</a>
+            </div>
+        </div>
+        <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 mt-4 text-center">
+            <div class="bg-gray-900/50 rounded p-2"><div class="text-xs text-gray-500">로밍</div><div class="font-semibold">{{ _packet.get('roaming_total', '—') }}</div></div>
+            <div class="bg-gray-900/50 rounded p-2"><div class="text-xs text-gray-500">느림</div><div class="font-semibold">{{ _packet.get('slow', '—') }}</div></div>
+            <div class="bg-gray-900/50 rounded p-2"><div class="text-xs text-gray-500">판정 불가</div><div class="font-semibold">{{ _packet.get('unmeasured', '—') }}</div></div>
+            <div class="bg-gray-900/50 rounded p-2"><div class="text-xs text-gray-500">STA 매칭</div><div class="font-semibold">{{ _station.get('matched', '—') }}</div></div>
+            <div class="bg-gray-900/50 rounded p-2"><div class="text-xs text-gray-500">STA 실패</div><div class="font-semibold">{{ _station.get('failed', '—') }}</div></div>
+            <div class="bg-gray-900/50 rounded p-2"><div class="text-xs text-gray-500">체감 p50</div><div class="font-semibold">{{ (_totals.get('p50') ~ 'ms') if _totals.get('p50') is not none else '—' }}</div></div>
+            <div class="bg-gray-900/50 rounded p-2"><div class="text-xs text-gray-500">체감 p95</div><div class="font-semibold">{{ (_totals.get('p95') ~ 'ms') if _totals.get('p95') is not none else '—' }}</div></div>
+        </div>
+        {% if not _comparison.get('clean') %}
+        <details class="mt-3 text-xs">
+            <summary class="cursor-pointer text-red-300">분석기와의 차이 보기</summary>
+            <pre class="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-red-200 bg-gray-950/60 rounded p-3">{{ _comparison.get('summary_diff', {}) | tojson(indent=2) }}</pre>
+        </details>
+        {% endif %}
+    </div>
+  {% else %}
+    <div class="bg-yellow-950/40 border border-yellow-700 rounded-lg p-4 mb-6" id="independent-validation-panel">
+        <h2 class="font-bold text-yellow-300">독립 로밍 교차검증 실패</h2>
+        <p class="text-sm text-yellow-200 mt-1">{{ _validation.get('error', '원인을 확인할 수 없습니다.') }}</p>
+        <p class="text-xs text-gray-400 mt-2">본 분석 결과는 정상 보존되었습니다. 입력의 공통 Beacon TSF와 STA wpa.log를 확인하세요.</p>
+    </div>
+  {% endif %}
+{% endif %}
+
 <!-- 탭 네비게이션 -->
 <div class="border-b border-gray-700 mb-6">
     <nav class="flex gap-1" id="tab-nav">

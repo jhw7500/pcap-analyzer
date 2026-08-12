@@ -101,6 +101,21 @@
                     <p class="text-gray-500 text-xs mt-1">같은 구간을 <span class="text-gray-400">다른 위치에서 동시에</span> 캡처한 파일 — TSF 정렬 후 중복 제거 통합.
                         (한 스니퍼가 쪼갠 조각은 여기가 아니라 위 드롭존에 함께 올리세요)</p>
                 </div>
+                <div class="col-span-2 bg-gray-900/50 border border-cyan-800 rounded-lg p-3">
+                    <label class="flex items-start gap-3 cursor-pointer">
+                        <input type="checkbox" name="independent_validation" value="true"
+                               class="mt-1 h-4 w-4 accent-cyan-500">
+                        <span>
+                            <span class="block text-sm font-semibold text-cyan-300">독립 로밍 교차검증 실행</span>
+                            <span class="block text-xs text-gray-400 mt-1">
+                                본 분석 완료 후 analyzer 코드를 재사용하지 않는 별도 tshark·wpa.log 원장으로
+                                로밍 건수와 150ms 판정을 다시 계산합니다. 대용량 캡처는 추가 시간이 필요하며,
+                                STA 로그가 있으면 체감시간까지 대조합니다. 원본 전수 대조이므로
+                                MAC/IP/시간 필터와 동시에 사용할 수 없습니다.
+                            </span>
+                        </span>
+                    </label>
+                </div>
             </div>
         </details>
 

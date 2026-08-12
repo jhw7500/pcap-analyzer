@@ -16,13 +16,16 @@
 
     // 옵션 폼 localStorage 캐시 (파일은 제외, 텍스트 옵션만)
     const OPT_KEY = 'pcap.upload.options';
-    const OPT_FIELDS = ['ssid', 'passphrase', 'mac_filter', 'ip_filter', 'time_start', 'time_end'];
+    const OPT_FIELDS = ['ssid', 'passphrase', 'mac_filter', 'ip_filter', 'time_start', 'time_end', 'independent_validation'];
     function restoreOptions() {
         try {
             const saved = JSON.parse(localStorage.getItem(OPT_KEY) || '{}');
             for (const name of OPT_FIELDS) {
                 const el = form.querySelector(`[name="${name}"]`);
-                if (el && saved[name] !== undefined) el.value = saved[name];
+                if (el && saved[name] !== undefined) {
+                    if (el.type === 'checkbox') el.checked = Boolean(saved[name]);
+                    else el.value = saved[name];
+                }
             }
         } catch (e) { /* ignore */ }
     }
@@ -31,7 +34,7 @@
             const data = {};
             for (const name of OPT_FIELDS) {
                 const el = form.querySelector(`[name="${name}"]`);
-                if (el) data[name] = el.value;
+                if (el) data[name] = el.type === 'checkbox' ? el.checked : el.value;
             }
             localStorage.setItem(OPT_KEY, JSON.stringify(data));
         } catch (e) { /* ignore */ }
@@ -40,7 +43,7 @@
     // 입력값이 바뀔 때마다 즉시 저장 (분석 시작 안 해도 새로고침/재방문 시 유지)
     for (const name of OPT_FIELDS) {
         const el = form.querySelector(`[name="${name}"]`);
-        if (el) el.addEventListener('input', saveOptions);
+        if (el) el.addEventListener(el.type === 'checkbox' ? 'change' : 'input', saveOptions);
     }
 
     // 클라이언트 측 파일 크기 즉시 검사

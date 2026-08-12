@@ -14,6 +14,8 @@ WLAN(802.11) pcap 파일을 업로드하면 `tshark`로 프레임을 추출하�
 - **AI 리뷰**: Claude 또는 OpenAI API로 분석 결과 자동 해석 (선택)
 - **리포트 export**: 마크다운 / 인쇄용 HTML / PDF(선택)로 분석 결과 외부 공유
 - **진행률/취소**: 대용량 pcap 분석 중 실시간 진행률, tshark 프로세스 즉시 종료 가능
+- **독립 로밍 교차검증**: 업로드 시 선택하면 analyzer를 재사용하지 않는 별도
+  tshark·STA 로그 원장으로 로밍 건수와 150ms 판정을 재검산
 
 ## Quickstart
 
@@ -177,6 +179,12 @@ make test-all         # 전체 테스트
 make test-e2e         # Playwright e2e (서버 실행 필요)
 make cov              # 커버리지 (목표 ≥80%)
 ```
+
+실측 pcap과 STA `wpa.log`로 로밍 결과를 분석기와 별도 구현에서 교차 검증하려면
+`scripts/roaming_independent_verify.py`를 사용한다. 사용법과 TEST14 기준값은
+[`docs/ROAMING_INDEPENDENT_VERIFY.md`](docs/ROAMING_INDEPENDENT_VERIFY.md) 참조.
+같은 기능은 웹 업로드의 분석 옵션에서 **독립 로밍 교차검증 실행**을 선택해 사용할
+수 있으며, 완료 화면에서 일치 여부와 JSON/Markdown 보고서를 확인할 수 있다.
 
 ## 디렉토리 구조
 

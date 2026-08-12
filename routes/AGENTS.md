@@ -14,6 +14,7 @@ FastAPI 라우트 핸들러. pcap 업로드/분석 실행(스트리밍 + magic b
 | `analysis.py` | 분석 결과 HTML 렌더링, JSON/텍스트 내보내기, 삭제 API. 모든 `analysis_id`는 `config.safe_analysis_path()`로 검증. |
 | `ai_review.py` | AI 리뷰 요청 API — 분석 결과를 AI에 보내고 리뷰를 JSON에 저장. id 검증 + 에러 카탈로그 사용. |
 | `settings.py` | 설정 페이지 (tshark 경로, AI 프로바이더/키/모델, `ui_offline_assets` 오프라인 에셋 옵션). API 키 평문 재노출 금지(placeholder 마스킹만). |
+| `independent_validation.py` | 업로드 임시 원본을 standalone 독립 로밍 검증기에 전달하고 결과 경로를 사용자 표시명으로 정제. 본 분석 성공과 검증 실패를 분리. |
 
 ## For AI Agents
 
