@@ -1,5 +1,6 @@
 import ast
 from pathlib import Path
+import time
 
 import pytest
 
@@ -105,6 +106,8 @@ def test_cross_source_dedup_keeps_retry_distinction():
     assert duplicates == 1
     assert len(events) == 2
     assert {event.retry for event in events} == {False, True}
+    assert primary.epoch == 10.0
+    assert copied.epoch == 192.25
 
 
 def test_single_association_request_is_a_station_candidate():
@@ -173,6 +176,15 @@ def test_station_timestamp_timezone_is_host_independent():
         verify._parse_utc_offset("KST")
 
 
+def test_station_timestamp_accepts_seconds_and_microseconds():
+    tz = verify._parse_utc_offset("+09:00")
+
+    whole = verify._parse_local_epoch("2026-01-01 09:00:00", tz)
+    micros = verify._parse_local_epoch("2026-01-01 09:00:00.123456", tz)
+
+    assert micros - whole == pytest.approx(0.123456)
+
+
 def test_auto_binding_and_correlation_are_one_to_one():
     sta1, sta2 = "00:00:00:00:00:01", "00:00:00:00:00:02"
     ap1, ap2 = "00:00:00:00:00:a1", "00:00:00:00:00:a2"
@@ -202,6 +214,75 @@ def test_auto_binding_and_correlation_are_one_to_one():
     assert correlation["matched"] == 4
     assert not correlation["unmatched_station_success"]
     assert not correlation["unmatched_packets"]
+
+
+def test_station_binding_learns_large_clock_offset():
+    sta, ap = "00:00:00:00:00:01", "00:00:00:00:00:a1"
+    packets = [
+        transaction(sta=sta, ap=ap, epoch=3700.0),
+        transaction(sta=sta, ap=ap, epoch=3800.0),
+    ]
+    logs = [
+        verify.StationRoam("one", 1, ap, 100.0, 100.1, 100.0, False, ""),
+        verify.StationRoam("one", 2, ap, 200.0, 200.1, 100.0, False, ""),
+    ]
+
+    score = verify.score_station_binding("one", logs, sta, packets)
+
+    assert score.matched == 2
+    assert score.offset_sec == pytest.approx(3600.0)
+
+
+def test_hungarian_assignment_scales_and_finds_unique_optimum():
+    size = 12
+    weights = [
+        [100.0 if row == col else 0.0 for col in range(size)] for row in range(size)
+    ]
+
+    assert verify._maximum_weight_assignment(weights) == list(range(size))
+
+
+def test_tshark_rows_drains_large_stderr_without_deadlock(tmp_path):
+    fake = tmp_path / "fake-tshark"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "sys.stderr.write('x' * 200000)\n"
+        "print('1')\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    pcap = tmp_path / "input.pcap"
+    pcap.write_bytes(b"x")
+
+    rows = list(verify._tshark_rows([pcap], ("field",), "", str(fake)))
+
+    assert rows == [(pcap, ["1"])]
+
+
+def test_tshark_rows_terminates_process_on_cancel(tmp_path):
+    fake = tmp_path / "slow-tshark"
+    fake.write_text(
+        "#!/usr/bin/env python3\nimport time\ntime.sleep(10)\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    pcap = tmp_path / "input.pcap"
+    pcap.write_bytes(b"x")
+    started = time.monotonic()
+
+    with pytest.raises(verify.VerificationCancelled):
+        list(
+            verify._tshark_rows(
+                [pcap],
+                ("field",),
+                "",
+                str(fake),
+                cancelled=lambda: time.monotonic() - started > 0.2,
+            )
+        )
+
+    assert time.monotonic() - started < 3.0
 
 
 def test_explicit_binding_must_cover_every_station():

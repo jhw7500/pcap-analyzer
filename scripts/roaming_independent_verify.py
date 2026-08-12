@@ -10,18 +10,19 @@
 from __future__ import annotations
 
 import argparse
-from bisect import bisect_left, bisect_right
-from collections import Counter, OrderedDict, defaultdict, deque
-from dataclasses import asdict, dataclass
+from bisect import bisect_left
+from collections import OrderedDict, defaultdict, deque
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
-import itertools
 import json
 import math
 from pathlib import Path
+import queue
 import re
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, Callable, Iterable, Optional
 
@@ -54,7 +55,7 @@ DEFAULT_STA_SLOW_MS = 150.0
 DEFAULT_PCAP_SLOW_MS = 100.0
 DEFAULT_STATION_UTC_OFFSET = "+09:00"
 
-_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})")
+_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)")
 _ROAM_RE = re.compile(r"Control interface command 'ROAM ([0-9a-f:]{17})'", re.I)
 _CONNECTED_RE = re.compile(
     r"CTRL-EVENT-CONNECTED - Connection to ([0-9a-f:]{17})", re.I
@@ -117,6 +118,10 @@ class PairScore:
     residual_mad_ms: Optional[float]
 
 
+class VerificationCancelled(RuntimeError):
+    """독립 검증의 외부 취소 신호가 tshark 실행 중 전달됐다."""
+
+
 def _first(value: str) -> str:
     return (value or "").split(",", 1)[0].strip()
 
@@ -142,7 +147,11 @@ def _percentile(values: list[float], fraction: float) -> Optional[float]:
 
 
 def _tshark_rows(
-    paths: Iterable[Path], fields: tuple[str, ...], display_filter: str, tshark: str
+    paths: Iterable[Path],
+    fields: tuple[str, ...],
+    display_filter: str,
+    tshark: str,
+    cancelled: Optional[Callable[[], bool]] = None,
 ) -> Iterable[tuple[Path, list[str]]]:
     for path in paths:
         cmd = [tshark, "-r", str(path), "-T", "fields"]
@@ -157,26 +166,74 @@ def _tshark_rows(
             encoding="utf-8",
             errors="replace",
         )
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            cols = line.rstrip("\r\n").split("\t")
-            cols.extend([""] * (len(fields) - len(cols)))
-            yield path, cols
-        assert proc.stderr is not None
-        stderr = proc.stderr.read()
-        rc = proc.wait()
+        assert proc.stdout is not None and proc.stderr is not None
+        rows: "queue.Queue[object]" = queue.Queue()
+        done = object()
+        stderr_tail: deque[str] = deque(maxlen=200)
+
+        def drain_stdout() -> None:
+            try:
+                for line in proc.stdout:
+                    rows.put(line)
+            finally:
+                rows.put(done)
+
+        def drain_stderr() -> None:
+            for line in proc.stderr:
+                stderr_tail.append(line)
+
+        stdout_thread = threading.Thread(target=drain_stdout, daemon=True)
+        stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+        try:
+            while True:
+                if cancelled is not None and cancelled():
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                    raise VerificationCancelled(f"tshark 검증 취소: {path.name}")
+                try:
+                    item = rows.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if item is done:
+                    break
+                line = str(item)
+                cols = line.rstrip("\r\n").split("\t")
+                cols.extend([""] * (len(fields) - len(cols)))
+                yield path, cols
+            rc = proc.wait()
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            stdout_thread.join(timeout=2)
+            stderr_thread.join(timeout=2)
         if rc != 0:
+            stderr = "".join(stderr_tail)
             raise RuntimeError(f"tshark 실패({path}, exit={rc}): {stderr[-1000:]}")
 
 
 def extract_packet_events(
-    sources: "OrderedDict[str, list[Path]]", tshark: str = "tshark"
+    sources: "OrderedDict[str, list[Path]]",
+    tshark: str = "tshark",
+    cancelled: Optional[Callable[[], bool]] = None,
 ) -> tuple["OrderedDict[str, list[PacketEvent]]", dict[str, int]]:
     out: "OrderedDict[str, list[PacketEvent]]" = OrderedDict()
     counts: dict[str, int] = {}
     for tag, paths in sources.items():
         events: list[PacketEvent] = []
-        for _, cols in _tshark_rows(paths, EVENT_FIELDS, EVENT_FILTER, tshark):
+        for _, cols in _tshark_rows(
+            paths, EVENT_FIELDS, EVENT_FILTER, tshark, cancelled
+        ):
             try:
                 events.append(
                     PacketEvent(
@@ -202,13 +259,19 @@ def extract_packet_events(
 
 
 def extract_beacons(
-    sources: "OrderedDict[str, list[Path]]", tshark: str = "tshark"
+    sources: "OrderedDict[str, list[Path]]",
+    tshark: str = "tshark",
+    cancelled: Optional[Callable[[], bool]] = None,
 ) -> "OrderedDict[str, dict[tuple[str, str], float]]":
     out: "OrderedDict[str, dict[tuple[str, str], float]]" = OrderedDict()
     for tag, paths in sources.items():
         beacons: dict[tuple[str, str], float] = {}
         for _, cols in _tshark_rows(
-            paths, BEACON_FIELDS, "wlan.fc.type_subtype == 0x0008", tshark
+            paths,
+            BEACON_FIELDS,
+            "wlan.fc.type_subtype == 0x0008",
+            tshark,
+            cancelled,
         ):
             try:
                 epoch = float(_first(cols[0]))
@@ -263,8 +326,7 @@ def align_and_dedup(
     for tag, events in per_source.items():
         offset = float(offsets[tag]["offset_sec"])
         for event in events:
-            event.epoch += offset
-            merged.append(event)
+            merged.append(replace(event, epoch=event.epoch + offset))
     merged.sort(key=lambda event: (event.epoch, event.source, event.number))
 
     window_sec = dedup_ms / 1000.0
@@ -403,7 +465,8 @@ def _parse_utc_offset(value: str) -> timezone:
 
 
 def _parse_local_epoch(value: str, tz: timezone) -> float:
-    parsed = datetime.strptime(value, "%Y-%m-%d %H:%M:%S.%f")
+    pattern = "%Y-%m-%d %H:%M:%S.%f" if "." in value else "%Y-%m-%d %H:%M:%S"
+    parsed = datetime.strptime(value, pattern)
     return parsed.replace(tzinfo=tz).timestamp()
 
 
@@ -490,19 +553,42 @@ def score_station_binding(
     for epochs in packet_by_ap.values():
         epochs.sort()
 
-    candidate_offsets: Counter[float] = Counter()
+    # 장비와 pcap 시계가 수시간 이상 벌어져도 먼저 offset을 배울 수 있어야 한다.
+    # 같은 AP의 시간순 이벤트를 비례 인덱스로 맞추고 주변 shift도 보아, 전체
+    # Cartesian product 없이 O(events)개의 coarse cluster를 만든다.
+    station_by_ap: dict[str, list[StationRoam]] = defaultdict(list)
     for roam in successes:
-        epochs = packet_by_ap.get(roam.target_ap, [])
-        lo = bisect_left(epochs, roam.command_epoch - 15.0)
-        hi = bisect_right(epochs, roam.command_epoch + 15.0)
-        for epoch in epochs[lo:hi]:
-            candidate_offsets[round(epoch - roam.command_epoch, 3)] += 1
-    if not candidate_offsets:
+        station_by_ap[roam.target_ap].append(roam)
+    offset_buckets: dict[float, list[float]] = defaultdict(list)
+    for ap, log_rows in station_by_ap.items():
+        packet_epochs = packet_by_ap.get(ap, [])
+        if not packet_epochs:
+            continue
+        log_rows.sort(key=lambda row: row.command_epoch)
+        log_last = max(1, len(log_rows) - 1)
+        packet_last = max(0, len(packet_epochs) - 1)
+        sample_step = max(1, len(log_rows) // 80)
+        for log_index in range(0, len(log_rows), sample_step):
+            packet_index = round(log_index * packet_last / log_last)
+            for shift in range(-3, 4):
+                candidate_index = packet_index + shift
+                if not 0 <= candidate_index < len(packet_epochs):
+                    continue
+                raw = packet_epochs[candidate_index] - log_rows[log_index].command_epoch
+                offset_buckets[round(raw, 1)].append(raw)
+    if not offset_buckets:
         return PairScore(station, sta, 0.0, 0, None)
 
     tolerance = tolerance_ms / 1000.0
     best_offset, best_count, best_residuals = 0.0, -1, []
-    for offset, _ in candidate_offsets.most_common(80):
+    candidates = sorted(
+        (
+            (len(values), statistics.median(values))
+            for values in offset_buckets.values()
+        ),
+        key=lambda item: (-item[0], abs(item[1])),
+    )[:80]
+    for _, offset in candidates:
         residuals = []
         for roam in successes:
             delta = _nearest_delta(
@@ -538,6 +624,66 @@ def score_station_binding(
     )
 
 
+def _maximum_weight_assignment(weights: list[list[float]]) -> list[int]:
+    """행마다 서로 다른 열 하나를 고르는 최대 가중치 할당(Hungarian)."""
+    row_count = len(weights)
+    if row_count == 0:
+        return []
+    col_count = len(weights[0]) if weights[0] else 0
+    if row_count > col_count:
+        return []
+    # 최소비용 구현에 음의 가중치를 넣는다. 1-based 배열은 표준 Hungarian
+    # 증분 augmenting path 표현을 그대로 유지해 경계 처리를 단순화한다.
+    u = [0.0] * (row_count + 1)
+    v = [0.0] * (col_count + 1)
+    matched_row = [0] * (col_count + 1)
+    previous_col = [0] * (col_count + 1)
+    for row in range(1, row_count + 1):
+        matched_row[0] = row
+        min_value = [math.inf] * (col_count + 1)
+        used = [False] * (col_count + 1)
+        col = 0
+        while True:
+            used[col] = True
+            current_row = matched_row[col]
+            delta = math.inf
+            next_col = 0
+            for candidate_col in range(1, col_count + 1):
+                if used[candidate_col]:
+                    continue
+                cost = (
+                    -weights[current_row - 1][candidate_col - 1]
+                    - u[current_row]
+                    - v[candidate_col]
+                )
+                if cost < min_value[candidate_col]:
+                    min_value[candidate_col] = cost
+                    previous_col[candidate_col] = col
+                if min_value[candidate_col] < delta:
+                    delta = min_value[candidate_col]
+                    next_col = candidate_col
+            for candidate_col in range(col_count + 1):
+                if used[candidate_col]:
+                    u[matched_row[candidate_col]] += delta
+                    v[candidate_col] -= delta
+                else:
+                    min_value[candidate_col] -= delta
+            col = next_col
+            if matched_row[col] == 0:
+                break
+        while True:
+            previous = previous_col[col]
+            matched_row[col] = matched_row[previous]
+            col = previous
+            if col == 0:
+                break
+    assignment = [-1] * row_count
+    for col in range(1, col_count + 1):
+        if matched_row[col]:
+            assignment[matched_row[col] - 1] = col - 1
+    return assignment
+
+
 def bind_stations(
     station_ledgers: dict[str, list[StationRoam]],
     packet_roams: list[RoamTransaction],
@@ -570,22 +716,29 @@ def bind_stations(
         }, matrix
     if len(stations) > len(stas):
         raise RuntimeError("STA 로그 수가 패킷 STA 후보 수보다 많아 자동 바인딩 불가")
-    best: Optional[tuple[tuple[int, float], dict[str, PairScore]]] = None
-    for selected in itertools.permutations(stas, len(stations)):
-        binding = {
-            station: matrix[station][sta] for station, sta in zip(stations, selected)
-        }
-        matched = sum(score.matched for score in binding.values())
-        mad = sum(
-            score.residual_mad_ms if score.residual_mad_ms is not None else 1_000_000
-            for score in binding.values()
-        )
-        rank = (matched, -mad)
-        if best is None or rank > best[0]:
-            best = (rank, binding)
-    if best is None:
+    if not stations:
+        return {}, matrix
+    # matched 수를 MAD보다 항상 우선하는 가중치로 변환한 뒤 O(N^3)으로 푼다.
+    unit = len(stations) * 1_000_001
+    weights = []
+    for station in stations:
+        row = []
+        for sta in stas:
+            score = matrix[station][sta]
+            penalty = (
+                score.residual_mad_ms
+                if score.residual_mad_ms is not None
+                else 1_000_000
+            )
+            row.append(score.matched * unit - penalty)
+        weights.append(row)
+    assignment = _maximum_weight_assignment(weights)
+    if len(assignment) != len(stations) or any(index < 0 for index in assignment):
         raise RuntimeError("STA 자동 바인딩 후보가 없다")
-    return best[1], matrix
+    return {
+        station: matrix[station][stas[assignment[index]]]
+        for index, station in enumerate(stations)
+    }, matrix
 
 
 def correlate_station_logs(
@@ -919,6 +1072,7 @@ def run_verification(
     sta_match_ms: float = DEFAULT_STA_MATCH_MS,
     compare_ms: float = DEFAULT_COMPARE_MS,
     progress_cb: Optional[Callable[[str, int], None]] = None,
+    cancelled: Optional[Callable[[], bool]] = None,
 ) -> dict[str, Any]:
     """원시 입력에서 독립 검증 보고서를 만든다.
 
@@ -939,9 +1093,9 @@ def run_verification(
             progress_cb(message, pct)
 
     progress("tshark 로밍/EAPOL 전수 추출", 5)
-    per_source, packet_counts = extract_packet_events(sources, tshark)
+    per_source, packet_counts = extract_packet_events(sources, tshark, cancelled)
     progress("Beacon TSF 독립 시각 정렬", 30)
-    beacons = extract_beacons(sources, tshark)
+    beacons = extract_beacons(sources, tshark, cancelled)
     offsets = estimate_tsf_offsets(beacons, selected_reference)
     progress("관측점 간 중복 제거 및 패킷 로밍 원장", 55)
     merged, duplicates = align_and_dedup(per_source, offsets, dedup_ms)
@@ -989,6 +1143,11 @@ def run_verification(
 def render_markdown(report: dict[str, Any]) -> str:
     packet = report["packet"]
     station = report["station_logs"]
+    p50 = station["total_ms"]["p50"]
+    p95 = station["total_ms"]["p95"]
+    station_percentiles = (
+        f"{p50} / {p95} ms" if p50 is not None and p95 is not None else "—"
+    )
     lines = [
         "# 독립 로밍 검증 보고서",
         "",
@@ -1005,7 +1164,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"| STA 로그 명령 | {station['commands']} |",
         f"| STA 성공/실패 | {station['success']} / {station['failed']} |",
         f"| PCAP↔STA 매칭 | {station['matched']} |",
-        f"| STA 체감 p50/p95 | {station['total_ms']['p50']} / {station['total_ms']['p95']} ms |",
+        f"| STA 체감 p50/p95 | {station_percentiles} |",
         "",
         "## STA 바인딩",
         "",
@@ -1147,8 +1306,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         markdown = args.markdown or args.output.with_suffix(".md")
         markdown.parent.mkdir(parents=True, exist_ok=True)
-        markdown.write_text(render_markdown(report), encoding="utf-8")
-        print(render_markdown(report), end="")
+        markdown_text = render_markdown(report)
+        markdown.write_text(markdown_text, encoding="utf-8")
+        print(markdown_text, end="")
         comparison = report.get("analyzer_comparison")
         if args.strict and comparison is not None and not comparison["clean"]:
             return 2

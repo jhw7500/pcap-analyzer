@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from scripts.roaming_independent_verify import run_verification
+from scripts.roaming_independent_verify import VerificationCancelled, run_verification
 
 
 class IndependentValidationCancelled(RuntimeError):
@@ -34,11 +34,15 @@ def run_independent_web_validation(
     sources: "OrderedDict[str, list[Path]]" = OrderedDict(
         (f"w{index}", [Path(path)]) for index, path in enumerate(paths, start=1)
     )
-    station_paths = {
-        str(entry.get("name") or "station"): Path(entry["files"]["wpa.log"])
-        for entry in station_entries
-        if isinstance(entry.get("files"), dict) and entry["files"].get("wpa.log")
-    }
+    station_paths: dict[str, Path] = {}
+    for entry in station_entries:
+        files = entry.get("files")
+        if not isinstance(files, dict) or not files.get("wpa.log"):
+            continue
+        name = str(entry.get("name") or "station")
+        if name in station_paths:
+            raise ValueError(f"중복된 STA 로그 이름: {name}")
+        station_paths[name] = Path(files["wpa.log"])
 
     def checked_progress(message: str, pct: int) -> None:
         if cancelled is not None and cancelled():
@@ -46,20 +50,27 @@ def run_independent_web_validation(
         if progress_cb is not None:
             progress_cb(message, pct)
 
-    report = run_verification(
-        sources,
-        station_paths,
-        analyzer_result=analyzer_result,
-        reference="w1",
-        tshark=tshark,
-        progress_cb=checked_progress,
-    )
+    try:
+        report = run_verification(
+            sources,
+            station_paths,
+            analyzer_result=analyzer_result,
+            reference="w1",
+            tshark=tshark,
+            progress_cb=checked_progress,
+            cancelled=cancelled,
+        )
+    except VerificationCancelled as exc:
+        raise IndependentValidationCancelled(str(exc)) from exc
     # /tmp 경로는 서버 내부 정보이며 업로드가 끝나면 무효다. 결과에는 사용자가
     # 알아볼 수 있는 원본 표시명만 남긴다.
     report["inputs"]["sources"] = {
         f"w{index}": [source_names[index - 1]] for index in range(1, len(paths) + 1)
     }
     report["inputs"]["stations"] = {name: f"{name}/wpa.log" for name in station_paths}
+    for name, summary in report.get("station_logs", {}).get("by_station", {}).items():
+        if isinstance(summary, dict):
+            summary["path"] = f"{name}/wpa.log"
     report["status"] = "complete"
     report["completed_at"] = datetime.now(timezone.utc).isoformat()
     report["mode"] = "web_upload_opt_in"

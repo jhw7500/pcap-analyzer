@@ -29,6 +29,7 @@ def validation_report(clean=True):
             "failed": 0,
             "matched": 2,
             "total_ms": {"p50": 111.0, "p95": 139.0},
+            "by_station": {"1호기": {"path": "/tmp/private-wpa.log"}},
         },
         "bindings": {},
         "analyzer_comparison": {"clean": clean, "summary_diff": {}},
@@ -75,6 +76,8 @@ def test_web_wrapper_scrubs_temporary_paths_and_marks_complete(tmp_path):
     }
     assert report["inputs"]["stations"] == {"1호기": "1호기/wpa.log"}
     assert str(tmp_path) not in json.dumps(report, ensure_ascii=False)
+    assert "/tmp/private-wpa.log" not in json.dumps(report, ensure_ascii=False)
+    assert report["station_logs"]["by_station"]["1호기"]["path"] == "1호기/wpa.log"
     assert verifier.call_args.kwargs["analyzer_result"]["id"] == "web-validation-test"
 
 
@@ -98,6 +101,28 @@ def test_web_wrapper_honors_cancel_before_work(tmp_path):
                 source_names=["x.pcap"],
                 cancelled=lambda: True,
             )
+
+
+def test_web_wrapper_rejects_duplicate_station_names(tmp_path):
+    primary = tmp_path / "x.pcap"
+    first = tmp_path / "first.log"
+    second = tmp_path / "second.log"
+    primary.write_bytes(PCAP)
+    first.write_text("x")
+    second.write_text("x")
+
+    with pytest.raises(ValueError, match="중복된 STA 로그 이름"):
+        run_independent_web_validation(
+            str(primary),
+            [],
+            [
+                {"name": "same", "files": {"wpa.log": str(first)}},
+                {"name": "same", "files": {"wpa.log": str(second)}},
+            ],
+            analyzer_result(),
+            tshark="tshark",
+            source_names=["x.pcap"],
+        )
 
 
 def test_failed_payload_hides_temporary_paths():
@@ -260,9 +285,7 @@ def test_failed_validation_markdown_returns_422(tmp_path, monkeypatch):
         json.dumps(result), encoding="utf-8"
     )
 
-    response = client.get(
-        "/api/analysis/web-failed-download/independent-validation.md"
-    )
+    response = client.get("/api/analysis/web-failed-download/independent-validation.md")
 
     assert response.status_code == 422
     assert response.json()["code"] == "INDEPENDENT_VALIDATION_FAILED"
