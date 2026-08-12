@@ -12,7 +12,8 @@ from typing import Any
 from analyzer.core.ping_matching import ping_losses, ping_pairs
 from analyzer.core.station_match import MATCH_METHOD_LABELS
 from analyzer.web.structured import LOSS_BASIS_WIRED
-from analyzer.core.thresholds import ROAM_GAP_DANGER_MS
+from analyzer.core.thresholds import ROAM_GAP_DANGER_MS, STA_ROAM_SLOW_MS
+from analyzer.core.modules.roaming import STA_SLOW_POLICY
 
 #: STA 로그 섹션 상한. 업로드는 호기 로그를 최대 60개 파일까지 받고
 #: (`routes/upload._MAX_STATION_LOG_FILES`), 이 프롬프트는 **4000토큰 계약**을
@@ -157,10 +158,17 @@ def _build_roaming_section(roaming: dict) -> list:
     # gap_ms는 None(측정 불가)일 수 있다 — 통계에서 제외해야 평균이 왜곡되지 않는다.
     gaps = [s.get("gap_ms") for s in seqs if isinstance(s.get("gap_ms"), (int, float))]
     unmeasured = [s for s in seqs if s.get("gap_ms") is None]
+    sta_slow_policy = roaming.get("slow_policy") == STA_SLOW_POLICY
+    slow_rule = (
+        f"STA 체감 >{STA_ROAM_SLOW_MS}ms / 로그 미매칭 pcap 전체 "
+        f">{ROAM_GAP_DANGER_MS}ms"
+        if sta_slow_policy
+        else f"전체 소요 >{ROAM_GAP_DANGER_MS}ms"
+    )
     lines = ["", "## 로밍 (BSS Transition)"]
     unmeasured_str = f" / gap 측정불가 {len(unmeasured)}회" if unmeasured else ""
     lines.append(
-        f"- 총 {len(seqs)}회 / 느린 로밍(전체 소요 >{ROAM_GAP_DANGER_MS}ms) {len(slow)}회 / "
+        f"- 총 {len(seqs)}회 / 느린 로밍({slow_rule}) {len(slow)}회 / "
         f"실패 {len(failed)}회{unmeasured_str}"
     )
     if unmeasured:
@@ -209,10 +217,17 @@ def _build_roaming_section(roaming: dict) -> list:
             "처리·키 설치는 캡처에 없어 체감이 더 크다. 로그가 붙지 않은 로밍은 "
             "'빨랐다'가 아니라 '모른다'로 다룰 것"
         )
-        lines.append(
-            "  · 느린 로밍 판정은 여전히 total_roam_ms 기준이다 — 체감값으로 "
-            "판정 건수를 다시 세지 말 것"
-        )
+        if sta_slow_policy:
+            lines.append(
+                f"  · 로그가 매칭된 로밍은 STA 체감 >{STA_ROAM_SLOW_MS}ms로 판정하고, "
+                f"미매칭 로밍만 pcap 전체 >{ROAM_GAP_DANGER_MS}ms로 판정한다"
+            )
+        else:
+            # 구버전 result에는 정책 키가 없다 — 저장 당시 판정 설명을 그대로 유지.
+            lines.append(
+                "  · 느린 로밍 판정은 여전히 total_roam_ms 기준이다 — 체감값으로 "
+                "판정 건수를 다시 세지 말 것"
+            )
     # 느린 로밍 top 5 상세 (gap 큰 순). 4-way/밴드 전환은 신규 키 — 있을 때만 표기.
     def _gap_sort_key(x):
         g = x.get("gap_ms")

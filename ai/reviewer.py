@@ -9,6 +9,7 @@ from analyzer.core.thresholds import (
     RETRY_WARN_PCT,
     ROAM_GAP_DANGER_MS,
     ROAM_GAP_WARN_MS,
+    STA_ROAM_SLOW_MS,
     RSSI_DANGER_DBM,
     RSSI_WARN_DBM,
     RTT_DANGER_MS,
@@ -26,8 +27,11 @@ SYSTEM_PROMPT = (
     "## 진단 임계값 (자동차 운용 기준)\n"
     f"- Retry율: ≤{RETRY_WARN_PCT}% 양호 / {RETRY_WARN_PCT}~{RETRY_DANGER_PCT}% 주의"
     f" / >{RETRY_DANGER_PCT}% 위험\n"
-    f"- 로밍 gap_ms: ≤{ROAM_GAP_WARN_MS}ms 양호 / {ROAM_GAP_WARN_MS}~{ROAM_GAP_DANGER_MS}ms 주의"
-    f" / >{ROAM_GAP_DANGER_MS}ms 느린 로밍\n"
+    f"- 로밍 gap_ms: ≤{ROAM_GAP_WARN_MS}ms 양호 / "
+    f"{ROAM_GAP_WARN_MS}~{ROAM_GAP_DANGER_MS}ms 주의 / "
+    f">{ROAM_GAP_DANGER_MS}ms 위험(전체 소요의 하한)\n"
+    f"- 느린 로밍: STA 로그 매칭 시 ROAM 명령→CONNECTED >{STA_ROAM_SLOW_MS}ms; "
+    f"로그 미매칭 시 pcap Auth→4-way 완료 >{ROAM_GAP_DANGER_MS}ms\n"
     f"- Ping RTT: avg ≤{RTT_WARN_MS}ms 양호 / {RTT_WARN_MS}~{RTT_DANGER_MS}ms 주의"
     f" / >{RTT_DANGER_MS}ms 위험\n"
     f"- Ping loss: ≤{LOSS_WARN_PCT}% 양호 / {LOSS_WARN_PCT}~{LOSS_DANGER_PCT}% 주의"

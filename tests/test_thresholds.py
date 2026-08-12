@@ -12,6 +12,8 @@ class TestCanonicalValues:
     def test_constants_match_automotive_baseline(self):
         assert (th.RETRY_WARN_PCT, th.RETRY_DANGER_PCT) == (5, 15)
         assert (th.ROAM_GAP_WARN_MS, th.ROAM_GAP_DANGER_MS) == (50, 100)
+        assert th.ROAM_PCAP_TOTAL_SLOW_MS == 100
+        assert th.STA_ROAM_SLOW_MS == 150
         assert (th.RTT_WARN_MS, th.RTT_DANGER_MS) == (30, 80)
         assert (th.LOSS_WARN_PCT, th.LOSS_DANGER_PCT) == (1, 5)
         assert (th.RSSI_WARN_DBM, th.RSSI_DANGER_DBM) == (-65, -75)
@@ -60,7 +62,8 @@ class TestSystemPromptInjection:
         """SYSTEM_PROMPT의 임계값 문구는 상수에서 주입된다 (문구 유지)."""
         assert f"≤{th.RETRY_WARN_PCT}% 양호" in SYSTEM_PROMPT
         assert f">{th.RETRY_DANGER_PCT}% 위험" in SYSTEM_PROMPT
-        assert f">{th.ROAM_GAP_DANGER_MS}ms 느린 로밍" in SYSTEM_PROMPT
+        assert f">{th.STA_ROAM_SLOW_MS}ms" in SYSTEM_PROMPT
+        assert f">{th.ROAM_PCAP_TOTAL_SLOW_MS}ms" in SYSTEM_PROMPT
         assert f"≤{th.RTT_WARN_MS}ms 양호" in SYSTEM_PROMPT
         assert f">{th.LOSS_DANGER_PCT}% 위험" in SYSTEM_PROMPT
         assert f"≥{th.RSSI_WARN_DBM}dBm 양호" in SYSTEM_PROMPT

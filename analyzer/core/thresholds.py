@@ -15,10 +15,19 @@ analyzer/web/structured.py, analyzer/core/modules/diagnosis.py 등)가
 RETRY_WARN_PCT = 5
 RETRY_DANGER_PCT = 15
 
-# 로밍 gap(ms) — Auth→(Re)Assoc 간격. 차량 주행 중 50ms 초과면 스트리밍
-# 끊김 체감 시작, 100ms 초과는 '느린 로밍'으로 핸드오버 실패에 준함.
+# pcap 로밍 구간(ms) — gap 경고는 Auth→(Re)Assoc, 느림 판정은 관측 가능한
+# 전체(Auth→4-way 완료)에 적용한다. 100ms는 기존 자동차 운용 기준이며 STA 로그가
+# 없을 때의 폴백 판정으로 보존한다.
 ROAM_GAP_WARN_MS = 50
 ROAM_GAP_DANGER_MS = 100
+ROAM_PCAP_TOTAL_SLOW_MS = ROAM_GAP_DANGER_MS
+
+# STA 체감 로밍(ms) — wpa_supplicant의 ROAM 명령→CTRL-EVENT-CONNECTED.
+# TEST9 실측 837건은 p50 96ms, p95 138ms, >150ms 19건(2.3%)이었다. 100ms를
+# 느림으로 쓰면 360건(43.0%)이 뒤집혀 정상 중앙 집단을 이상으로 분류하므로,
+# p95보다 약간 높은 150ms를 느린 로밍 운용 경계로 채택했다(2026-08-12 사용자 승인).
+# 이 값은 실제 패킷 단절 시간이나 ITU 종단간 음성 지연과 같은 지표가 아니다.
+STA_ROAM_SLOW_MS = 150
 
 # Ping RTT 평균(ms) — 차내 제어/텔레메트리 트래픽 기준 30ms까지 양호,
 # 80ms 초과면 실시간성 요구 애플리케이션에 위험.

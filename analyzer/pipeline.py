@@ -440,10 +440,18 @@ def run_analysis(
         ("종합 진단", diagnosis),
     ]
     text_sections = []
+    roaming_text_index: Optional[int] = None
     for i, (name, mod) in enumerate(analyzer_list):
         if _cancelled():
             return {"cancelled": True}
         _progress(f"{name} 분석...", 50 + int(40 * i / len(analyzer_list)))
+        if mod is roaming:
+            # 로밍은 STA 로그 상관까지 끝난 structured를 입력으로 직렬화해야 한다.
+            # 고정 시그니처 analyze()를 여기서 실행하면 station_logs를 볼 수 없어
+            # 화면과 텍스트 판정이 갈리므로 순서 자리만 예약한다.
+            roaming_text_index = len(text_sections)
+            text_sections.append(None)
+            continue
         text_sections.append(mod.analyze(frames, roles, index))
 
     # 구조화된 데이터 (웹 시각화용) — 90→99% 단계별 진행
@@ -555,8 +563,20 @@ def run_analysis(
         structured["station_logs"] = _correlate_station_logs(
             station_logs, frames, roles, structured["roaming"]
         )
+        # STA 로그가 붙은 시퀀스는 ROAM 명령→CONNECTED 150ms 기준으로 승격하고,
+        # 미부착 시퀀스는 기존 pcap Auth→4-way 100ms 판정을 유지한다. 규칙·필드
+        # 추출은 roaming의 단일 소스 함수만 호출한다.
+        roaming.reclassify_roaming_sequences(structured["roaming"])
         if _cancelled():
             return {"cancelled": True}
+
+    # 최종 텍스트 로밍 섹션은 **반드시 structured에서** 만든다. 기존 고정
+    # analyze(frames, roles, index) 호출은 station_logs를 볼 수 없어 화면과 텍스트가
+    # 다른 판정을 말했으므로, STA 상관·재판정이 끝난 객체로 교체한다.
+    assert roaming_text_index is not None
+    text_sections[roaming_text_index] = roaming.section_from_structured(
+        structured["roaming"], roles
+    )
 
     _progress("시각화: 초당 통계 생성 중...", 95)
     structured["per_second"] = _structured_per_second(frames)
