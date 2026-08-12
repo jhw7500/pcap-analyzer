@@ -178,6 +178,10 @@ make test-e2e         # Playwright e2e (서버 실행 필요)
 make cov              # 커버리지 (목표 ≥80%)
 ```
 
+실측 pcap과 STA `wpa.log`로 로밍 결과를 분석기와 별도 구현에서 교차 검증하려면
+`scripts/roaming_independent_verify.py`를 사용한다. 사용법과 TEST14 기준값은
+[`docs/ROAMING_INDEPENDENT_VERIFY.md`](docs/ROAMING_INDEPENDENT_VERIFY.md) 참조.
+
 ## 디렉토리 구조
 
 ```
