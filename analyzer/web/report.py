@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from ..core.models import SUBTYPE_NAMES
+from ..core.modules.roaming import STA_SLOW_POLICY
+from ..core.thresholds import ROAM_PCAP_TOTAL_SLOW_MS, STA_ROAM_SLOW_MS
 # 바인딩 방법 라벨은 station_match가 단일 정의 — 리포트·AI 프롬프트가 같은 어휘를 쓴다.
 from ..core.station_match import MATCH_METHOD_LABELS
 # 손실 판정 근거 라벨과 커버리지 표본 술어는 structured가 단일 정의 —
@@ -643,20 +645,38 @@ def _roaming_section(structured: Dict[str, Any]) -> List[str]:
         cells.append(bc_str)
         lines.append("| " + " | ".join(cells) + " |")
     lines.append("")
-    lines.append(
-        "> Gap = Auth 요청 → Reassoc 요청 구간만. 전체 = Auth 요청 → 4-way 완료 "
-        "(로밍 실소요). **느린 로밍 판정은 전체 기준**이다. 4-way를 못 찾으면 전체는 "
-        "`-`이고, 그때는 Gap이 이미 임계를 넘은 경우에만 느림으로 확정한다"
-        "(전체 ≥ Gap 이므로)."
-    )
-    if has_sta_log:
+    sta_slow_policy = roaming.get("slow_policy") == STA_SLOW_POLICY
+    if sta_slow_policy:
         lines.append(
-            "> STA 체감 = 단말 로그의 ROAM 명령 → CONNECTED. 스캔·로밍 판단·드라이버 "
-            "처리·키 설치처럼 **전파에 나타나지 않는 구간**까지 포함하므로 전체(ms)보다 "
-            "크다. `로그 미매칭`은 그 로밍에 대응하는 로그를 찾지 못했다는 뜻이지 지연이 "
-            "없었다는 뜻이 아니다. **느린 로밍 판정은 여전히 전체(ms) 기준**이며 체감은 "
-            "판정에 쓰지 않는다."
+            "> Gap = Auth 요청 → Reassoc 요청 구간만. 전체 = Auth 요청 → 4-way 완료. "
+            f"**느린 로밍은 STA 로그 매칭 시 체감 >{STA_ROAM_SLOW_MS}ms, 미매칭 시 "
+            f"pcap 전체 >{ROAM_PCAP_TOTAL_SLOW_MS}ms로 판정**한다. pcap 전체를 못 "
+            "찾으면 Gap이 pcap 임계를 이미 넘은 경우에만 느림으로 확정한다."
         )
+    else:
+        # 구버전 result에는 정책 키가 없다 — 기존 문구를 한 글자도 바꾸지 않는다.
+        lines.append(
+            "> Gap = Auth 요청 → Reassoc 요청 구간만. 전체 = Auth 요청 → 4-way 완료 "
+            "(로밍 실소요). **느린 로밍 판정은 전체 기준**이다. 4-way를 못 찾으면 전체는 "
+            "`-`이고, 그때는 Gap이 이미 임계를 넘은 경우에만 느림으로 확정한다"
+            "(전체 ≥ Gap 이므로)."
+        )
+    if has_sta_log:
+        if sta_slow_policy:
+            lines.append(
+                "> STA 체감 = 단말 로그의 ROAM 명령 → CONNECTED. 스캔·로밍 판단·드라이버 "
+                "처리·키 설치처럼 **전파에 나타나지 않는 구간**까지 포함한다. `로그 "
+                "미매칭`은 지연이 없었다는 뜻이 아니다. **매칭된 로밍은 이 체감값으로 "
+                "판정**한다."
+            )
+        else:
+            lines.append(
+                "> STA 체감 = 단말 로그의 ROAM 명령 → CONNECTED. 스캔·로밍 판단·드라이버 "
+                "처리·키 설치처럼 **전파에 나타나지 않는 구간**까지 포함하므로 전체(ms)보다 "
+                "크다. `로그 미매칭`은 그 로밍에 대응하는 로그를 찾지 못했다는 뜻이지 지연이 "
+                "없었다는 뜻이 아니다. **느린 로밍 판정은 여전히 전체(ms) 기준**이며 체감은 "
+                "판정에 쓰지 않는다."
+            )
     if len(seqs) > 20:
         lines.append("")
         lines.append(f"_(총 {len(seqs)}건 중 앞 20건만 표시)_")

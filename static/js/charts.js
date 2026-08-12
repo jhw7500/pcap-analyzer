@@ -385,6 +385,12 @@
     } else if (roaming.sequences && roaming.sequences.length > 0) {
         if (roamingTableEl) roamingTableEl.style.display = '';
         const seqs = roaming.sequences;
+        const staSlowPolicy = roaming.slow_policy === 'sta_log_total_preferred_v1';
+        const slowThresholds = roaming.slow_thresholds_ms || {};
+        const pcapSlowMs = typeof slowThresholds.pcap_total === 'number'
+            ? slowThresholds.pcap_total : 100;
+        const staSlowMs = typeof slowThresholds.sta_log_total === 'number'
+            ? slowThresholds.sta_log_total : 150;
         // AP 라벨: 로밍 전 AP(prev_ap_name) → 로밍 후 AP(ap_name). 직전 AP가 없으면
         // (최초 연결 또는 재분석 전 데이터) 후 AP만 표시.
         const roamAp = s => (s.prev_ap_name ? `${s.prev_ap_name} → ${s.ap_name}` : s.ap_name);
@@ -410,10 +416,15 @@
             return Math.max(0, s.total_roam_ms - s.gap_ms - s.four_way_ms);
         });
         const segFour = seqs.map(s => typeof s.four_way_ms === 'number' ? s.four_way_ms : null);
-        const hoverOf = s => gapMeasured(s)
+        const slowBasisText = s => s.slow_basis === 'sta_log_total'
+            ? `STA 체감 ${staSlowMs}ms 기준`
+            : (s.slow_basis === 'total' || s.slow_basis === 'gap_lower_bound')
+                ? `pcap 전체 ${pcapSlowMs}ms 기준` : '판정불가';
+        const hoverOf = s => ((gapMeasured(s)
             ? ((s.gap_ms).toFixed(1) + 'ms' + (s.gap_basis === 'auth_response' ? ' (하한)' : '')
                + (typeof s.total_roam_ms === 'number' ? ' · 전체 ' + s.total_roam_ms.toFixed(1) + 'ms' : ''))
-            : ('측정불가 — ' + missingText(s));
+            : ('측정불가 — ' + missingText(s)))
+            + (staSlowPolicy ? ' · ' + slowBasisText(s) : ''));
         /* STA 로그가 있으면 '체감 로밍 전체'를 **배경 영역**으로 깔고 그 안에 pcap
            구간 막대를 그린다. 누적(stack)이 아니라 **중첩**인 게 핵심 —
            pcap 전파구간은 STA 체감 로밍의 부분집합이지 옆에 붙는 별개 구간이
@@ -459,9 +470,13 @@
             xaxis: { title: '\ub85c\ubc0d \uc2dc\ud000\uc2a4 #' },
             yaxis: { title: hasStaLog ? '\ub85c\ubc0d \uc18c\uc694 (ms) — \ud68c\uc0c9=STA \uccb4\uac10 \uc804\uccb4, \uc0c9=pcap \uad6c\uac04' : '\ub85c\ubc0d \uc18c\uc694 (ms) — \uad6c\uac04 \ub204\uc801' },
             shapes: [{
-                type: 'line', x0: 0, x1: seqs.length + 1, y0: 100, y1: 100,
+                type: 'line', x0: 0, x1: seqs.length + 1,
+                y0: pcapSlowMs, y1: pcapSlowMs,
                 line: { color: '#ef4444', dash: 'dash', width: 1 },
-            }],
+            }].concat(staSlowPolicy && hasStaLog ? [{
+                type: 'line', x0: 0, x1: seqs.length + 1, y0: staSlowMs, y1: staSlowMs,
+                line: { color: '#f59e0b', dash: 'dot', width: 1 },
+            }] : []),
         }, {
             responsive: true,
             displayModeBar: true,
@@ -2182,4 +2197,3 @@
         });
     });
 })();
-

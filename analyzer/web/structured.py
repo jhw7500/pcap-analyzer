@@ -23,6 +23,7 @@ from ..core.thresholds import (
     LOSS_DANGER_PCT,
     RETRY_DANGER_PCT,
     ROAM_GAP_DANGER_MS,
+    STA_ROAM_SLOW_MS,
     RSSI_DANGER_DBM,
     RSSI_WARN_DBM,
     retry_severity,
@@ -585,7 +586,7 @@ def _structured_roaming(
     # 똑같이 있었다(자세한 근거는 그 함수 docstring).
     from ..core.modules.roaming import (
         MISSING_FRAME_LABELS,
-        classify_slow,
+        apply_slow_classification,
         pair_roaming_sequences,
         roam_total_ms,
     )
@@ -616,11 +617,7 @@ def _structured_roaming(
         total_roam_ms, total_note = roam_total_ms(
             auth_frame.epoch if auth_frame is not None else None, hs
         )
-        # 판정 규칙은 roaming.classify_slow(단일 소스) — 텍스트 리포트와 화면이
-        # 다른 느린 로밍 건수를 말하면 안 된다(이 버그의 근원이 로직 복제였다).
-        is_slow, slow_basis = classify_slow(total_roam_ms, gap_ms)
-        sequences.append(
-            {
+        seq = {
                 "sta": frame.ta,
                 "sta_name": mac_name(frame.ta, roles),
                 "prev_ap": prev_ap,
@@ -629,21 +626,21 @@ def _structured_roaming(
                 "ap_name": mac_name(frame.ra, roles),
                 "auth_epoch": auth_frame.epoch if auth_frame else None,
                 "assoc_epoch": frame.epoch,
+                # structured 기반 텍스트 섹션도 기존 HH:MM:SS.mmm 표기를 보존한다.
+                "event_time": (auth_frame or frame).time_short,
                 "auth_fnum": auth_frame.number if auth_frame else None,
                 "assoc_fnum": frame.number,
                 "gap_ms": round(gap_ms, 1) if gap_ms is not None else None,
                 "assoc_type": frame.subtype_name,
-                # 느린 로밍 판정은 **로밍 전체 소요(total_roam_ms)** 기준이다.
-                # gap_ms(Auth→Reassoc)에만 임계를 걸면 전체 25.2ms 중 5.3ms
-                # 구간만 보게 돼, 4-way가 길어 실제로 느린 로밍을 놓친다
-                # (실측: gap 6.3ms인데 4-way 41.7ms로 전체 105ms인 건이 있다).
+                # STA 로그가 붙기 전에는 pcap 전체(total_roam_ms) 기준으로 판정하고,
+                # 로그 상관 후에는 같은 helper가 STA 체감값을 우선해 다시 판정한다.
+                # gap_ms(Auth→Reassoc)에만 임계를 걸면 전체 25.2ms 중 5.3ms 구간만
+                # 보게 돼 4-way가 긴 로밍을 놓친다.
                 #
                 # total이 없어도(4-way 미포착) **total ≥ gap이 항상 성립**하므로
                 # gap이 이미 임계를 넘으면 그 로밍은 확정적으로 느리다 — 아는
                 # 정보를 버리지 않는다. 둘 다 아니면 판정 불가(slow_basis=None)로
                 # 두고, 건강도 분모에서 제외한다.
-                "is_slow": is_slow,
-                "slow_basis": slow_basis,
                 # gap을 무엇을 기준으로 쟀는지 / 무엇이 없어서 못 쟀는지.
                 "gap_basis": pairing.basis,
                 "missing": list(pairing.missing),
@@ -668,7 +665,10 @@ def _structured_roaming(
                 "total_basis": "four_way" if total_roam_ms is not None else None,
                 "total_note": total_note,
             }
-        )
+        # 판정 규칙과 필드 추출은 roaming.apply_slow_classification(단일 소스).
+        # STA 로그는 이 단계 뒤에 붙으므로 여기서는 기존 pcap 판정이 기록되고,
+        # pipeline이 로그 상관 직후 같은 헬퍼로 체감 우선 판정을 다시 적용한다.
+        sequences.append(apply_slow_classification(seq))
 
     return {
         "roaming_frame_count": len(roaming_frames),
@@ -1471,7 +1471,7 @@ def _structured_diagnosis(
     from . import evidence as ev
     # 판정 분모 술어는 roaming이 단일 정의 — 전체 점수와 STA별 점수가 같은 모집단을
     # 쓴다. 함수 안 import는 _structured_roaming과 같은 순환 회피 패턴.
-    from ..core.modules.roaming import is_decided
+    from ..core.modules.roaming import STA_SLOW_POLICY, is_decided
 
     ov = structured.get("overview", {})
     ping = structured.get("ping", {})
@@ -1491,6 +1491,7 @@ def _structured_diagnosis(
     loss_pct = ping_stats.get("loss_pct", 0)
     roam_seqs = roaming.get("sequences", [])
     slow_roams = [s for s in roam_seqs if s.get("is_slow")]
+    sta_slow_policy = roaming.get("slow_policy") == STA_SLOW_POLICY
 
     # ping 측정 가능 여부 — request+reply가 전혀 없는 캡처(ICMP 없음)에서
     # loss 컴포넌트를 100점 만점 처리하면 건강도가 부풀려진다. 이 경우 loss
@@ -1694,13 +1695,16 @@ def _structured_diagnosis(
             )
         if len(sta_slow_roams) > 2:
             refs, window = ev.slow_roaming_evidence(roam_seqs, mac)
+            slow_rule = (
+                f"STA 체감 >{STA_ROAM_SLOW_MS}ms, 로그 미매칭 시 "
+                f"pcap 전체 >{ROAM_GAP_DANGER_MS}ms"
+                if sta_slow_policy
+                else f"전체 소요 >{ROAM_GAP_DANGER_MS}ms"
+            )
             _add_issue(
                 {
                     "severity": "high",
-                    "msg": (
-                        f"느린 로밍 {len(sta_slow_roams)}회 "
-                        f"(전체 소요 >{ROAM_GAP_DANGER_MS}ms)"
-                    ),
+                    "msg": f"느린 로밍 {len(sta_slow_roams)}회 ({slow_rule})",
                     "action": "802.11r/k/v 설정 확인, 로밍 히스테리시스 조정",
                 },
                 refs, window, signal_type="slow_roaming",

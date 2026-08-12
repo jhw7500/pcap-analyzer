@@ -793,6 +793,17 @@ class TestClassifySlowSingleSource:
         assert classify_slow(SLOW_THRESHOLD_MS + 1, 1.0) == (True, "total")
         assert classify_slow(SLOW_THRESHOLD_MS - 1, 1.0) == (False, "total")
 
+    def test_sta_total_takes_priority_at_150ms(self):
+        """STA 로그가 붙으면 pcap 100ms가 아니라 체감 150ms로 판정한다."""
+        from analyzer.core.modules.roaming import classify_slow
+
+        # pcap만 보면 느리지만 STA 체감은 150ms 이하 — 정상.
+        assert classify_slow(120.0, 5.0, 149.0) == (False, "sta_log_total")
+        # pcap은 빨라도 STA 체감이 150ms 초과 — 느림.
+        assert classify_slow(25.0, 5.0, 151.0) == (True, "sta_log_total")
+        # 경계값 자체는 낮은 단계에 포함한다.
+        assert classify_slow(120.0, 5.0, 150.0) == (False, "sta_log_total")
+
     def test_gap_over_threshold_is_confirmed_slow_without_total(self):
         """total ≥ gap 이므로 gap이 이미 임계를 넘으면 전체도 반드시 넘는다."""
         from analyzer.core.modules.roaming import SLOW_THRESHOLD_MS, classify_slow
@@ -812,6 +823,8 @@ class TestClassifySlowSingleSource:
         from analyzer.core.modules import roaming as roaming_mod
         from analyzer.web import structured as structured_mod
 
-        assert "classify_slow" in inspect.getsource(structured_mod._structured_roaming)
+        assert "apply_slow_classification" in inspect.getsource(
+            structured_mod._structured_roaming
+        )
         assert "classify_slow" in inspect.getsource(roaming_mod.analyze)
         assert "classify_slow" in inspect.getsource(roaming_mod.SequenceInfo.is_slow.fget)

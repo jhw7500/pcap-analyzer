@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 import importlib
+import math
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -14,16 +15,22 @@ else:
 try:
     from ..detector import mac_name
     from ..models import AnalysisSection, Frame
-    from ..thresholds import ROAM_GAP_DANGER_MS
+    from ..thresholds import ROAM_PCAP_TOTAL_SLOW_MS, STA_ROAM_SLOW_MS
 except (ImportError, ValueError):
     mac_name = importlib.import_module("detector").mac_name
     model_module = importlib.import_module("models")
     AnalysisSection = model_module.AnalysisSection
     Frame = model_module.Frame
-    ROAM_GAP_DANGER_MS = importlib.import_module("thresholds").ROAM_GAP_DANGER_MS
+    threshold_module = importlib.import_module("thresholds")
+    ROAM_PCAP_TOTAL_SLOW_MS = threshold_module.ROAM_PCAP_TOTAL_SLOW_MS
+    STA_ROAM_SLOW_MS = threshold_module.STA_ROAM_SLOW_MS
 
-# 진단 임계값 단일 소스(analyzer/core/thresholds.py)의 위험 경계와 동기.
-SLOW_THRESHOLD_MS = ROAM_GAP_DANGER_MS
+# 구버전 외부 import 호환. 신규 코드는 측정 기준이 드러나는 두 상수를 직접 쓴다.
+SLOW_THRESHOLD_MS = ROAM_PCAP_TOTAL_SLOW_MS
+
+# structured 결과가 이 정책 키를 가질 때 STA 로그 체감값을 우선 판정한다.
+# 키가 없는 저장 결과는 기존 pcap 판정·표시 경로를 그대로 탄다.
+STA_SLOW_POLICY = "sta_log_total_preferred_v1"
 
 # 로밍 이벤트로 추출할 mgmt 서브타입 → 이벤트 종류(kind).
 #   "11" Auth, "0" AssocReq, "2" ReassocReq — analyze()의 시퀀스 탐지 규칙과 동일.
@@ -102,7 +109,9 @@ class RoamPairing:
 
 
 def classify_slow(
-    total_roam_ms: Optional[float], gap_ms: Optional[float]
+    total_roam_ms: Optional[float],
+    gap_ms: Optional[float],
+    sta_total_ms: Optional[float] = None,
 ) -> Tuple[bool, Optional[str]]:
     """느린 로밍 판정 — `(is_slow, slow_basis)`. **판정 규칙의 단일 소스.**
 
@@ -110,21 +119,61 @@ def classify_slow(
     다른 느린 로밍 건수를 말하면 안 된다. 이 PR이 고친 gap 허위 보고의 근원이
     바로 짝짓기 로직 복제였으므로, 판정 규칙도 처음부터 한 곳에만 둔다.
 
-    판정 기준은 gap이 아니라 **로밍 전체 소요**(Auth 요청 → 4-way 완료)다.
+    STA 로그가 매칭됐으면 **STA 체감 전체**(ROAM 명령 → CONNECTED)를 150ms와
+    비교한다. TEST9 837건의 p50 96ms·p95 138ms에서 100ms를 적용하면 43%가
+    느림으로 뒤집히므로, 승인된 운용 경계 150ms를 쓴다.
+
+    STA 로그가 없으면 기존 pcap **로밍 전체 소요**(Auth 요청 → 4-way 완료)를
+    100ms와 비교한다. 구버전·로그 미첨부 분석의 판정을 바꾸지 않는 폴백이다.
     gap(Auth→Reassoc)에만 임계를 걸면 전체 25.2ms 중 5.3ms 구간만 보게 돼,
     4-way가 길어 실제로 느린 로밍을 놓친다(실측: gap 6.3ms인데 4-way 41.7ms로
     전체 105ms인 건이 있다).
 
-    total이 없어도(4-way 미포착) **total ≥ gap이 항상 성립**하므로 gap이 이미
-    임계를 넘으면 그 로밍은 확정적으로 느리다 — 아는 정보를 버리지 않는다.
+    pcap total이 없어도(4-way 미포착) **total ≥ gap이 항상 성립**하므로 gap이 이미
+    pcap 임계를 넘으면 그 로밍은 확정적으로 느리다 — 아는 정보를 버리지 않는다.
     둘 다 아니면 판정 불가(`None`)이며, '정상'이 아니라 '모름'이므로 건강도
     분모에서 제외해야 한다.
     """
-    if total_roam_ms is not None:
-        return total_roam_ms > SLOW_THRESHOLD_MS, "total"
-    if gap_ms is not None and gap_ms > SLOW_THRESHOLD_MS:
+    def _measurement(value: Any) -> bool:
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value >= 0
+        )
+
+    if _measurement(sta_total_ms):
+        return sta_total_ms > STA_ROAM_SLOW_MS, "sta_log_total"
+    if _measurement(total_roam_ms):
+        return total_roam_ms > ROAM_PCAP_TOTAL_SLOW_MS, "total"
+    if _measurement(gap_ms) and gap_ms > ROAM_PCAP_TOTAL_SLOW_MS:
         return True, "gap_lower_bound"
     return False, None
+
+
+def classify_sequence_slow(seq: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+    """structured 로밍 시퀀스의 느림 판정. 필드 추출까지 포함한 단일 소스."""
+    sta_log = seq.get("sta_log")
+    sta_total = sta_log.get("total_ms") if isinstance(sta_log, dict) else None
+    return classify_slow(seq.get("total_roam_ms"), seq.get("gap_ms"), sta_total)
+
+
+def apply_slow_classification(seq: Dict[str, Any]) -> Dict[str, Any]:
+    """시퀀스에 단일 소스 판정 결과를 기록하고 같은 객체를 반환한다."""
+    seq["is_slow"], seq["slow_basis"] = classify_sequence_slow(seq)
+    return seq
+
+
+def reclassify_roaming_sequences(roaming: Dict[str, Any]) -> None:
+    """STA 로그 부착 후 모든 시퀀스를 체감 우선 정책으로 다시 판정한다."""
+    for seq in roaming.get("sequences") or []:
+        if isinstance(seq, dict):
+            apply_slow_classification(seq)
+    roaming["slow_policy"] = STA_SLOW_POLICY
+    roaming["slow_thresholds_ms"] = {
+        "sta_log_total": STA_ROAM_SLOW_MS,
+        "pcap_total": ROAM_PCAP_TOTAL_SLOW_MS,
+    }
 
 
 def roam_total_ms(
@@ -302,12 +351,13 @@ class SequenceInfo:
     missing: List[str] = field(default_factory=list)
     note: str = ""
     total_roam_ms: Optional[float] = None   #: Auth 요청 → 4-way 완료 (로밍 실소요)
-    slow_basis: Optional[str] = None        #: "total" | "gap_lower_bound" | None(판정 불가)
+    sta_total_ms: Optional[float] = None    #: ROAM 명령 → CONNECTED (STA 체감 전체)
+    slow_basis: Optional[str] = None        #: "sta_log_total" | "total" | "gap_lower_bound" | None
 
     @property
     def is_slow(self) -> bool:
         """느린 로밍 여부. **판정 불가면 False** — `is_undecided`로 구분할 것."""
-        return classify_slow(self.total_roam_ms, self.gap_ms)[0]
+        return classify_slow(self.total_roam_ms, self.gap_ms, self.sta_total_ms)[0]
 
     @property
     def is_undecided(self) -> bool:
@@ -317,7 +367,9 @@ class SequenceInfo:
         건강도 분모 오염과 같은 실수다. 정상만 세려면
         `not seq.is_slow and not seq.is_undecided`.
         """
-        return classify_slow(self.total_roam_ms, self.gap_ms)[1] is None
+        return classify_slow(
+            self.total_roam_ms, self.gap_ms, self.sta_total_ms
+        )[1] is None
 
 
 @dataclass
@@ -383,12 +435,178 @@ def extract_roaming_events(
     return events
 
 
+def _render_sequences(
+    sequences: List[SequenceInfo],
+    roles: Dict[str, Dict[str, Any]],
+    roaming_frame_count: int,
+    *,
+    sta_policy: bool = False,
+) -> AnalysisSectionType:
+    """이미 구조화·판정된 시퀀스를 텍스트 섹션으로 직렬화한다."""
+    lines: List[str] = []
+    sta_summary: Dict[str, StaSummary] = {}
+    for sequence in sequences:
+        info = sta_summary.setdefault(sequence.sta, StaSummary())
+        info.count += 1
+        if sequence.gap_ms is None:
+            info.unmeasured += 1
+        else:
+            info.gaps.append(sequence.gap_ms)
+        info.ap_targets[sequence.ap] = info.ap_targets.get(sequence.ap, 0) + 1
+        if sequence.is_slow:
+            info.slow += 1
+
+    lines.append(
+        f"로밍 관련 프레임: {roaming_frame_count}건, 시퀀스: {len(sequences)}건"
+    )
+    lines.append("")
+    lines.append("STA별 로밍 요약:")
+    lines.append(
+        f"{'STA':>15} | {'횟수':>5} | {'Gap avg':>8} | {'Gap max':>8} | {'느린로밍':>6} | {'AP 방향':>20}"
+    )
+    lines.append("-" * 80)
+
+    for sta in sorted(
+        sta_summary.keys(), key=lambda key: sta_summary[key].count, reverse=True
+    ):
+        info = sta_summary[sta]
+        avg_gap = sum(info.gaps) / len(info.gaps) if info.gaps else 0.0
+        max_gap = max(info.gaps) if info.gaps else 0.0
+        ap_str = ", ".join(
+            f"{mac_name(ap, roles)}({count})"
+            for ap, count in sorted(
+                info.ap_targets.items(), key=lambda item: item[1], reverse=True
+            )
+        )
+        slow_str = f"{info.slow}건" if info.slow > 0 else "-"
+        avg_str = f"{avg_gap:>6.1f}ms" if info.gaps else "  측정불가"
+        max_str = f"{max_gap:>6.1f}ms" if info.gaps else "  측정불가"
+        if info.unmeasured:
+            ap_str = f"{ap_str} (gap 측정불가 {info.unmeasured}건)"
+        lines.append(
+            f"{mac_name(sta, roles):>15} | {info.count:>5} | {avg_str} | "
+            f"{max_str} | {slow_str:>6} | {ap_str}"
+        )
+
+    if sequences:
+        lines.append("")
+        lines.append("로밍 시퀀스 상세 (Auth → Assoc/Reassoc):")
+        lines.append(
+            f"{'#':>3} | {'STA':>15} | {'Auth':>10} | {'Assoc':>10} | {'Gap':>8} | {'AP':>15}"
+        )
+        lines.append("-" * 80)
+        for idx, sequence in enumerate(sequences[:20], start=1):
+            lines.append(
+                f"{idx:>3} | {mac_name(sequence.sta, roles):>15} | "
+                f"{('Auth #' + str(sequence.auth_fnum)) if sequence.auth_fnum else 'Auth 미포착':<14} | "
+                f"#{sequence.assoc_fnum:<8} | {_fmt_gap(sequence.gap_ms):>8} | "
+                f"{mac_name(sequence.ap, roles):>15}"
+            )
+
+    threshold_label = (
+        f"STA 체감 >{STA_ROAM_SLOW_MS}ms / 로그 미매칭 pcap 전체 "
+        f">{ROAM_PCAP_TOTAL_SLOW_MS}ms"
+        if sta_policy
+        else f"전체 소요 >{ROAM_PCAP_TOTAL_SLOW_MS}ms"
+    )
+    slow_sequences = [sequence for sequence in sequences if sequence.is_slow]
+    unmeasured = [s for s in sequences if s.gap_ms is None]
+    if slow_sequences:
+        lines.append("")
+        lines.append(f"느린 로밍 상세 ({threshold_label}):")
+        header = (
+            f"{'#':>3} | {'STA':>15} | {'Time':>15} | {'Gap':>8} | "
+            f"{'AP':>15} | {'Type':>12}"
+        )
+        if sta_policy:
+            header += " | 판정값"
+        lines.append(header)
+        lines.append("-" * 80)
+        for idx, sequence in enumerate(slow_sequences, start=1):
+            row = (
+                f"{idx:>3} | {mac_name(sequence.sta, roles):>15} | "
+                f"{sequence.auth_ts:>15} | {_fmt_gap(sequence.gap_ms):>8} | "
+                f"{mac_name(sequence.ap, roles):>15} | {sequence.assoc_type}"
+            )
+            if sta_policy:
+                if sequence.slow_basis == "sta_log_total":
+                    judgment = f"STA 체감 {sequence.sta_total_ms:.1f}ms"
+                elif sequence.total_roam_ms is not None:
+                    judgment = f"pcap 전체 {sequence.total_roam_ms:.1f}ms"
+                else:
+                    judgment = f"pcap Gap 하한 {_fmt_gap(sequence.gap_ms)}"
+                row += f" | {judgment}"
+            lines.append(row)
+
+    summary = (
+        f"로밍 시퀀스 {len(sequences)}건, "
+        f"느린로밍({threshold_label}) {len(slow_sequences)}건"
+    )
+    if unmeasured:
+        summary += f", gap 측정불가 {len(unmeasured)}건"
+    undecided = [x for x in sequences if x.is_undecided]
+    if undecided:
+        summary += f", 느림 판정불가 {len(undecided)}건"
+
+    return AnalysisSection(title="4. 로밍 이벤트", lines=lines, summary=summary)
+
+
+def section_from_structured(
+    roaming: Dict[str, Any], roles: Dict[str, Dict[str, Any]]
+) -> AnalysisSectionType:
+    """structured.roaming을 텍스트 섹션의 유일한 입력으로 직렬화한다.
+
+    pipeline은 STA 로그 부착·재판정이 끝난 뒤 이 함수를 호출한다. 따라서 고정
+    ``analyze(frames, roles, index)`` 시그니처가 station_logs를 볼 수 없어 화면과
+    텍스트가 갈리던 구조를 없앤다.
+    """
+    raw_sequences = roaming.get("sequences") or []
+    if not raw_sequences and not roaming.get("roaming_frame_count"):
+        return AnalysisSection(
+            title="4. 로밍 이벤트", lines=["로밍 관련 프레임 없음"], summary="로밍 없음"
+        )
+
+    sequences: List[SequenceInfo] = []
+    for seq in raw_sequences:
+        if not isinstance(seq, dict):
+            continue
+        sta_log = seq.get("sta_log")
+        sta_total = sta_log.get("total_ms") if isinstance(sta_log, dict) else None
+        auth_epoch = seq.get("auth_epoch")
+        assoc_epoch = seq.get("assoc_epoch")
+        display_epoch = auth_epoch if isinstance(auth_epoch, (int, float)) else assoc_epoch
+        auth_ts = seq.get("event_time") or (
+            str(display_epoch) if display_epoch is not None else "?"
+        )
+        sequences.append(
+            SequenceInfo(
+                sta=seq.get("sta") or "",
+                ap=seq.get("ap") or "",
+                auth_fnum=seq.get("auth_fnum"),
+                assoc_fnum=seq.get("assoc_fnum") or 0,
+                auth_ts=auth_ts,
+                assoc_type=seq.get("assoc_type") or "",
+                gap_ms=seq.get("gap_ms"),
+                missing=list(seq.get("missing") or []),
+                note=seq.get("gap_note") or "",
+                total_roam_ms=seq.get("total_roam_ms"),
+                sta_total_ms=sta_total,
+                slow_basis=seq.get("slow_basis"),
+            )
+        )
+    return _render_sequences(
+        sequences,
+        roles,
+        roaming.get("roaming_frame_count") or 0,
+        sta_policy=roaming.get("slow_policy") == STA_SLOW_POLICY,
+    )
+
+
 def analyze(
     frames: List[FrameType], roles: Dict[str, Dict[str, Any]], index: Any = None
 ) -> AnalysisSectionType:
     del index
 
-    lines: List[str] = []
     roaming_frames = [f for f in frames if f.is_roaming_related]
     if not roaming_frames:
         return AnalysisSection(
@@ -429,89 +647,4 @@ def analyze(
             slow_basis=basis,
         ))
 
-    sta_summary: Dict[str, StaSummary] = {}
-    for sequence in sequences:
-        info = sta_summary.setdefault(sequence.sta, StaSummary())
-        info.count += 1
-        if sequence.gap_ms is None:
-            info.unmeasured += 1
-        else:
-            info.gaps.append(sequence.gap_ms)
-        info.ap_targets[sequence.ap] = info.ap_targets.get(sequence.ap, 0) + 1
-        if sequence.is_slow:
-            info.slow += 1
-
-    lines.append(
-        f"로밍 관련 프레임: {len(roaming_frames)}건, 시퀀스: {len(sequences)}건"
-    )
-    lines.append("")
-    lines.append("STA별 로밍 요약:")
-    lines.append(
-        f"{'STA':>15} | {'횟수':>5} | {'Gap avg':>8} | {'Gap max':>8} | {'느린로밍':>6} | {'AP 방향':>20}"
-    )
-    lines.append("-" * 80)
-
-    for sta in sorted(
-        sta_summary.keys(), key=lambda key: sta_summary[key].count, reverse=True
-    ):
-        info = sta_summary[sta]
-        avg_gap = sum(info.gaps) / len(info.gaps) if info.gaps else 0.0
-        max_gap = max(info.gaps) if info.gaps else 0.0
-        ap_str = ", ".join(
-            f"{mac_name(ap, roles)}({count})"
-            for ap, count in sorted(
-                info.ap_targets.items(), key=lambda item: item[1], reverse=True
-            )
-        )
-        slow_str = f"{info.slow}건" if info.slow > 0 else "-"
-        # 측정된 gap이 하나도 없으면 평균/최대를 0으로 찍지 않고 측정 불가로 둔다.
-        avg_str = f"{avg_gap:>6.1f}ms" if info.gaps else "  측정불가"
-        max_str = f"{max_gap:>6.1f}ms" if info.gaps else "  측정불가"
-        if info.unmeasured:
-            ap_str = f"{ap_str} (gap 측정불가 {info.unmeasured}건)"
-        lines.append(
-            f"{mac_name(sta, roles):>15} | {info.count:>5} | {avg_str} | {max_str} | {slow_str:>6} | {ap_str}"
-        )
-
-    if sequences:
-        lines.append("")
-        lines.append("로밍 시퀀스 상세 (Auth → Assoc/Reassoc):")
-        lines.append(
-            f"{'#':>3} | {'STA':>15} | {'Auth':>10} | {'Assoc':>10} | {'Gap':>8} | {'AP':>15}"
-        )
-        lines.append("-" * 80)
-        for idx, sequence in enumerate(sequences[:20], start=1):
-            lines.append(
-                f"{idx:>3} | {mac_name(sequence.sta, roles):>15} | "
-                f"{('Auth #' + str(sequence.auth_fnum)) if sequence.auth_fnum else 'Auth 미포착':<14} | "
-                f"#{sequence.assoc_fnum:<8} | {_fmt_gap(sequence.gap_ms):>8} | {mac_name(sequence.ap, roles):>15}"
-            )
-
-    slow_sequences = [sequence for sequence in sequences if sequence.is_slow]
-    unmeasured = [s for s in sequences if s.gap_ms is None]
-    if slow_sequences:
-        lines.append("")
-        lines.append(
-            f"느린 로밍 상세 (전체 소요 >{SLOW_THRESHOLD_MS}ms — Auth 요청→4-way 완료 기준):"
-        )
-        lines.append(
-            f"{'#':>3} | {'STA':>15} | {'Time':>15} | {'Gap':>8} | {'AP':>15} | {'Type':>12}"
-        )
-        lines.append("-" * 80)
-        for idx, sequence in enumerate(slow_sequences, start=1):
-            lines.append(
-                f"{idx:>3} | {mac_name(sequence.sta, roles):>15} | {sequence.auth_ts:>15} | "
-                f"{_fmt_gap(sequence.gap_ms):>8} | {mac_name(sequence.ap, roles):>15} | {sequence.assoc_type}"
-            )
-
-    summary = (
-        f"로밍 시퀀스 {len(sequences)}건, "
-        f"느린로밍(전체 소요 >{SLOW_THRESHOLD_MS}ms) {len(slow_sequences)}건"
-    )
-    if unmeasured:
-        summary += f", gap 측정불가 {len(unmeasured)}건"
-    undecided = [x for x in sequences if x.slow_basis is None]
-    if undecided:
-        summary += f", 느림 판정불가 {len(undecided)}건"
-
-    return AnalysisSection(title="4. 로밍 이벤트", lines=lines, summary=summary)
+    return _render_sequences(sequences, roles, len(roaming_frames))
