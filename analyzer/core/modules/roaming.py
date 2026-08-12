@@ -51,11 +51,16 @@ ROAM_PAIR_MAX_GAP_SEC = 10.0
 #: 같은 Auth 교환(STA 요청 ↔ AP 응답)으로 볼 최대 간격(초). 실측 수 µs~ms.
 _SAME_AUTH_EXCHANGE_SEC = 1.0
 
-#: 같은 Assoc/Reassoc 교환의 **재전송 사본**으로 볼 최대 간격(초).
-#: 802.11 재전송은 ACK 타임아웃 단위(수 ms)라 1초면 충분히 관대하다. 이 창을
-#: 넘어 다시 온 요청은 retry 비트가 있어도 별개 시도로 본다(합쳤다가 실제 재시도
-#: 로밍을 놓치는 것보다, 나눠서 세는 쪽이 로밍 횟수 왜곡이 작다).
-_ASSOC_RETRY_SEC = 1.0
+#: 이미 짝지은 Assoc/Reassoc 뒤에 Auth 없이 같은 STA→AP 요청이 반복되면
+#: **같은 로밍의 association 재시도**로 묶는 최대 간격(초).
+#:
+#: retry 비트만 보면 다중 스니퍼 시계 보정 오차로 retry 사본이 original보다 먼저
+#: 정렬된 경우를 놓친다. 또 wpa_supplicant가 같은 로밍 중 새 sequence number로
+#: Reassoc을 다시 보내면 retry=False여도 새 로밍이 아니다(TEST14 실측: 154ms 뒤
+#: 재시도). 반대로 새 Auth가 있거나 대상 AP/subtype이 다르면 창 안이어도 새 이벤트로
+#: 보존한다. 1초는 실제 association 재시도(수 ms~154ms)를 감싸면서, Auth를 통째로
+#: 놓친 별도 로밍을 무작정 합치는 범위를 제한한다.
+ASSOC_ATTEMPT_MAX_SEC = 1.0
 
 
 #: gap 시작점으로 쓴 프레임 종류.
@@ -255,9 +260,9 @@ def pair_roaming_sequences(
        이미 앵커면 덮어쓰지 않는다(요청 시각이 더 정확한 시작점).
     3. 짝지은 앵커는 **즉시 폐기**한다 — 다음 Assoc이 재사용할 수 없다.
     4. 앵커가 `ROAM_PAIR_MAX_GAP_SEC`보다 오래됐으면 그 로밍의 앵커로 보지 않는다.
-    5. 같은 STA·같은 subtype의 **retry 프레임**이 `_ASSOC_RETRY_SEC` 안에 다시 오면
-       재전송 사본으로 보고 건너뛴다 — 규칙 3 때문에 사본은 앵커를 못 찾아
-       "측정 불가" 시퀀스를 하나 더 만들고, 로밍 횟수까지 함께 부풀린다.
+    5. 앵커를 소비한 직후 Auth 없이 같은 STA→AP·subtype의 Assoc/Reassoc이
+       `ASSOC_ATTEMPT_MAX_SEC` 안에 반복되면 같은 association 시도의 재전송/재시도로
+       보고 건너뛴다. retry 비트나 캡처 도착 순서에 의존하지 않는다.
 
     앵커를 찾지 못해도 **시퀀스는 남긴다** — 로밍이 일어난 건 사실이라 횟수에서
     빠지면 안 된다. 대신 gap을 지어내지 않고 `gap_ms=None`(측정 불가)으로 두고
@@ -273,7 +278,8 @@ def pair_roaming_sequences(
     """
     # sta MAC → (앵커 프레임, 앵커 종류)
     anchors: Dict[str, Any] = {}
-    # sta MAC → (직전 Assoc/Reassoc 시각, subtype) — 재전송 사본 식별용
+    # sta MAC → (직전 채택 Assoc/Reassoc 시각, subtype, 대상 AP)
+    # 같은 association 시도의 재전송·재시도 식별용.
     last_assoc: Dict[str, Any] = {}
     pairs: List[RoamPairing] = []
     for frame in roaming_frames:
@@ -288,22 +294,6 @@ def pair_roaming_sequences(
                     anchors[frame.ra] = (frame, GAP_BASIS_RESPONSE)
             continue
         if frame.subtype in ("0", "2") and frame.ta in sta_macs:
-            # 규칙 5 — 재전송 사본은 새 로밍이 아니다.
-            # 802.11 Assoc/Reassoc 요청이 재전송되면 같은 교환의 프레임이 두 번
-            # 잡힌다. 그대로 두면 두 번째는 앵커를 이미 소비한 뒤라 "측정 불가"
-            # 시퀀스가 하나 더 생겨 **로밍 횟수와 측정 불가 건수가 함께 부풀려진다**
-            # (STA 로그도 같은 로밍에 두 번 붙는다). 재전송은 retry 비트로 정확히
-            # 구분되므로 시간 휴리스틱만으로 합치지 않는다 — 같은 STA가 같은
-            # subtype으로 창 안에 다시 보낸 **retry 프레임**만 건너뛴다.
-            prev_assoc = last_assoc.get(frame.ta)
-            if (
-                getattr(frame, "retry", False)
-                and prev_assoc is not None
-                and prev_assoc[1] == frame.subtype
-                and abs(frame.epoch - prev_assoc[0]) <= _ASSOC_RETRY_SEC
-            ):
-                continue
-            last_assoc[frame.ta] = (frame.epoch, frame.subtype)
             anchor = anchors.pop(frame.ta, None)      # 규칙 3 — 소비 즉시 폐기
             if anchor is not None:
                 anchor_frame, basis = anchor
@@ -311,6 +301,20 @@ def pair_roaming_sequences(
                 if delta < 0 or delta > ROAM_PAIR_MAX_GAP_SEC:
                     anchor = None                     # 규칙 4 — 이 로밍의 Auth가 아니다
             if anchor is None:
+                # 규칙 5 — 이미 채택한 요청 직후 같은 STA→AP·subtype이 Auth 없이
+                # 반복되면 같은 association 시도의 재전송/재시도다. 다중 스니퍼
+                # 보정 뒤 retry가 original보다 먼저 올 수 있고, 새 sequence number로
+                # 다시 보낸 요청은 retry=False일 수 있어 retry 비트는 조건으로 쓰지
+                # 않는다. 새 Auth가 있으면 위에서 anchor가 성립하므로 합쳐지지 않는다.
+                prev_assoc = last_assoc.get(frame.ta)
+                if prev_assoc is not None:
+                    elapsed = frame.epoch - prev_assoc[0]
+                    if (
+                        0 <= elapsed <= ASSOC_ATTEMPT_MAX_SEC
+                        and prev_assoc[1] == frame.subtype
+                        and prev_assoc[2] == frame.ra
+                    ):
+                        continue
                 # 앵커 없음 = 이 로밍의 Auth 교환이 통째로 미포착. 시퀀스는 남기고
                 # gap만 측정 불가로 둔다(로밍 횟수에서 빠지면 안 되므로).
                 pairs.append(
@@ -321,6 +325,7 @@ def pair_roaming_sequences(
                         missing=[GAP_BASIS_REQUEST, GAP_BASIS_RESPONSE],
                     )
                 )
+                last_assoc[frame.ta] = (frame.epoch, frame.subtype, frame.ra)
                 continue
             pairs.append(
                 RoamPairing(
@@ -331,6 +336,7 @@ def pair_roaming_sequences(
                     missing=[] if basis == GAP_BASIS_REQUEST else [GAP_BASIS_REQUEST],
                 )
             )
+            last_assoc[frame.ta] = (frame.epoch, frame.subtype, frame.ra)
     return pairs
 
 

@@ -13,6 +13,7 @@ Reassoc이 수십 초 전 낡은 Auth와 짝지어진 것. 17건 중 16건은 AP
 from tests.conftest import AP1, STA1, make_frame
 
 from analyzer.core.modules.roaming import (
+    ASSOC_ATTEMPT_MAX_SEC,
     GAP_BASIS_REQUEST,
     GAP_BASIS_RESPONSE,
     ROAM_PAIR_MAX_GAP_SEC,
@@ -39,8 +40,10 @@ def _auth_resp(number, epoch, ap=AP1):
     return make_frame(number=number, epoch=epoch, subtype="11", ta=ap, ra=STA1)
 
 
-def _reassoc(number, epoch, ap=AP1):
-    return make_frame(number=number, epoch=epoch, subtype="2", ta=STA1, ra=ap)
+def _reassoc(number, epoch, ap=AP1, retry=False):
+    return make_frame(
+        number=number, epoch=epoch, subtype="2", ta=STA1, ra=ap, retry=retry
+    )
 
 
 def _gaps_ms(pairs):
@@ -71,6 +74,51 @@ class TestAnchorConsumption:
             _auth_req(3, 1030.000), _reassoc(4, 1030.007),
         ]
         assert _gaps_ms(pair_roaming_sequences(frames, STA_MACS)) == [5.0, 7.0]
+
+
+class TestAssociationAttemptDedup:
+    """같은 로밍 안의 Reassoc 반복이 새 로밍·측정불가로 부풀지 않는다."""
+
+    def test_retry_seen_before_original_is_one_roam(self):
+        """다중 스니퍼 시각 보정으로 retry가 original보다 먼저 정렬될 수 있다."""
+        frames = [
+            _auth_req(1, 1000.000),
+            _reassoc(2, 1000.005, retry=True),
+            _reassoc(3, 1000.009, retry=False),
+        ]
+        pairs = pair_roaming_sequences(frames, STA_MACS)
+        assert _gaps_ms(pairs) == [5.0]
+        assert pairs[0].assoc.number == 2
+
+    def test_new_sequence_reassoc_retry_without_retry_bit_is_one_roam(self):
+        """TEST14: 154ms 뒤 새 seq/retry=False 재시도도 같은 association 시도다."""
+        frames = [
+            _auth_req(1, 1000.000),
+            _reassoc(2, 1000.015),
+            _reassoc(3, 1000.169),
+        ]
+        assert _gaps_ms(pair_roaming_sequences(frames, STA_MACS)) == [15.0]
+
+    def test_new_auth_inside_window_starts_a_new_roam(self):
+        frames = [
+            _auth_req(1, 1000.000), _reassoc(2, 1000.005),
+            _auth_req(3, 1000.300), _reassoc(4, 1000.306),
+        ]
+        assert _gaps_ms(pair_roaming_sequences(frames, STA_MACS)) == [5.0, 6.0]
+
+    def test_different_target_without_auth_is_not_merged(self):
+        frames = [
+            _auth_req(1, 1000.000), _reassoc(2, 1000.005),
+            _reassoc(3, 1000.200, ap=AP2),
+        ]
+        assert _gaps_ms(pair_roaming_sequences(frames, STA_MACS)) == [5.0, None]
+
+    def test_same_target_after_window_is_kept_unmeasurable(self):
+        frames = [
+            _auth_req(1, 1000.000), _reassoc(2, 1000.005),
+            _reassoc(3, 1000.005 + ASSOC_ATTEMPT_MAX_SEC + 0.001),
+        ]
+        assert _gaps_ms(pair_roaming_sequences(frames, STA_MACS)) == [5.0, None]
 
 
 class TestApSideFallback:
@@ -729,7 +777,9 @@ class TestRetransmittedAssoc:
     앵커를 소비 즉시 폐기(규칙 3)하므로, 같은 교환의 Assoc/Reassoc이 재전송돼
     두 번 잡히면 두 번째는 앵커를 찾지 못해 **측정 불가 시퀀스가 하나 더** 생긴다.
     로밍 횟수와 측정 불가 건수가 함께 부풀려지고 STA 로그도 두 번 붙는다.
-    재전송은 retry 비트로 정확히 구분되므로 시간만으로 합치지 않는다.
+    다중 스니퍼 시각 보정 뒤 retry가 original보다 먼저 정렬될 수 있고, 같은
+    association 시도의 새-seq 재요청은 retry=False일 수 있으므로 retry 비트에만
+    의존하지 않는다. Auth 없이 같은 STA→AP·subtype이 짧은 창 안에 반복될 때 묶는다.
     """
 
     def _auth_then_assoc(self, *, retry_at=None, retry_flag=True, subtype="2"):
@@ -748,11 +798,11 @@ class TestRetransmittedAssoc:
         assert len(pairs) == 1
         assert pairs[0].gap_ms is not None      # 측정 불가가 새로 생기지 않는다
 
-    def test_retry_flag_required__time_alone_does_not_merge(self):
-        """retry 비트가 없으면 별개 시도다 — 시간 휴리스틱으로 합치지 않는다."""
+    def test_retry_false_reassoc_inside_attempt_window_is_merged(self):
+        """retry=False여도 새 Auth 없는 짧은 재요청은 같은 association 시도다."""
         pairs = pair_roaming_sequences(
             self._auth_then_assoc(retry_at=1000.02, retry_flag=False), STA_MACS)
-        assert len(pairs) == 2
+        assert len(pairs) == 1
 
     def test_retry_outside_window_counts_separately(self):
         pairs = pair_roaming_sequences(

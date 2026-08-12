@@ -1,32 +1,33 @@
-"""9. 로밍 전후 영향 분석 — 각 로밍 이벤트의 retry/RSSI/ping 변화를 측정"""
+"""9. 로밍 전후 영향 분석 — canonical 로밍의 retry/RSSI/ping 변화를 측정."""
 from typing import List, Dict
 from ..models import Frame, AnalysisSection
 from ..detector import mac_name
+from .roaming import pair_roaming_sequences
 
 WINDOW_SEC = 3
 
 
 def _find_roaming_events(frames: List[Frame], roles: Dict) -> List[Dict]:
-    sta_macs = {m for m, r in roles.items() if r["role"] == "STA"}
-    events = []
-    auth_by_sta = {}
+    """4번 로밍 섹션과 같은 pairing으로 영향 분석 이벤트를 만든다.
 
-    for f in frames:
-        if not f.is_roaming_related:
-            continue
-        if f.subtype == "11" and f.ta in sta_macs:
-            auth_by_sta[f.ta] = f
-        elif f.subtype in ("0", "2") and f.ta in sta_macs:
-            auth_f = auth_by_sta.get(f.ta)
-            if auth_f:
-                events.append({
-                    "sta": f.ta,
-                    "ap": f.ra,
-                    "auth_frame": auth_f,
-                    "assoc_frame": f,
-                    "epoch": auth_f.epoch,
-                    "handshake_ms": (f.epoch - auth_f.epoch) * 1000,
-                })
+    예전 구현은 마지막 Auth를 소비하지 않고 모든 Assoc/Reassoc과 조합해 retry·
+    association 재시도를 별도 로밍으로 중복 계수했다(TEST14: canonical 884 대비
+    914). 탐지 규칙을 다시 만들지 않고 canonical pairing을 그대로 직렬화한다.
+    """
+    sta_macs = {m for m, r in roles.items() if r.get("role") == "STA"}
+    roaming_frames = [frame for frame in frames if frame.is_roaming_related]
+    events = []
+    for pairing in pair_roaming_sequences(roaming_frames, sta_macs):
+        auth = pairing.auth
+        assoc = pairing.assoc
+        events.append({
+            "sta": assoc.ta,
+            "ap": assoc.ra,
+            "auth_frame": auth,
+            "assoc_frame": assoc,
+            "epoch": (auth or assoc).epoch,
+            "handshake_ms": pairing.gap_ms,
+        })
     return events
 
 
@@ -93,9 +94,19 @@ def analyze(frames: List[Frame], roles: Dict, index=None) -> AnalysisSection:
             problem_count += 1
 
         marker = "★" if has_problem else " "
-        lines.append(f"[로밍 #{i+1}] {marker} {sta}: →{ap}  {ev['auth_frame'].time_short}")
-        lines.append(f"  ├─ 핸드셰이크: {ev['handshake_ms']:.0f}ms "
-                     f"(#{ev['auth_frame'].number}→#{ev['assoc_frame'].number})")
+        start_frame = ev["auth_frame"]
+        start_time = (start_frame or ev["assoc_frame"]).time_short
+        lines.append(f"[로밍 #{i+1}] {marker} {sta}: →{ap}  {start_time}")
+        if start_frame is None:
+            lines.append(
+                f"  ├─ 핸드셰이크: 측정불가 "
+                f"(Auth 미포착→#{ev['assoc_frame'].number})"
+            )
+        else:
+            lines.append(
+                f"  ├─ 핸드셰이크: {ev['handshake_ms']:.0f}ms "
+                f"(#{start_frame.number}→#{ev['assoc_frame'].number})"
+            )
 
         if b["total"] > 0:
             rssi_b = f", RSSI {b['rssi_avg']:.0f}dBm" if b["rssi_avg"] else ""
