@@ -429,7 +429,7 @@ def build_packet_ledger(
     auth_max_ms: float = DEFAULT_AUTH_MAX_MS,
 ) -> tuple[list[RoamTransaction], dict[str, int]]:
     stas = set(sta_macs)
-    anchors: dict[tuple[str, str], tuple[PacketEvent, str]] = {}
+    anchors: dict[str, dict[str, tuple[PacketEvent, str]]] = {}
     last_assoc: dict[str, PacketEvent] = {}
     transactions: list[RoamTransaction] = []
     collapsed = 0
@@ -437,22 +437,33 @@ def build_packet_ledger(
     attempt_sec = assoc_attempt_ms / 1000.0
     same_auth_sec = DEFAULT_SAME_AUTH_EXCHANGE_MS / 1000.0
 
+    def active_anchors(sta: str, epoch: float) -> dict[str, tuple[PacketEvent, str]]:
+        current = anchors.setdefault(sta, {})
+        for ap, candidate in list(current.items()):
+            if epoch - candidate[0].epoch > auth_max_sec:
+                current.pop(ap, None)
+        return current
+
     for event in events:
         if event.subtype == 11:
             if event.ta in stas:
-                anchors[(event.ta, event.ra)] = (event, "auth_request")
+                active_anchors(event.ta, event.epoch)[event.ra] = (
+                    event,
+                    "auth_request",
+                )
             elif event.ra in stas:
-                key = (event.ra, event.ta)
-                previous = anchors.get(key)
+                current = active_anchors(event.ra, event.epoch)
+                previous = current.get(event.ta)
                 if previous is None or event.epoch - previous[0].epoch > same_auth_sec:
-                    anchors[key] = (event, "auth_response")
+                    current[event.ta] = (event, "auth_response")
             continue
         if event.subtype not in {0, 2} or event.ta not in stas:
             continue
 
-        anchor = anchors.pop((event.ta, event.ra), None)
-        for stale_key in [key for key in anchors if key[0] == event.ta]:
-            anchors.pop(stale_key, None)
+        current = anchors.get(event.ta, {})
+        anchor = current.pop(event.ra, None)
+        if not current:
+            anchors.pop(event.ta, None)
         if anchor is not None:
             delta = event.epoch - anchor[0].epoch
             if delta < 0 or delta > auth_max_sec:
@@ -467,6 +478,8 @@ def build_packet_ledger(
             ):
                 collapsed += 1
                 continue
+
+        anchors.pop(event.ta, None)
 
         auth = anchor[0] if anchor else None
         basis = anchor[1] if anchor else None

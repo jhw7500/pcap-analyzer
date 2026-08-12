@@ -163,6 +163,24 @@ def test_packet_ledger_does_not_consume_auth_for_another_ap():
     assert all(row.gap_ms is None for row in rows)
 
 
+def test_packet_ledger_delayed_retry_preserves_other_ap_auth():
+    sta = "00:00:00:00:00:01"
+    ap1, ap2 = "00:00:00:00:00:a1", "00:00:00:00:00:a2"
+    events = [
+        packet(epoch=1.000, subtype=11, ta=sta, ra=ap1, number=1),
+        packet(epoch=1.005, subtype=2, ta=sta, ra=ap1, number=2),
+        packet(epoch=1.100, subtype=11, ta=sta, ra=ap2, number=3),
+        packet(epoch=1.150, subtype=2, ta=sta, ra=ap1, number=4),
+        packet(epoch=1.200, subtype=2, ta=sta, ra=ap2, number=5),
+    ]
+
+    rows, meta = verify.build_packet_ledger(events, [sta])
+
+    assert meta["association_repeats_collapsed"] == 1
+    assert [row.ap for row in rows] == [ap1, ap2]
+    assert [row.gap_ms for row in rows] == [5.0, 100.0]
+
+
 def test_parse_wpa_log_builds_success_and_failure_ledger(tmp_path):
     path = tmp_path / "wpa.log"
     path.write_text(

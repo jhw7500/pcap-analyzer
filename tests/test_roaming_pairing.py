@@ -120,6 +120,18 @@ class TestAssociationAttemptDedup:
         ]
         assert _gaps_ms(pair_roaming_sequences(frames, STA_MACS)) == [5.0, 6.0]
 
+    def test_delayed_retry_does_not_discard_other_ap_auth(self):
+        """AP1 지연 재시도를 버릴 때 진행 중인 AP2 Auth는 보존한다."""
+        frames = [
+            _auth_req(1, 1000.000, ap=AP1),
+            _reassoc(2, 1000.005, ap=AP1),
+            _auth_req(3, 1000.100, ap=AP2),
+            _reassoc(4, 1000.150, ap=AP1),  # 지연 도착한 앞 시도의 반복
+            _reassoc(5, 1000.200, ap=AP2),
+        ]
+
+        assert _gaps_ms(pair_roaming_sequences(frames, STA_MACS)) == [5.0, 100.0]
+
     def test_different_target_without_auth_is_not_merged(self):
         frames = [
             _auth_req(1, 1000.000), _reassoc(2, 1000.005),

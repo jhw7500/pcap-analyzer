@@ -280,30 +280,40 @@ def pair_roaming_sequences(
     """
     # (STA MAC, 대상 AP MAC) → (앵커 프레임, 앵커 종류).
     # STA만 키로 쓰면 AP1 Auth 뒤 AP2 Assoc을 허위로 짝지을 수 있다.
-    anchors: Dict[Tuple[str, str], Tuple[FrameType, str]] = {}
+    anchors: Dict[str, Dict[str, Tuple[FrameType, str]]] = {}
     # sta MAC → (직전 채택 Assoc/Reassoc 시각, subtype, 대상 AP)
     # 같은 association 시도의 재전송·재시도 식별용.
     last_assoc: Dict[str, Any] = {}
     pairs: List[RoamPairing] = []
+
+    def active_anchors(sta: str, epoch: float) -> Dict[str, Tuple[FrameType, str]]:
+        """STA별 아직 유효한 AP anchor만 반환해 전역 순회와 장기 누적을 막는다."""
+        current = anchors.setdefault(sta, {})
+        for ap, candidate in list(current.items()):
+            if epoch - candidate[0].epoch > ROAM_PAIR_MAX_GAP_SEC:
+                current.pop(ap, None)
+        return current
+
     for frame in roaming_frames:
         if frame.subtype == "11":
             if frame.ta in sta_macs:
                 # 규칙 1 — STA의 요청이 로밍 시작점이라 항상 우선
-                anchors[(frame.ta, frame.ra)] = (frame, GAP_BASIS_REQUEST)
+                active_anchors(frame.ta, frame.epoch)[frame.ra] = (
+                    frame,
+                    GAP_BASIS_REQUEST,
+                )
             elif frame.ra in sta_macs:
-                key = (frame.ra, frame.ta)
-                prev = anchors.get(key)
+                current = active_anchors(frame.ra, frame.epoch)
+                prev = current.get(frame.ta)
                 # 규칙 2 — 같은 교환의 요청이 이미 앵커면 덮어쓰지 않는다
                 if prev is None or frame.epoch - prev[0].epoch > _SAME_AUTH_EXCHANGE_SEC:
-                    anchors[key] = (frame, GAP_BASIS_RESPONSE)
+                    current[frame.ta] = (frame, GAP_BASIS_RESPONSE)
             continue
         if frame.subtype in ("0", "2") and frame.ta in sta_macs:
-            anchor = anchors.pop((frame.ta, frame.ra), None)  # 규칙 3 — 대상 AP별 소비
-            # 어느 AP로든 Association이 진행되면 이 STA가 앞서 남긴 다른 AP용
-            # Auth는 더 이상 다음 로밍의 시작점이 아니다. 남겨두면 Auth 미포착 상태로
-            # AP에 돌아왔을 때 수초 전 anchor와 허위 pairing된다.
-            for stale_key in [key for key in anchors if key[0] == frame.ta]:
-                anchors.pop(stale_key, None)
+            current = anchors.get(frame.ta, {})
+            anchor = current.pop(frame.ra, None)  # 규칙 3 — 대상 AP별 소비
+            if not current:
+                anchors.pop(frame.ta, None)
             if anchor is not None:
                 anchor_frame, basis = anchor
                 delta = frame.epoch - anchor_frame.epoch
@@ -323,7 +333,11 @@ def pair_roaming_sequences(
                         and prev_assoc[1] == frame.subtype
                         and prev_assoc[2] == frame.ra
                     ):
+                        # 지연 도착한 중복 프레임은 진행 중인 다른 AP Auth를 폐기할
+                        # 근거가 아니다.
                         continue
+                # 실제 새 Association이므로 이 STA가 다른 AP에 남긴 Auth는 폐기한다.
+                anchors.pop(frame.ta, None)
                 # 앵커 없음 = 이 로밍의 Auth 교환이 통째로 미포착. 시퀀스는 남기고
                 # gap만 측정 불가로 둔다(로밍 횟수에서 빠지면 안 되므로).
                 pairs.append(
@@ -336,6 +350,7 @@ def pair_roaming_sequences(
                 )
                 last_assoc[frame.ta] = (frame.epoch, frame.subtype, frame.ra)
                 continue
+            anchors.pop(frame.ta, None)
             pairs.append(
                 RoamPairing(
                     assoc=frame,
