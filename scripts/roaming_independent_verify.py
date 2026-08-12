@@ -48,6 +48,7 @@ BEACON_FIELDS = ("frame.time_epoch", "wlan.bssid", "wlan.fixed.timestamp")
 
 DEFAULT_DEDUP_MS = 50.0
 DEFAULT_ASSOC_ATTEMPT_MS = 200.0
+DEFAULT_SAME_AUTH_EXCHANGE_MS = 1000.0
 DEFAULT_AUTH_MAX_MS = 10_000.0
 DEFAULT_STA_MATCH_MS = 250.0
 DEFAULT_COMPARE_MS = 50.0
@@ -434,6 +435,7 @@ def build_packet_ledger(
     collapsed = 0
     auth_max_sec = auth_max_ms / 1000.0
     attempt_sec = assoc_attempt_ms / 1000.0
+    same_auth_sec = DEFAULT_SAME_AUTH_EXCHANGE_MS / 1000.0
 
     for event in events:
         if event.subtype == 11:
@@ -442,13 +444,15 @@ def build_packet_ledger(
             elif event.ra in stas:
                 key = (event.ra, event.ta)
                 previous = anchors.get(key)
-                if previous is None or event.epoch - previous[0].epoch > 1.0:
+                if previous is None or event.epoch - previous[0].epoch > same_auth_sec:
                     anchors[key] = (event, "auth_response")
             continue
         if event.subtype not in {0, 2} or event.ta not in stas:
             continue
 
         anchor = anchors.pop((event.ta, event.ra), None)
+        for stale_key in [key for key in anchors if key[0] == event.ta]:
+            anchors.pop(stale_key, None)
         if anchor is not None:
             delta = event.epoch - anchor[0].epoch
             if delta < 0 or delta > auth_max_sec:

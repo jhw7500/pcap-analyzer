@@ -152,14 +152,15 @@ def test_packet_ledger_does_not_consume_auth_for_another_ap():
     events = [
         packet(epoch=1.0, subtype=11, ta=sta, ra=ap1, number=1),
         packet(epoch=1.1, subtype=2, ta=sta, ra=ap2, number=2),
+        packet(epoch=6.0, subtype=2, ta=sta, ra=ap1, number=3),
     ]
 
     rows, _ = verify.build_packet_ledger(events, [sta])
 
-    assert len(rows) == 1
-    assert rows[0].ap == ap2
-    assert rows[0].auth_epoch is None
-    assert rows[0].gap_ms is None
+    assert len(rows) == 2
+    assert [row.ap for row in rows] == [ap2, ap1]
+    assert all(row.auth_epoch is None for row in rows)
+    assert all(row.gap_ms is None for row in rows)
 
 
 def test_parse_wpa_log_builds_success_and_failure_ledger(tmp_path):

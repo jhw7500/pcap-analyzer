@@ -299,6 +299,11 @@ def pair_roaming_sequences(
             continue
         if frame.subtype in ("0", "2") and frame.ta in sta_macs:
             anchor = anchors.pop((frame.ta, frame.ra), None)  # 규칙 3 — 대상 AP별 소비
+            # 어느 AP로든 Association이 진행되면 이 STA가 앞서 남긴 다른 AP용
+            # Auth는 더 이상 다음 로밍의 시작점이 아니다. 남겨두면 Auth 미포착 상태로
+            # AP에 돌아왔을 때 수초 전 anchor와 허위 pairing된다.
+            for stale_key in [key for key in anchors if key[0] == frame.ta]:
+                anchors.pop(stale_key, None)
             if anchor is not None:
                 anchor_frame, basis = anchor
                 delta = frame.epoch - anchor_frame.epoch

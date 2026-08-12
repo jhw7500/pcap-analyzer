@@ -13,6 +13,7 @@ Reassoc이 수십 초 전 낡은 Auth와 짝지어진 것. 17건 중 16건은 AP
 from tests.conftest import AP1, STA1, make_frame
 
 from analyzer.core.modules.roaming import (
+    _SAME_AUTH_EXCHANGE_SEC,
     ASSOC_ATTEMPT_MAX_SEC,
     GAP_BASIS_REQUEST,
     GAP_BASIS_RESPONSE,
@@ -76,16 +77,17 @@ class TestAnchorConsumption:
         assert _gaps_ms(pair_roaming_sequences(frames, STA_MACS)) == [5.0, 7.0]
 
     def test_auth_for_other_ap_is_not_consumed(self):
-        """STA가 같아도 대상 AP가 다르면 Auth gap을 지어내면 안 된다."""
+        """대상 AP가 다른 Auth는 소비하지도, 다음 로밍까지 남기지도 않는다."""
         frames = [
             _auth_req(1, 1000.000, ap=AP1),
             _reassoc(2, 1000.005, ap=AP2),
+            _reassoc(3, 1005.000, ap=AP1),
         ]
 
         pairs = pair_roaming_sequences(frames, STA_MACS)
 
-        assert _gaps_ms(pairs) == [None]
-        assert pairs[0].auth is None
+        assert _gaps_ms(pairs) == [None, None]
+        assert all(pair.auth is None for pair in pairs)
 
 
 class TestAssociationAttemptDedup:
@@ -133,9 +135,13 @@ class TestAssociationAttemptDedup:
         assert _gaps_ms(pair_roaming_sequences(frames, STA_MACS)) == [5.0, None]
 
     def test_independent_verifier_uses_same_attempt_window(self):
-        from scripts.roaming_independent_verify import DEFAULT_ASSOC_ATTEMPT_MS
+        from scripts.roaming_independent_verify import (
+            DEFAULT_ASSOC_ATTEMPT_MS,
+            DEFAULT_SAME_AUTH_EXCHANGE_MS,
+        )
 
         assert DEFAULT_ASSOC_ATTEMPT_MS == ASSOC_ATTEMPT_MAX_SEC * 1000
+        assert DEFAULT_SAME_AUTH_EXCHANGE_MS == _SAME_AUTH_EXCHANGE_SEC * 1000
 
 
 class TestApSideFallback:
