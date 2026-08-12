@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 import config
 from app import app
 from routes import analysis as analysis_module
+from routes import independent_validation as validation_module
 from routes.independent_validation import (
     IndependentValidationCancelled,
     failed_validation_payload,
@@ -101,6 +102,29 @@ def test_web_wrapper_honors_cancel_before_work(tmp_path):
                 source_names=["x.pcap"],
                 cancelled=lambda: True,
             )
+
+
+def test_web_wrapper_can_cancel_while_waiting_for_memory_slot(tmp_path):
+    primary = tmp_path / "x.pcap"
+    primary.write_bytes(PCAP)
+    checks = iter([False, True])
+
+    assert validation_module._verification_slot.acquire(timeout=0)
+    try:
+        with patch("routes.independent_validation.run_verification") as verifier:
+            with pytest.raises(IndependentValidationCancelled):
+                run_independent_web_validation(
+                    str(primary),
+                    [],
+                    [],
+                    analyzer_result(),
+                    tshark="tshark",
+                    source_names=["x.pcap"],
+                    cancelled=lambda: next(checks, True),
+                )
+        verifier.assert_not_called()
+    finally:
+        validation_module._verification_slot.release()
 
 
 def test_web_wrapper_rejects_duplicate_station_names(tmp_path):
@@ -238,6 +262,26 @@ def test_validation_routes_and_analysis_panel(tmp_path, monkeypatch):
     assert data.json()["packet"]["roaming_total"] == 2
     assert markdown.status_code == 200
     assert "# 독립 로밍 검증 보고서" in markdown.text
+
+
+def test_analysis_panel_uses_dash_when_station_percentiles_are_missing(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    analysis_module._invalidate_result_cache()
+    result = analyzer_result("web-no-station-percentiles")
+    report = validation_report()
+    report["station_logs"]["total_ms"]["p50"] = None
+    report["station_logs"]["total_ms"]["p95"] = None
+    result["independent_validation"] = {**report, "status": "complete"}
+    (tmp_path / "web-no-station-percentiles.json").write_text(
+        json.dumps(result), encoding="utf-8"
+    )
+
+    page = client.get("/analysis/web-no-station-percentiles")
+
+    assert page.status_code == 200
+    assert "Nonems" not in page.text
 
 
 def test_validation_route_reports_not_requested(tmp_path, monkeypatch):

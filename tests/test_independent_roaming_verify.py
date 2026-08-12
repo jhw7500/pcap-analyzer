@@ -1,4 +1,5 @@
 import ast
+from collections import OrderedDict
 from pathlib import Path
 import time
 
@@ -283,6 +284,46 @@ def test_tshark_rows_terminates_process_on_cancel(tmp_path):
         )
 
     assert time.monotonic() - started < 3.0
+
+
+def test_packet_event_limit_is_global_across_sources(monkeypatch, tmp_path):
+    paths = [tmp_path / "one.pcap", tmp_path / "two.pcap"]
+    sources = OrderedDict((f"w{index}", [path]) for index, path in enumerate(paths, 1))
+
+    def rows(input_paths, *_args, **_kwargs):
+        for path in input_paths:
+            for number in range(2):
+                yield path, [
+                    str(number + 1),
+                    str(100 + number),
+                    "0",
+                    "2",
+                    "00:00:00:00:00:01",
+                    "00:00:00:00:00:aa",
+                    "00:00:00:00:00:aa",
+                    str(number),
+                    "",
+                    "",
+                ]
+
+    monkeypatch.setattr(verify, "_tshark_rows", rows)
+
+    with pytest.raises(RuntimeError, match=r"상한\(3건\) 초과"):
+        verify.extract_packet_events(sources, max_rows=3)
+
+
+def test_beacon_limit_counts_unique_keys_globally(monkeypatch, tmp_path):
+    paths = [tmp_path / "one.pcap", tmp_path / "two.pcap"]
+    sources = OrderedDict((f"w{index}", [path]) for index, path in enumerate(paths, 1))
+
+    def rows(input_paths, *_args, **_kwargs):
+        for path in input_paths:
+            yield path, ["100.0", "00:00:00:00:00:aa", path.stem]
+
+    monkeypatch.setattr(verify, "_tshark_rows", rows)
+
+    with pytest.raises(RuntimeError, match=r"Beacon 키 상한\(1건\) 초과"):
+        verify.extract_beacons(sources, max_keys=1)
 
 
 def test_explicit_binding_must_cover_every_station():

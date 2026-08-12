@@ -7,6 +7,7 @@
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
+import threading
 from typing import Any, Callable, Optional
 
 from scripts.roaming_independent_verify import VerificationCancelled, run_verification
@@ -14,6 +15,11 @@ from scripts.roaming_independent_verify import VerificationCancelled, run_verifi
 
 class IndependentValidationCancelled(RuntimeError):
     """사용자가 독립 검증 실행 중 분석 job을 취소했다."""
+
+
+# 독립 검증은 tshark 결과 원장을 메모리에 유지한다. 여러 업로드가 동시에 이 단계를
+# 실행해 상한을 합산하지 않도록 프로세스당 하나만 허용한다.
+_verification_slot = threading.BoundedSemaphore(1)
 
 
 def run_independent_web_validation(
@@ -50,7 +56,12 @@ def run_independent_web_validation(
         if progress_cb is not None:
             progress_cb(message, pct)
 
+    acquired = False
     try:
+        while not acquired:
+            if cancelled is not None and cancelled():
+                raise IndependentValidationCancelled("독립 검증이 취소되었습니다.")
+            acquired = _verification_slot.acquire(timeout=0.1)
         report = run_verification(
             sources,
             station_paths,
@@ -62,6 +73,9 @@ def run_independent_web_validation(
         )
     except VerificationCancelled as exc:
         raise IndependentValidationCancelled(str(exc)) from exc
+    finally:
+        if acquired:
+            _verification_slot.release()
     # /tmp 경로는 서버 내부 정보이며 업로드가 끝나면 무효다. 결과에는 사용자가
     # 알아볼 수 있는 원본 표시명만 남긴다.
     report["inputs"]["sources"] = {

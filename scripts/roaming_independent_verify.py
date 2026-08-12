@@ -54,6 +54,9 @@ DEFAULT_COMPARE_MS = 50.0
 DEFAULT_STA_SLOW_MS = 150.0
 DEFAULT_PCAP_SLOW_MS = 100.0
 DEFAULT_STATION_UTC_OFFSET = "+09:00"
+DEFAULT_MAX_EVENT_ROWS = 200_000
+DEFAULT_MAX_BEACON_KEYS = 500_000
+_TSHARK_QUEUE_MAX_ROWS = 4096
 
 _TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)")
 _ROAM_RE = re.compile(r"Control interface command 'ROAM ([0-9a-f:]{17})'", re.I)
@@ -167,20 +170,44 @@ def _tshark_rows(
             errors="replace",
         )
         assert proc.stdout is not None and proc.stderr is not None
-        rows: "queue.Queue[object]" = queue.Queue()
+        # stdout 소비 속도가 파싱 속도를 앞질러도 큐 자체가 무제한으로 커지지 않게 한다.
+        # 기본 인자로 현재 반복의 객체도 고정해 다중 pcap에서 클로저 혼선을 막는다.
+        rows: "queue.Queue[object]" = queue.Queue(maxsize=_TSHARK_QUEUE_MAX_ROWS)
         done = object()
+        stop_drain = threading.Event()
         stderr_tail: deque[str] = deque(maxlen=200)
 
-        def drain_stdout() -> None:
-            try:
-                for line in proc.stdout:
-                    rows.put(line)
-            finally:
-                rows.put(done)
+        def put_row(
+            item: object,
+            target: "queue.Queue[object]",
+            stopped: threading.Event = stop_drain,
+        ) -> bool:
+            while True:
+                if stopped.is_set() or (cancelled is not None and cancelled()):
+                    return False
+                try:
+                    target.put(item, timeout=0.1)
+                    return True
+                except queue.Full:
+                    continue
 
-        def drain_stderr() -> None:
-            for line in proc.stderr:
-                stderr_tail.append(line)
+        def drain_stdout(
+            stream: Any = proc.stdout,
+            target: "queue.Queue[object]" = rows,
+            sentinel: object = done,
+        ) -> None:
+            try:
+                for line in stream:
+                    if not put_row(line, target):
+                        return
+            finally:
+                put_row(sentinel, target)
+
+        def drain_stderr(
+            stream: Any = proc.stderr, target: deque[str] = stderr_tail
+        ) -> None:
+            for line in stream:
+                target.append(line)
 
         stdout_thread = threading.Thread(target=drain_stdout, daemon=True)
         stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
@@ -208,6 +235,7 @@ def _tshark_rows(
                 yield path, cols
             rc = proc.wait()
         finally:
+            stop_drain.set()
             if proc.poll() is None:
                 proc.terminate()
                 try:
@@ -226,32 +254,40 @@ def extract_packet_events(
     sources: "OrderedDict[str, list[Path]]",
     tshark: str = "tshark",
     cancelled: Optional[Callable[[], bool]] = None,
+    max_rows: int = DEFAULT_MAX_EVENT_ROWS,
 ) -> tuple["OrderedDict[str, list[PacketEvent]]", dict[str, int]]:
+    if max_rows <= 0:
+        raise ValueError("로밍/EAPOL 추출 상한은 1 이상이어야 한다")
     out: "OrderedDict[str, list[PacketEvent]]" = OrderedDict()
     counts: dict[str, int] = {}
+    total_rows = 0
     for tag, paths in sources.items():
         events: list[PacketEvent] = []
         for _, cols in _tshark_rows(
             paths, EVENT_FIELDS, EVENT_FILTER, tshark, cancelled
         ):
             try:
-                events.append(
-                    PacketEvent(
-                        source=tag,
-                        number=int(_first(cols[0])),
-                        epoch=float(_first(cols[1])),
-                        retry=_bool(cols[2]),
-                        subtype=_subtype(cols[3]),
-                        ta=_first(cols[4]).lower(),
-                        ra=_first(cols[5]).lower(),
-                        bssid=_first(cols[6]).lower(),
-                        seq=_first(cols[7]),
-                        current_ap=_first(cols[8]).lower(),
-                        eapol_msg=_first(cols[9]),
-                    )
+                event = PacketEvent(
+                    source=tag,
+                    number=int(_first(cols[0])),
+                    epoch=float(_first(cols[1])),
+                    retry=_bool(cols[2]),
+                    subtype=_subtype(cols[3]),
+                    ta=_first(cols[4]).lower(),
+                    ra=_first(cols[5]).lower(),
+                    bssid=_first(cols[6]).lower(),
+                    seq=_first(cols[7]),
+                    current_ap=_first(cols[8]).lower(),
+                    eapol_msg=_first(cols[9]),
                 )
             except (ValueError, IndexError):
                 continue
+            if total_rows >= max_rows:
+                raise RuntimeError(
+                    f"독립 검증 로밍/EAPOL 프레임 상한({max_rows:,}건) 초과"
+                )
+            events.append(event)
+            total_rows += 1
         events.sort(key=lambda event: (event.epoch, event.number))
         out[tag] = events
         counts[tag] = len(events)
@@ -262,8 +298,12 @@ def extract_beacons(
     sources: "OrderedDict[str, list[Path]]",
     tshark: str = "tshark",
     cancelled: Optional[Callable[[], bool]] = None,
+    max_keys: int = DEFAULT_MAX_BEACON_KEYS,
 ) -> "OrderedDict[str, dict[tuple[str, str], float]]":
+    if max_keys <= 0:
+        raise ValueError("Beacon 키 상한은 1 이상이어야 한다")
     out: "OrderedDict[str, dict[tuple[str, str], float]]" = OrderedDict()
+    total_keys = 0
     for tag, paths in sources.items():
         beacons: dict[tuple[str, str], float] = {}
         for _, cols in _tshark_rows(
@@ -279,7 +319,14 @@ def extract_beacons(
                 continue
             bssid, tsf = _first(cols[1]).lower(), _first(cols[2])
             if bssid and tsf:
-                beacons.setdefault((bssid, tsf), epoch)
+                key = (bssid, tsf)
+                if key not in beacons:
+                    if total_keys >= max_keys:
+                        raise RuntimeError(
+                            f"독립 검증 Beacon 키 상한({max_keys:,}건) 초과"
+                        )
+                    beacons[key] = epoch
+                    total_keys += 1
         out[tag] = beacons
     return out
 
@@ -976,6 +1023,8 @@ def build_report(
     analyzer_comparison: Optional[dict[str, Any]],
     station_utc_offset: str,
     elapsed_sec: float,
+    max_event_rows: int,
+    max_beacon_keys: int,
 ) -> dict[str, Any]:
     sta_values = [
         float(transaction.sta_total_ms)
@@ -1005,6 +1054,10 @@ def build_report(
             "analyzer_imported": False,
             "packet_source": "tshark raw fields",
             "station_source": "wpa.log raw lines",
+            "memory_limits": {
+                "event_rows": max_event_rows,
+                "beacon_keys": max_beacon_keys,
+            },
         },
         "inputs": {
             "sources": {
@@ -1071,6 +1124,8 @@ def run_verification(
     assoc_attempt_ms: float = DEFAULT_ASSOC_ATTEMPT_MS,
     sta_match_ms: float = DEFAULT_STA_MATCH_MS,
     compare_ms: float = DEFAULT_COMPARE_MS,
+    max_event_rows: int = DEFAULT_MAX_EVENT_ROWS,
+    max_beacon_keys: int = DEFAULT_MAX_BEACON_KEYS,
     progress_cb: Optional[Callable[[str, int], None]] = None,
     cancelled: Optional[Callable[[], bool]] = None,
 ) -> dict[str, Any]:
@@ -1093,9 +1148,11 @@ def run_verification(
             progress_cb(message, pct)
 
     progress("tshark 로밍/EAPOL 전수 추출", 5)
-    per_source, packet_counts = extract_packet_events(sources, tshark, cancelled)
+    per_source, packet_counts = extract_packet_events(
+        sources, tshark, cancelled, max_event_rows
+    )
     progress("Beacon TSF 독립 시각 정렬", 30)
-    beacons = extract_beacons(sources, tshark, cancelled)
+    beacons = extract_beacons(sources, tshark, cancelled, max_beacon_keys)
     offsets = estimate_tsf_offsets(beacons, selected_reference)
     progress("관측점 간 중복 제거 및 패킷 로밍 원장", 55)
     merged, duplicates = align_and_dedup(per_source, offsets, dedup_ms)
@@ -1135,6 +1192,8 @@ def run_verification(
         analyzer_comparison=comparison,
         station_utc_offset=station_utc_offset,
         elapsed_sec=time.time() - started,
+        max_event_rows=max_event_rows,
+        max_beacon_keys=max_beacon_keys,
     )
     progress("독립 검증 완료", 100)
     return report
@@ -1261,6 +1320,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--sta-match-ms", type=float, default=DEFAULT_STA_MATCH_MS)
     parser.add_argument("--compare-ms", type=float, default=DEFAULT_COMPARE_MS)
+    parser.add_argument(
+        "--max-event-rows",
+        type=int,
+        default=DEFAULT_MAX_EVENT_ROWS,
+        help="로밍/EAPOL 추출 행 전역 상한",
+    )
+    parser.add_argument(
+        "--max-beacon-keys",
+        type=int,
+        default=DEFAULT_MAX_BEACON_KEYS,
+        help="고유 (BSSID, TSF) Beacon 키 전역 상한",
+    )
     return parser
 
 
@@ -1298,6 +1369,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             assoc_attempt_ms=args.assoc_attempt_ms,
             sta_match_ms=args.sta_match_ms,
             compare_ms=args.compare_ms,
+            max_event_rows=args.max_event_rows,
+            max_beacon_keys=args.max_beacon_keys,
             progress_cb=print_progress,
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
