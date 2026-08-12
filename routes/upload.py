@@ -1,6 +1,7 @@
 """pcap 업로드 + 분석 실행 + 취소 + 진행률 polling (job id 기반)."""
 import asyncio
 import json
+import logging
 import tempfile
 import threading
 import time
@@ -41,6 +42,7 @@ _MAX_STATION_LOG_BYTES = 64 * 1024 * 1024
 #: 3조각이 311MB, 유선 133MB라 8GB면 4시간대 다중 스니퍼도 넉넉하고 디스크
 #: 여유가 적은 호스트를 지켜준다.
 _MAX_REQUEST_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 class _UploadBudget:
@@ -630,9 +632,11 @@ async def upload_pcap(
             )
         except IndependentValidationCancelled:
             return {"cancelled": True}
-        except (OSError, RuntimeError, ValueError) as exc:
+        except Exception as exc:
             # 독립 검증은 교차확인 기능이다. 실패해도 이미 완료된 본 분석은 버리지
-            # 않고 결과 화면에 실패 사유를 표시한다.
+            # 않고 결과 화면에 실패 사유를 표시한다. 취소는 바로 위에서 별도로
+            # 처리하며 SystemExit/KeyboardInterrupt 같은 BaseException은 삼키지 않는다.
+            logger.exception("독립 로밍 교차검증 실패 — 본 분석 결과는 보존합니다")
             result["independent_validation"] = failed_validation_payload(
                 exc,
                 [tmp_name, *wireless_tmps, *station_tmps],

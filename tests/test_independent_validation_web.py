@@ -240,6 +240,37 @@ def test_upload_validation_failure_preserves_main_analysis(tmp_path, monkeypatch
     assert saved["independent_validation"]["status"] == "failed"
 
 
+def test_upload_unexpected_validation_error_preserves_main_analysis(
+    tmp_path, monkeypatch
+):
+    """교차검증 구현 결함도 이미 완료된 본 분석을 폐기하면 안 된다."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    with (
+        patch("routes.upload.config.detect_tshark", return_value="tshark"),
+        patch(
+            "routes.upload.run_analysis",
+            return_value=analyzer_result("web-validation-unexpected"),
+        ),
+        patch(
+            "routes.upload.run_independent_web_validation",
+            side_effect=KeyError("unexpected schema"),
+        ),
+    ):
+        response = client.post(
+            "/api/upload",
+            files={"file": ("primary.pcap", PCAP, "application/octet-stream")},
+            data={"independent_validation": "true"},
+        )
+
+    assert response.status_code == 200
+    saved = json.loads(
+        (tmp_path / "web-validation-unexpected.json").read_text(encoding="utf-8")
+    )
+    assert saved["id"] == "web-validation-unexpected"
+    assert saved["independent_validation"]["status"] == "failed"
+    assert "unexpected schema" in saved["independent_validation"]["error"]
+
+
 def test_validation_routes_and_analysis_panel(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     analysis_module._invalidate_result_cache()

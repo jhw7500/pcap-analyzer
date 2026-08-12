@@ -58,9 +58,10 @@ _SAME_AUTH_EXCHANGE_SEC = 1.0
 #: 정렬된 경우를 놓친다. 또 wpa_supplicant가 같은 로밍 중 새 sequence number로
 #: Reassoc을 다시 보내면 retry=False여도 새 로밍이 아니다(TEST14 실측: 154ms 뒤
 #: 재시도). 반대로 새 Auth가 있거나 대상 AP/subtype이 다르면 창 안이어도 새 이벤트로
-#: 보존한다. 1초는 실제 association 재시도(수 ms~154ms)를 감싸면서, Auth를 통째로
-#: 놓친 별도 로밍을 무작정 합치는 범위를 제한한다.
-ASSOC_ATTEMPT_MAX_SEC = 1.0
+#: 보존한다. TEST13/14 각 2시간 캡처에서 200ms~1.5초의 결과가 같았고, TEST14의
+#: 154ms 재시도를 보존하려면 150ms보다 큰 값이 필요했다. 따라서 실측상 가장 작은
+#: 안정 구간인 200ms를 써서 Auth를 놓친 별도 로밍의 과다 병합 범위를 줄인다.
+ASSOC_ATTEMPT_MAX_SEC = 0.2
 
 
 #: gap 시작점으로 쓴 프레임 종류.
@@ -255,7 +256,8 @@ def pair_roaming_sequences(
     즉 로밍 자체는 정상 속도였다.
 
     ## 규칙
-    1. STA가 **송신한** Auth(요청)가 로밍 시작점이라 1순위 앵커다.
+    1. STA가 **송신한** Auth(요청)가 로밍 시작점이라 1순위 앵커다. 앵커는
+       STA와 대상 AP를 함께 키로 사용한다.
     2. STA를 **수신자로 하는** Auth(AP 응답)는 폴백 앵커다. 같은 교환의 요청이
        이미 앵커면 덮어쓰지 않는다(요청 시각이 더 정확한 시작점).
     3. 짝지은 앵커는 **즉시 폐기**한다 — 다음 Assoc이 재사용할 수 없다.
@@ -276,8 +278,9 @@ def pair_roaming_sequences(
     Returns:
         `RoamPairing` 리스트(assoc 시간순). 측정 불가 항목도 포함된다.
     """
-    # sta MAC → (앵커 프레임, 앵커 종류)
-    anchors: Dict[str, Any] = {}
+    # (STA MAC, 대상 AP MAC) → (앵커 프레임, 앵커 종류).
+    # STA만 키로 쓰면 AP1 Auth 뒤 AP2 Assoc을 허위로 짝지을 수 있다.
+    anchors: Dict[Tuple[str, str], Tuple[FrameType, str]] = {}
     # sta MAC → (직전 채택 Assoc/Reassoc 시각, subtype, 대상 AP)
     # 같은 association 시도의 재전송·재시도 식별용.
     last_assoc: Dict[str, Any] = {}
@@ -286,15 +289,16 @@ def pair_roaming_sequences(
         if frame.subtype == "11":
             if frame.ta in sta_macs:
                 # 규칙 1 — STA의 요청이 로밍 시작점이라 항상 우선
-                anchors[frame.ta] = (frame, GAP_BASIS_REQUEST)
+                anchors[(frame.ta, frame.ra)] = (frame, GAP_BASIS_REQUEST)
             elif frame.ra in sta_macs:
-                prev = anchors.get(frame.ra)
+                key = (frame.ra, frame.ta)
+                prev = anchors.get(key)
                 # 규칙 2 — 같은 교환의 요청이 이미 앵커면 덮어쓰지 않는다
                 if prev is None or frame.epoch - prev[0].epoch > _SAME_AUTH_EXCHANGE_SEC:
-                    anchors[frame.ra] = (frame, GAP_BASIS_RESPONSE)
+                    anchors[key] = (frame, GAP_BASIS_RESPONSE)
             continue
         if frame.subtype in ("0", "2") and frame.ta in sta_macs:
-            anchor = anchors.pop(frame.ta, None)      # 규칙 3 — 소비 즉시 폐기
+            anchor = anchors.pop((frame.ta, frame.ra), None)  # 규칙 3 — 대상 AP별 소비
             if anchor is not None:
                 anchor_frame, basis = anchor
                 delta = frame.epoch - anchor_frame.epoch

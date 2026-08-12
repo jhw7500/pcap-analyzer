@@ -47,7 +47,7 @@ EVENT_FIELDS = (
 BEACON_FIELDS = ("frame.time_epoch", "wlan.bssid", "wlan.fixed.timestamp")
 
 DEFAULT_DEDUP_MS = 50.0
-DEFAULT_ASSOC_ATTEMPT_MS = 1000.0
+DEFAULT_ASSOC_ATTEMPT_MS = 200.0
 DEFAULT_AUTH_MAX_MS = 10_000.0
 DEFAULT_STA_MATCH_MS = 250.0
 DEFAULT_COMPARE_MS = 50.0
@@ -428,7 +428,7 @@ def build_packet_ledger(
     auth_max_ms: float = DEFAULT_AUTH_MAX_MS,
 ) -> tuple[list[RoamTransaction], dict[str, int]]:
     stas = set(sta_macs)
-    anchors: dict[str, tuple[PacketEvent, str]] = {}
+    anchors: dict[tuple[str, str], tuple[PacketEvent, str]] = {}
     last_assoc: dict[str, PacketEvent] = {}
     transactions: list[RoamTransaction] = []
     collapsed = 0
@@ -438,16 +438,17 @@ def build_packet_ledger(
     for event in events:
         if event.subtype == 11:
             if event.ta in stas:
-                anchors[event.ta] = (event, "auth_request")
+                anchors[(event.ta, event.ra)] = (event, "auth_request")
             elif event.ra in stas:
-                previous = anchors.get(event.ra)
+                key = (event.ra, event.ta)
+                previous = anchors.get(key)
                 if previous is None or event.epoch - previous[0].epoch > 1.0:
-                    anchors[event.ra] = (event, "auth_response")
+                    anchors[key] = (event, "auth_response")
             continue
         if event.subtype not in {0, 2} or event.ta not in stas:
             continue
 
-        anchor = anchors.pop(event.ta, None)
+        anchor = anchors.pop((event.ta, event.ra), None)
         if anchor is not None:
             delta = event.epoch - anchor[0].epoch
             if delta < 0 or delta > auth_max_sec:
@@ -542,37 +543,38 @@ def parse_wpa_log(
         )
         pending = None
 
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        ts_match = _TS_RE.match(line)
-        if not ts_match:
-            continue
-        epoch = _parse_local_epoch(ts_match.group(1), log_timezone)
-        roam_match = _ROAM_RE.search(line)
-        if roam_match:
-            close_failed("next_roam_before_connected")
-            pending = {"epoch": epoch, "target": roam_match.group(1).lower()}
-            continue
-        connected_match = _CONNECTED_RE.search(line)
-        if connected_match and pending is not None:
-            target = connected_match.group(1).lower()
-            total_ms = round((epoch - pending["epoch"]) * 1000, 1)
-            roams.append(
-                StationRoam(
-                    station=station,
-                    index=len(roams) + 1,
-                    target_ap=target,
-                    command_epoch=pending["epoch"],
-                    connected_epoch=epoch,
-                    total_ms=total_ms,
-                    failed=False,
-                    fail_reason="",
+    with path.open(encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            ts_match = _TS_RE.match(line)
+            if not ts_match:
+                continue
+            epoch = _parse_local_epoch(ts_match.group(1), log_timezone)
+            roam_match = _ROAM_RE.search(line)
+            if roam_match:
+                close_failed("next_roam_before_connected")
+                pending = {"epoch": epoch, "target": roam_match.group(1).lower()}
+                continue
+            connected_match = _CONNECTED_RE.search(line)
+            if connected_match and pending is not None:
+                target = connected_match.group(1).lower()
+                total_ms = round((epoch - pending["epoch"]) * 1000, 1)
+                roams.append(
+                    StationRoam(
+                        station=station,
+                        index=len(roams) + 1,
+                        target_ap=target,
+                        command_epoch=pending["epoch"],
+                        connected_epoch=epoch,
+                        total_ms=total_ms,
+                        failed=False,
+                        fail_reason="",
+                    )
                 )
-            )
-            pending = None
-            continue
-        fail_match = _FAIL_RE.search(line)
-        if fail_match and pending is not None:
-            close_failed(fail_match.group(1))
+                pending = None
+                continue
+            fail_match = _FAIL_RE.search(line)
+            if fail_match and pending is not None:
+                close_failed(fail_match.group(1))
     close_failed("end_of_log")
     return roams
 

@@ -75,6 +75,18 @@ class TestAnchorConsumption:
         ]
         assert _gaps_ms(pair_roaming_sequences(frames, STA_MACS)) == [5.0, 7.0]
 
+    def test_auth_for_other_ap_is_not_consumed(self):
+        """STA가 같아도 대상 AP가 다르면 Auth gap을 지어내면 안 된다."""
+        frames = [
+            _auth_req(1, 1000.000, ap=AP1),
+            _reassoc(2, 1000.005, ap=AP2),
+        ]
+
+        pairs = pair_roaming_sequences(frames, STA_MACS)
+
+        assert _gaps_ms(pairs) == [None]
+        assert pairs[0].auth is None
+
 
 class TestAssociationAttemptDedup:
     """같은 로밍 안의 Reassoc 반복이 새 로밍·측정불가로 부풀지 않는다."""
@@ -119,6 +131,11 @@ class TestAssociationAttemptDedup:
             _reassoc(3, 1000.005 + ASSOC_ATTEMPT_MAX_SEC + 0.001),
         ]
         assert _gaps_ms(pair_roaming_sequences(frames, STA_MACS)) == [5.0, None]
+
+    def test_independent_verifier_uses_same_attempt_window(self):
+        from scripts.roaming_independent_verify import DEFAULT_ASSOC_ATTEMPT_MS
+
+        assert DEFAULT_ASSOC_ATTEMPT_MS == ASSOC_ATTEMPT_MAX_SEC * 1000
 
 
 class TestApSideFallback:
