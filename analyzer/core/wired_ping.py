@@ -32,14 +32,26 @@ _CAPINFOS_TIMEOUT_SEC = 30
 _CAPINFOS_POLL_SEC = 0.2
 
 
-def _rtt_stats(exchanges: List["exping.Exchange"]) -> Optional[Dict[str, Any]]:
+def _rtt_stats(
+    exchanges: List["exping.Exchange"], *, include_late: bool = False
+) -> Optional[Dict[str, Any]]:
     """응답 있는 exchange의 RTT 통계(ms). 응답 0건이면 None — 정직한 공백
     원칙(스펙 §1): 0이나 가짜 값으로 채우면 '무손실·0ms'로 오독된다.
+
+    기본값은 기존 계약대로 timeout 이내 ``rtt``만 집계한다. ``include_late``면
+    정상 응답은 ``rtt``, timeout 초과 응답은 ``late_rtt``를 사용해 실제로 관측된
+    모든 reply의 RTT를 집계한다. 한 exchange에는 둘 중 하나만 설정된다.
 
     p95는 정렬 후 nearest-rank(ceil(0.95*n)-1 인덱스) — 외부 의존성 없이
     n=1에서도 안전하다.
     """
-    rtts = sorted(x.rtt for x in exchanges if x.rtt is not None)
+    rtts = sorted(
+        observed
+        for x in exchanges
+        if (observed := x.rtt if x.rtt is not None else (
+            x.late_rtt if include_late else None
+        )) is not None
+    )
     if not rtts:
         return None
     n = len(rtts)
@@ -624,6 +636,12 @@ def build_ground_truth(
     rtt_stats = _rtt_stats(exchanges)
     if rtt_stats is not None:
         result["rtt_stats"] = rtt_stats
+    observed_rtt_stats = _rtt_stats(exchanges, include_late=True)
+    if observed_rtt_stats is not None:
+        # 신규 timeout-aware 화면은 정상+지연 응답 trace를 모두 보여준다. 기존
+        # rtt_stats(정상 응답 전용)의 의미를 바꾸지 않고 별도 모집단을 노출해 KPI,
+        # 상세 표, 히스토그램이 trace와 같은 관측 응답을 요약하게 한다.
+        result["observed_rtt_stats"] = observed_rtt_stats
     if time_end:
         # 13라운드의 경계 배제(_filter_exchanges: 응답 창이 time_end를 넘어갈
         # 여지가 있고 실제 응답도 경계 밖인 요청 제외)는 유선 GT에만 적용됐다 —

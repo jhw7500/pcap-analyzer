@@ -100,6 +100,27 @@ def test_late_reply_is_timeout_but_separate_from_unanswered(tmp_path):
     assert gt["reply_timeout_sec"] == 1.0
     assert gt["exchanges"][0]["rtt_ms"] is None
     assert gt["exchanges"][0]["late_rtt_ms"] == pytest.approx(1500.0)
+    # 기존 rtt_stats는 정상 응답만이라는 직렬화 계약을 유지한다. 신규 관측
+    # 통계는 실제로 수신한 정상+지연 응답을 모두 포함해 화면 요약과 trace가
+    # 서로 모순되지 않게 한다.
+    assert gt["rtt_stats"] == {
+        "n": 1, "min_ms": 100.0, "avg_ms": 100.0,
+        "max_ms": 100.0, "p95_ms": 100.0,
+    }
+    assert gt["observed_rtt_stats"] == {
+        "n": 2, "min_ms": 100.0, "avg_ms": 800.0,
+        "max_ms": 1500.0, "p95_ms": 1500.0,
+    }
+
+
+def test_timeout_aware_wired_chart_uses_observed_rtts():
+    """유선 KPI와 히스토그램이 지연 응답을 관측 RTT 모집단에 포함한다."""
+    from pathlib import Path
+
+    src = Path("static/js/charts.js").read_text(encoding="utf-8")
+    assert "gt.observed_rtt_stats || gt.rtt_stats" in src
+    assert "e.rtt_ms ?? e.late_rtt_ms" in src
+    assert "Ping Timeout/NG" in src
 
 
 def test_trailing_unanswered_dropped_with_warning(tmp_path, monkeypatch):

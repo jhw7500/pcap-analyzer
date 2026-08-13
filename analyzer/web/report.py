@@ -23,6 +23,8 @@ from ..core.station_match import MATCH_METHOD_LABELS
 from .structured import (
     LOSS_BASIS_LABELS,
     LOSS_BASIS_WIRED,
+    LOSS_METRIC_LABELS,
+    LOSS_METRIC_PHYSICAL,
     coverage_is_reportable,
 )
 
@@ -44,6 +46,12 @@ SIGNAL_TYPE_LABEL = {
     "signal_cliff": "신호 급강하",
     "legacy_heavy": "Legacy 과다",
 }
+
+
+def _loss_metric_label(summary: Any) -> str:
+    """진단 summary의 손실 축 표시명. 구버전은 ``Ping Loss``로 폴백."""
+    metric = summary.get("loss_metric") if isinstance(summary, dict) else None
+    return LOSS_METRIC_LABELS.get(metric, LOSS_METRIC_LABELS[LOSS_METRIC_PHYSICAL])
 
 
 def _format_epoch(epoch: Any) -> str:
@@ -260,7 +268,11 @@ def _correlations_section(diagnosis: Dict[str, Any]) -> List[str]:
             for s in signals:
                 if isinstance(s, dict):
                     stype = s.get("type", "?")
-                    label = SIGNAL_TYPE_LABEL.get(stype, stype)
+                    label = (
+                        _loss_metric_label(diagnosis.get("summary"))
+                        if stype == "high_loss"
+                        else SIGNAL_TYPE_LABEL.get(stype, stype)
+                    )
                     sigs.append(label)
         if sigs:
             lines.append(f"- 결합 신호: {', '.join(sigs)}")
@@ -456,7 +468,9 @@ def _health_section(diagnosis: Dict[str, Any]) -> List[str]:
         if used is not None:
             # 키 출처: structured.LOSS_BASIS_WIRED / LOSS_BASIS_WIRELESS.
             label = LOSS_BASIS_LABELS.get(basis, "")
-            part = f"Ping Loss {used}%" + (f" ({label})" if label else "")
+            part = f"{_loss_metric_label(summary)} {used}%" + (
+                f" ({label})" if label else ""
+            )
             if (basis == LOSS_BASIS_WIRED
                     and isinstance(observed, (int, float)) and observed != used):
                 part += f" / 무선 관측 {observed}%"
@@ -808,10 +822,16 @@ def _ping_section(structured: Dict[str, Any]) -> List[str]:
             gparts.append(f"기준 {gt['reply_timeout_sec']:g}초")
             gparts.append(f"지연 응답 {gt.get('late_count', 0):,}건")
             gparts.append(f"무응답 {gt.get('unanswered_count', 0):,}건")
-        rs = gt.get("rtt_stats")
+        timeout_aware = "reply_timeout_sec" in gt
+        rs = gt.get("observed_rtt_stats") if timeout_aware else gt.get("rtt_stats")
+        # 초기 timeout-aware 결과에는 observed_rtt_stats가 없으므로 기존 통계로
+        # 폴백한다. 신규 결과에서는 정상+지연 응답을 모두 포함한 관측 RTT다.
+        if not isinstance(rs, dict):
+            rs = gt.get("rtt_stats")
         if isinstance(rs, dict):
-            gparts.append(f"평균 RTT {rs['avg_ms']}ms")
-            gparts.append(f"P95 RTT {rs['p95_ms']}ms")
+            rtt_label = "관측 RTT" if timeout_aware and gt.get("observed_rtt_stats") else "RTT"
+            gparts.append(f"평균 {rtt_label} {rs['avg_ms']}ms")
+            gparts.append(f"P95 {rtt_label} {rs['p95_ms']}ms")
         gt_lines.append(f"- **유선 확정**: {' · '.join(gparts)}")
         streaks = gt.get("streaks") or []
         if streaks:

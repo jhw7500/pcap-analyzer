@@ -1184,6 +1184,16 @@ LOSS_BASIS_LABELS = {
     LOSS_BASIS_WIRELESS: "무선 관측",
 }
 
+#: 건강도 ``component_scores.loss``가 실제로 뜻하는 모집단. 키는 하위호환을
+#: 위해 유지하되, 신규 유선 GT는 지연 응답도 NG로 세므로 화면/리포트가 이를
+#: 물리적 Loss라고 오표시하지 않도록 의미를 별도 직렬화한다.
+LOSS_METRIC_PHYSICAL = "loss"
+LOSS_METRIC_TIMEOUT_NG = "timeout_ng"
+LOSS_METRIC_LABELS = {
+    LOSS_METRIC_PHYSICAL: "Ping Loss",
+    LOSS_METRIC_TIMEOUT_NG: "Ping Timeout/NG",
+}
+
 
 def _loss_for_judgment(ping, wireless_loss_pct, ping_available):
     """손실 판정에 쓸 `(loss_pct, basis)`. 판정 불가면 `(None, None)`.
@@ -1541,6 +1551,16 @@ def _structured_diagnosis(
     # 무선 관측값도 버리지 않는다 — summary에 그대로 남겨 두 값의 차이가 곧
     # 캡처 커버리지를 말해준다. 어느 쪽으로 판정했는지는 `loss_basis`로 드러낸다.
     loss_pct_used, loss_basis = _loss_for_judgment(ping, loss_pct, ping_available)
+    gt = ping.get("ground_truth")
+    loss_metric = None
+    if loss_pct_used is not None:
+        loss_metric = (
+            LOSS_METRIC_TIMEOUT_NG
+            if loss_basis == LOSS_BASIS_WIRED
+            and isinstance(gt, dict)
+            and "reply_timeout_sec" in gt
+            else LOSS_METRIC_PHYSICAL
+        )
     loss_score = (
         max(0, 100 - loss_pct_used * 10) if loss_pct_used is not None else None
     )
@@ -1814,11 +1834,14 @@ def _structured_diagnosis(
     if loss_pct_used is not None and loss_pct_used > LOSS_DANGER_PCT:
         refs, window = ev.ping_loss_evidence(ping_loss_items)
         basis_label = LOSS_BASIS_LABELS.get(loss_basis, "")
+        metric_label = LOSS_METRIC_LABELS.get(loss_metric, "Ping Loss")
         _add_net_issue(
             {
                 "severity": "high",
                 "category": "Ping",
-                "msg": f"Ping Loss {loss_pct_used}%" + (f" ({basis_label})" if basis_label else ""),
+                "msg": f"{metric_label} {loss_pct_used}%" + (
+                    f" ({basis_label})" if basis_label else ""
+                ),
                 "action": "네트워크 안정성 점검, 로밍 구간 확인",
             },
             refs, window, signal_type="high_loss",
@@ -1956,6 +1979,9 @@ def _structured_diagnosis(
             # loss_pct와 다르며, 두 값의 차이가 곧 캡처 커버리지를 말해준다.
             "loss_pct_used": loss_pct_used,
             "loss_basis": loss_basis,
+            # component_scores.loss와 loss_pct_used의 표시 의미. 구버전 결과에는
+            # 키가 없고 소비자는 기존 Ping Loss 라벨로 폴백한다.
+            "loss_metric": loss_metric,
             "roaming_total": len(roam_seqs),
             "roaming_slow": len(slow_roams),
             # 느린 로밍 비율의 실제 분모와, 판정 불가 건수를 숨기지 않는다 —

@@ -1211,6 +1211,31 @@ class TestLossJudgedByWiredGroundTruth:
         # 100 - 0.38*10 = 96.2 (무선이면 100 - 82.4 = 17.6)
         assert d["component_scores"]["loss"] == 96
 
+    def test_timeout_aware_gt_names_global_metric_and_issue(self):
+        """지연 응답만으로 NG가 커져도 물리적 Ping Loss라고 표시하지 않는다."""
+        d = _structured_diagnosis(self._structured(
+            wireless_loss=10.0,
+            wireless_loss_items=10,
+            gt={
+                "total": 100, "ok": 90, "ng": 10, "loss_pct": 10.0,
+                "late_count": 10, "unanswered_count": 0,
+                "reply_timeout_sec": 1.0,
+            },
+        ))
+
+        assert d["summary"]["loss_metric"] == "timeout_ng"
+        assert d["component_scores"]["loss"] == 0
+        issues = [i for i in d["issues"] if i.get("signal_type") == "high_loss"]
+        assert len(issues) == 1
+        assert "Ping Timeout/NG 10.0%" in issues[0]["msg"]
+        assert "Ping Loss" not in issues[0]["msg"]
+
+    def test_legacy_gt_keeps_physical_loss_metric_name(self):
+        d = _structured_diagnosis(self._structured(
+            gt={"total": 100, "ok": 90, "ng": 10, "loss_pct": 10.0},
+        ))
+        assert d["summary"]["loss_metric"] == "loss"
+
     def test_without_gt_uses_wireless(self):
         """구버전 result(ground_truth 키 없음)는 기존 동작 그대로."""
         d = _structured_diagnosis(self._structured())

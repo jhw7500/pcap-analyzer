@@ -1400,15 +1400,16 @@
 
     function renderPingKpiWired() {
         if (!pingKpi) return;
-        const rs = gt.rtt_stats || null;
+        const rs = gt.observed_rtt_stats || gt.rtt_stats || null;
+        const observedLabel = gt.observed_rtt_stats ? '관측 ' : '';
         const late = gt.late_count ?? 0;
         const unanswered = gt.unanswered_count ?? (gt.ng ?? 0);
         const cards = gt.reply_timeout_sec != null ? [
             { label: `정상 응답 (≤${gt.reply_timeout_sec ?? 1}초)`, value: (gt.ok ?? 0).toLocaleString() + '건', color: '' },
             { label: '지연 응답', value: late.toLocaleString() + '건', color: late > 0 ? 'text-orange-400' : '' },
             { label: '무응답', value: unanswered.toLocaleString() + '건', color: unanswered > 0 ? 'text-red-400' : '' },
-            { label: '평균 RTT (유선)', value: rs ? rs.avg_ms + 'ms' : '—', color: rs ? '' : 'text-gray-500' },
-            { label: 'P95 RTT (유선)', value: rs ? rs.p95_ms + 'ms' : '—',
+            { label: `평균 ${observedLabel}RTT (유선)`, value: rs ? rs.avg_ms + 'ms' : '—', color: rs ? '' : 'text-gray-500' },
+            { label: `P95 ${observedLabel}RTT (유선)`, value: rs ? rs.p95_ms + 'ms' : '—',
               color: rs ? (rs.p95_ms > 10 ? 'text-yellow-400' : '') : 'text-gray-500' },
         ] : [
             { label: '총 요청 (유선 확정)', value: (gt.total ?? 0).toLocaleString() + '건', color: '' },
@@ -1478,7 +1479,9 @@
     function renderPingHistWired() {
         const histEl = document.getElementById('chart-ping-hist');
         if (!histEl) return;
-        const rtts = gtExchanges.filter(e => e.rtt_ms != null).map(e => e.rtt_ms);
+        const rtts = gtExchanges
+            .map(e => e.rtt_ms ?? e.late_rtt_ms)
+            .filter(v => v != null);
         if (!rtts.length) { Plotly.purge('chart-ping-hist'); histEl.innerHTML = '<p class="text-sm text-gray-500 py-8 text-center">응답이 없어 분포를 계산할 수 없습니다.</p>'; return; }
         histEl.innerHTML = '';
         // 무선 히스토그램(renderPingHistWireless)과 동일한 롱테일 대응 — 이상치 1건만
@@ -1511,7 +1514,8 @@
 
     function renderPingStatsWired() {
         if (!pingStats) return;
-        const rs = gt.rtt_stats || null;
+        const rs = gt.observed_rtt_stats || gt.rtt_stats || null;
+        const observedLabel = gt.observed_rtt_stats ? '관측 ' : '';
         const rows = gt.reply_timeout_sec != null ? [
             ['총 요청', (gt.total ?? 0).toLocaleString() + '건'],
             ['Timeout 기준', (gt.reply_timeout_sec ?? 1) + '초'],
@@ -1524,8 +1528,10 @@
             ['손실 (확정)', (gt.ng ?? 0).toLocaleString() + '건 (' + (gt.loss_pct ?? 0) + '%)'],
         ];
         if (rs) rows.push(
-            ['최소 RTT', rs.min_ms + 'ms'], ['평균 RTT', rs.avg_ms + 'ms'],
-            ['P95 RTT', rs.p95_ms + 'ms'], ['최대 RTT', rs.max_ms + 'ms']);
+            [`최소 ${observedLabel}RTT`, rs.min_ms + 'ms'],
+            [`평균 ${observedLabel}RTT`, rs.avg_ms + 'ms'],
+            [`P95 ${observedLabel}RTT`, rs.p95_ms + 'ms'],
+            [`최대 ${observedLabel}RTT`, rs.max_ms + 'ms']);
         pingStats.innerHTML = `<table class="w-full text-sm">` + rows.map(r =>
             `<tr><td class="text-gray-400 py-1">${r[0]}</td><td class="text-right text-white font-mono">${r[1]}</td></tr>`
         ).join('') + `</table>
@@ -2005,12 +2011,13 @@
     // 1:1 매핑돼야 한다. 새 signal_type을 추가할 때 이 맵을 함께 갱신하지
     // 않으면 미등록 key는 raw 영문 키(escapeHtml 처리)로 fallback 노출돼
     // UI에서 어색하게 보인다. (PR #5 검토: claude info-level 권고)
+    const timeoutAwareDiagnosis = diag.summary?.loss_metric === 'timeout_ng';
     const SIGNAL_TYPE_LABEL = {
         weak_rssi: '약신호',
         high_retry: 'retry 폭증',
         slow_roaming: '슬로우 로밍',
         frequent_roaming: '잦은 로밍',
-        high_loss: 'Ping Loss',
+        high_loss: timeoutAwareDiagnosis ? 'Ping Timeout/NG' : 'Ping Loss',
         delay_zone: '지연 구간',
         anomaly: '이상 프레임',
         mcs_hotspot: 'MCS 핫스팟',
@@ -2131,12 +2138,13 @@
             && sm.loss_pct !== lossUsed) {
             lossText += ` · 무선 관측 ${sm.loss_pct}%`;
         }
+        const lossMetricLabel = sm.loss_metric === 'timeout_ng' ? 'Ping Timeout/NG' : 'Ping Loss';
         const lossSub = (compScores.loss == null)
             ? ''
-            : `<p class="text-xs text-gray-500 ml-24">Loss ${escapeHtml(lossText)}</p>`;
+            : `<p class="text-xs text-gray-500 ml-24">${lossMetricLabel} ${escapeHtml(lossText)}</p>`;
         barsEl.innerHTML = [
             scoreBar('Retry', compScores.retry ?? 0, '\u{1F504}') + `<p class="text-xs text-gray-500 ml-24">전체 ${sm.retry_pct || 0}%</p>`,
-            scoreBar('Ping Loss', compScores.loss ?? null, '\u{1F4E1}') + lossSub,
+            scoreBar(lossMetricLabel, compScores.loss ?? null, '\u{1F4E1}') + lossSub,
             scoreBar('로밍', compScores.roaming ?? 0, '\u{1F6DC}') + `<p class="text-xs text-gray-500 ml-24">총 ${sm.roaming_total || 0}회, 느린 ${sm.roaming_slow || 0}회</p>`,
         ].join('');
     }
