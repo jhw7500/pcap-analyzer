@@ -1,5 +1,9 @@
 # 독립 로밍 검증 CLI
 
+pcap-analyzer가 각 실측 로그에서 실제로 출력한 11개 분석 섹션과 종합 진단은
+[`REAL_LOG_ANALYZER_RESULTS.md`](REAL_LOG_ANALYZER_RESULTS.md)에 정리한다. 이 문서는
+그중 로밍 결과를 별도 구현으로 교차 검증하는 방법과 대조 결과를 다룬다.
+
 `scripts/roaming_independent_verify.py`는 웹 분석기의 로밍 결과를 **별도 구현으로
 교차 검증**한다. 분석기의 `analyzer` 패키지를 import하지 않으며 다음 원본만 읽는다.
 

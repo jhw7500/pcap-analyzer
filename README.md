@@ -185,6 +185,8 @@ make cov              # 커버리지 (목표 ≥80%)
 [`docs/ROAMING_INDEPENDENT_VERIFY.md`](docs/ROAMING_INDEPENDENT_VERIFY.md) 참조.
 같은 기능은 웹 업로드의 분석 옵션에서 **독립 로밍 교차검증 실행**을 선택해 사용할
 수 있으며, 완료 화면에서 일치 여부와 JSON/Markdown 보고서를 확인할 수 있다.
+현재까지 실측 TEST별로 pcap-analyzer가 실제 출력한 모듈 요약·종합 진단·입력 예외는
+[`docs/REAL_LOG_ANALYZER_RESULTS.md`](docs/REAL_LOG_ANALYZER_RESULTS.md)에 기록한다.
 
 ## 디렉토리 구조
 
