@@ -159,6 +159,32 @@ Reassoc만 포착된 실제 로밍이 함께 있다. 독립 검증기는 전자�
 - `tmp/test9_validation/independent-fixed-result.json`
 - `tmp/test9_validation/independent-fixed-result.md`
 
+## TEST18 기준 결과
+
+2026-08-13에 `tmp/20260721_CFI/TEST18`의 주 무선 캡처, DFK 2조각,
+유선 GT와 1~3호기 `wpa.log`를 입력하여 확인했다. DFK는 Beacon TSF 기준
+`-181.042242초`로 정렬됐고 공통 프레임 294,227건을 제거한 뒤 분석 프레임
+350,115건을 유지했다.
+
+| 항목 | 독립 검증 결과 |
+|---|---:|
+| 패킷 로밍 거래 | 145 |
+| STA 로그 명령 | 143 (성공 143, 실패 0) |
+| PCAP↔STA 매칭 | 143 |
+| 느린 로밍(>150ms) | 2 |
+| 판정 가능 / 불가 | 145 / 0 |
+| STA 체감 p50 / p95 | 112ms / 135ms |
+
+STA 로그 성공 143건은 전부 패킷 로밍에 연결됐다. 로그 범위 밖 패킷 로밍 2건은
+pcap 전체 소요로 판정됐으며 둘 다 느리지 않았다. 분석기 전체 결과와 strict 비교에서
+요약·개별 이벤트 차이가 모두 0건이었다.
+
+재현 산출물(로컬, git 제외):
+
+- `tmp/test18_validation/analyzer-result.json`
+- `tmp/test18_validation/independent-result.json`
+- `tmp/test18_validation/independent-result.md`
+
 ## Association 반복 병합 창 실측
 
 TEST13(주 스니퍼, DFK 저장 실패)과 TEST14(주 스니퍼+DFK)를 각각 2시간 전체 구간에서
