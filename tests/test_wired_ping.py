@@ -795,6 +795,27 @@ def test_time_end_boundary_request_kept_when_reply_arrives_before_boundary(tmp_p
     assert not any("구간 끝 경계 요청" in w for w in gt["warnings"])
 
 
+def test_timeout_before_time_end_kept_when_late_reply_is_after_boundary(tmp_path):
+    """응답 제한시간이 구간 안에서 이미 끝난 요청은 late reply가 time_end 뒤에
+    관측돼도 Timeout/NG 모집단에 남는다."""
+    end_epoch = _local_epoch("2026-01-01 10:00:10")
+    req = end_epoch - 2.0
+    late_rep = end_epoch + 0.2
+    body = (
+        f"printf '{req}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        f"printf '{late_rep}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
+        time_end="2026-01-01 10:00:10", reply_timeout=1.0,
+    )
+    assert "error" not in gt
+    assert gt["total"] == 1
+    assert gt["ng"] == 1
+    assert gt["late_count"] == 1
+    assert not any("구간 끝 경계 요청" in w for w in gt["warnings"])
+
+
 def test_time_end_boundary_keeps_requests_whose_reply_window_closes_inside(tmp_path):
     """응답 창이 경계에서 충분히 멀어 안에서 완전히 닫히는 요청은 정상 포함된다 —
     과잉 배제 방지."""

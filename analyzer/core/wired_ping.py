@@ -127,7 +127,7 @@ def _filter_exchanges(
             response_outside = (
                 observed_rtt is not None and (x.time + observed_rtt) >= end_epoch
             )
-            if response_outside or (near_boundary and observed_rtt is None):
+            if near_boundary and (response_outside or observed_rtt is None):
                 boundary_excluded += 1
                 continue
             kept.append(x)

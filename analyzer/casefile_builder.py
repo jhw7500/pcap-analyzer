@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
-from .core.ping_matching import build_ping_stats
+from .core.ping_matching import PAIRED_STATUSES, build_ping_stats
 
 WINDOW_BEFORE_SEC = 10.0
 WINDOW_AFTER_SEC = 10.0
@@ -75,7 +75,7 @@ def _filter_ping_window(
         for item in ping_full_list
         if start_ts <= float(item.get("epoch") or 0.0) <= end_ts
     ]
-    pairs = [item for item in full_list if item.get("status") == "matched"]
+    pairs = [item for item in full_list if item.get("status") in PAIRED_STATUSES]
     losses = [item for item in full_list if item.get("status") == "loss"]
     return {
         "full_list": full_list,

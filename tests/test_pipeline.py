@@ -12,7 +12,7 @@ from analyzer.pipeline import (
     _structured_system_stats,
     _structured_diagnosis,
 )
-from analyzer.casefile_builder import build_casefile
+from analyzer.casefile_builder import _filter_ping_window, build_casefile
 from analyzer.core.ping_matching import ping_losses, ping_pairs
 
 
@@ -1060,6 +1060,13 @@ class TestStructuredDiagnosis:
 
 
 class TestCasefileBuilder:
+    def test_casefile_window_keeps_late_reply_in_pairs(self):
+        late = {"epoch": 1001.0, "status": "late", "rtt_ms": 1500.0}
+        window = _filter_ping_window([late], 1000.0, 1002.0)
+        assert window["full_list"] == [late]
+        assert window["pairs"] == [late]
+        assert window["losses"] == []
+
     def test_casefile_ping_parity_exact(self):
         frames = [
             make_frame(

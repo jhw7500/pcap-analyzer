@@ -18,6 +18,7 @@ RSSI/retry/ping은 고빈도 샘플이라 bin 버킷으로 다운샘플하지만
 from typing import Any, Dict, FrozenSet, List, Optional, Sequence
 
 from analyzer.web.timeline_axis import bin_index_for
+from analyzer.core.ping_matching import PAIRED_STATUSES
 
 # structured.py의 rssi_timeline 항목은 {"epoch": float, "rssi": int, "mcs": ...}.
 DEFAULT_EPOCH_KEY = "epoch"
@@ -29,7 +30,7 @@ DEFAULT_STATUS_KEY = "status"
 # ping_matching.py의 상태값과 일치:
 #   성공 = 양방향 매칭된 echo request/reply ("matched")
 #   손실 = 확정 무선 손실("loss") + seq-gap 추정 손실("loss_gap")
-PING_SUCCESS_STATUSES: FrozenSet[str] = frozenset({"matched"})
+PING_SUCCESS_STATUSES: FrozenSet[str] = frozenset(PAIRED_STATUSES)
 PING_LOSS_STATUSES: FrozenSet[str] = frozenset({"loss", "loss_gap"})
 
 
@@ -258,7 +259,7 @@ def project_ping_series(
     Args:
         events: ping outcome dict들. 예: ping_matching.py `build_ping_matches`의
             `full_list`/`pairs`+`losses` 항목 (`{"epoch": float, "status": str}`).
-            성공 = status ∈ success_statuses("matched"), 손실 = status ∈
+            성공 = status ∈ success_statuses("matched"/"late"), 손실 = status ∈
             loss_statuses("loss"/"loss_gap"). epoch이 없거나 숫자가 아니거나
             bool인 항목, 성공·손실 어느 쪽도 아닌 status는 건너뛴다.
         axis: `build_time_axis`가 만든 공유 시간축(RSSI/retry 투영과 동일 축).

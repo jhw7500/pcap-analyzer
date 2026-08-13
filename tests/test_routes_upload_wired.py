@@ -1,5 +1,7 @@
 """POST /api/upload의 wired_file 처리."""
 from pathlib import Path
+import re
+from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
@@ -11,6 +13,14 @@ from routes import upload as upload_module
 client = TestClient(app)
 
 PCAP_MAGIC = b"\xd4\xc3\xb2\xa1" + b"\x00" * 20  # little-endian pcap
+
+
+def test_ping_timeout_default_satisfies_native_step_constraint():
+    html = client.get("/").text
+    tag = re.search(r'<input[^>]+name="ping_timeout_sec"[^>]*>', html).group(0)
+    attrs = dict(re.findall(r'(min|step|value)="([^"]+)"', tag))
+    offset = (Decimal(attrs["value"]) - Decimal(attrs["min"])) / Decimal(attrs["step"])
+    assert offset == offset.to_integral_value()
 
 
 def _ok_result(pcap_path, **kwargs):
