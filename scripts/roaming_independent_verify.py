@@ -632,28 +632,57 @@ def score_station_binding(
     sta: str,
     packet_roams: list[RoamTransaction],
     tolerance_ms: float = DEFAULT_STA_MATCH_MS,
-    auth_only: bool = False,
+    anchor_mode: str = "auto",
 ) -> PairScore:
     """로그와 패킷 STA 후보의 시각 일치도를 계산한다.
 
-    ``auth_only``는 자동 바인딩용 강한 근거 모드다. Assoc 시각은 이미 선택된
-    STA에 Auth 미포착 로밍을 붙이는 데는 유효하지만, 후보마다 임의 offset을 새로
-    학습하는 단계에 섞으면 무관한 Assoc-only STA도 1건/MAD 0으로 동률이 된다.
+    Auth는 ROAM 명령 시각, Auth 미포착 Assoc는 CONNECTED 완료 시각과 대조한다.
+    ``auto``는 Auth 근거가 있으면 우선 사용하고 없을 때만 Assoc-only로 폴백한다.
     """
+    if anchor_mode == "auto":
+        auth_score = score_station_binding(
+            station,
+            station_roams,
+            sta,
+            packet_roams,
+            tolerance_ms,
+            anchor_mode="auth",
+        )
+        if auth_score.matched > 0:
+            return auth_score
+        return score_station_binding(
+            station,
+            station_roams,
+            sta,
+            packet_roams,
+            tolerance_ms,
+            anchor_mode="assoc",
+        )
+    if anchor_mode not in {"auth", "assoc"}:
+        raise ValueError(f"알 수 없는 STA 바인딩 앵커: {anchor_mode}")
+
     successes = [roam for roam in station_roams if not roam.failed]
     packet_by_ap: dict[str, list[float]] = defaultdict(list)
     for roam in packet_roams:
-        if roam.sta == sta and (not auth_only or roam.auth_epoch is not None):
-            packet_by_ap[roam.ap].append(_transaction_epoch(roam))
+        if roam.sta != sta:
+            continue
+        if anchor_mode == "auth" and roam.auth_epoch is not None:
+            packet_by_ap[roam.ap].append(roam.auth_epoch)
+        elif anchor_mode == "assoc" and roam.auth_epoch is None:
+            packet_by_ap[roam.ap].append(roam.assoc_epoch)
     for epochs in packet_by_ap.values():
         epochs.sort()
+
+    def log_epoch(roam: StationRoam) -> Optional[float]:
+        return roam.command_epoch if anchor_mode == "auth" else roam.connected_epoch
 
     # 장비와 pcap 시계가 수시간 이상 벌어져도 먼저 offset을 배울 수 있어야 한다.
     # 같은 AP의 시간순 이벤트를 비례 인덱스로 맞추고 주변 shift도 보아, 전체
     # Cartesian product 없이 O(events)개의 coarse cluster를 만든다.
     station_by_ap: dict[str, list[StationRoam]] = defaultdict(list)
     for roam in successes:
-        station_by_ap[roam.target_ap].append(roam)
+        if log_epoch(roam) is not None:
+            station_by_ap[roam.target_ap].append(roam)
     offset_buckets: dict[float, list[float]] = defaultdict(list)
     for ap, log_rows in station_by_ap.items():
         packet_epochs = packet_by_ap.get(ap, [])
@@ -669,7 +698,9 @@ def score_station_binding(
                 candidate_index = packet_index + shift
                 if not 0 <= candidate_index < len(packet_epochs):
                     continue
-                raw = packet_epochs[candidate_index] - log_rows[log_index].command_epoch
+                anchor = log_epoch(log_rows[log_index])
+                assert anchor is not None
+                raw = packet_epochs[candidate_index] - anchor
                 offset_buckets[round(raw, 1)].append(raw)
     if not offset_buckets:
         return PairScore(station, sta, 0.0, 0, None)
@@ -686,8 +717,11 @@ def score_station_binding(
     for _, offset in candidates:
         residuals = []
         for roam in successes:
+            anchor = log_epoch(roam)
+            if anchor is None:
+                continue
             delta = _nearest_delta(
-                packet_by_ap.get(roam.target_ap, []), roam.command_epoch + offset
+                packet_by_ap.get(roam.target_ap, []), anchor + offset
             )
             if delta is not None and abs(delta) <= tolerance:
                 residuals.append(delta)
@@ -697,8 +731,11 @@ def score_station_binding(
         best_offset += statistics.median(best_residuals)
     residuals = []
     for roam in successes:
+        anchor = log_epoch(roam)
+        if anchor is None:
+            continue
         delta = _nearest_delta(
-            packet_by_ap.get(roam.target_ap, []), roam.command_epoch + best_offset
+            packet_by_ap.get(roam.target_ap, []), anchor + best_offset
         )
         if delta is not None and abs(delta) <= tolerance:
             residuals.append(delta)
@@ -827,7 +864,7 @@ def bind_stations(
                 sta,
                 packet_roams,
                 tolerance_ms,
-                auth_only=True,
+                anchor_mode="auth",
             )
             for sta in stas
         }
@@ -920,22 +957,42 @@ def correlate_station_logs(
         for log_roam in station_ledgers[station]:
             if log_roam.failed:
                 continue
-            expected = log_roam.command_epoch + score.offset_sec
+            auth_expected = log_roam.command_epoch + score.offset_sec
+            assoc_expected = (
+                log_roam.connected_epoch + score.offset_sec
+                if log_roam.connected_epoch is not None
+                else auth_expected
+            )
             candidates = candidates_by_ap.get(log_roam.target_ap, [])
             epochs = [value[0] for value in candidates]
-            pos = bisect_left(epochs, expected)
-            nearby = candidates[max(0, pos - 2) : min(len(candidates), pos + 3)]
+            nearby_by_index: dict[int, tuple[float, int]] = {}
+            for expected in {auth_expected, assoc_expected}:
+                pos = bisect_left(epochs, expected)
+                for item in candidates[max(0, pos - 2) : min(len(candidates), pos + 3)]:
+                    nearby_by_index[item[1]] = item
+            nearby = list(nearby_by_index.values())
             available = [item for item in nearby if item[1] not in used_packets]
             if not available:
                 unmatched_logs.append(asdict(log_roam))
                 continue
             epoch, packet_index = min(
-                available, key=lambda item: abs(item[0] - expected)
+                available,
+                key=lambda item: abs(
+                    item[0]
+                    - (
+                        auth_expected
+                        if packet_roams[item[1]].auth_epoch is not None
+                        else assoc_expected
+                    )
+                ),
+            )
+            packet = packet_roams[packet_index]
+            expected = (
+                auth_expected if packet.auth_epoch is not None else assoc_expected
             )
             if abs(epoch - expected) > tolerance:
                 unmatched_logs.append(asdict(log_roam))
                 continue
-            packet = packet_roams[packet_index]
             packet.sta_source = station
             packet.sta_total_ms = log_roam.total_ms
             used_packets.add(packet_index)

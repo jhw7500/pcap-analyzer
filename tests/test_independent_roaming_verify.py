@@ -313,12 +313,50 @@ def test_auth_missing_transaction_uses_assoc_epoch_for_station_matching():
 
     assert bindings["one"].sta == sta
     assert bindings["one"].matched == 1
-    assert bindings["one"].offset_sec == pytest.approx(2.0)
+    assert bindings["one"].offset_sec == pytest.approx(1.89)
     assert correlation["matched"] == 1
     assert packet_roam.sta_source == "one"
     assert packet_roam.sta_total_ms == 110.0
     assert not correlation["unmatched_station_success"]
     assert not correlation["unmatched_packets"]
+
+
+def test_slow_auth_missing_roam_matches_connected_timestamp():
+    sta, ap = "00:00:00:00:00:01", "00:00:00:00:00:a1"
+    auth_backed = transaction(sta=sta, ap=ap, epoch=102.0)
+    auth_missing = verify.RoamTransaction(
+        sta=sta,
+        ap=ap,
+        auth_epoch=None,
+        assoc_epoch=204.4,
+        auth_number=None,
+        assoc_number=3,
+        auth_basis=None,
+        gap_ms=None,
+        pcap_total_ms=None,
+    )
+    logs = {
+        "one": [
+            verify.StationRoam(
+                "one", 1, ap, 100.0, 100.1, 100.0, False, ""
+            ),
+            verify.StationRoam(
+                "one", 2, ap, 200.0, 202.4, 2400.0, False, ""
+            ),
+        ]
+    }
+
+    bindings, _ = verify.bind_stations(logs, [auth_backed, auth_missing])
+    correlation = verify.correlate_station_logs(
+        logs, [auth_backed, auth_missing], bindings
+    )
+    verify.classify_transactions([auth_backed, auth_missing])
+
+    assert bindings["one"].offset_sec == pytest.approx(2.0)
+    assert correlation["matched"] == 2
+    assert auth_missing.sta_total_ms == 2400.0
+    assert auth_missing.is_slow is True
+    assert auth_missing.slow_basis == "sta_log_total"
 
 
 def test_auth_backed_candidate_wins_over_assoc_only_tie():
