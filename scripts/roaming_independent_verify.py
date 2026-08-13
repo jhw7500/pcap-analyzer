@@ -156,7 +156,9 @@ def _percentile(values: list[float], fraction: float) -> Optional[float]:
     lo, hi = math.floor(pos), math.ceil(pos)
     if lo == hi:
         return ordered[lo]
-    return ordered[lo] + (ordered[hi] - ordered[lo]) * (pos - lo)
+    # JSON/Markdown에 133.64999999999998 같은 이진 부동소수점 표현이 노출되지
+    # 않게 한다. 입력 STA 시간은 0.1ms 정밀도이므로 소수 6자리는 충분히 보수적이다.
+    return round(ordered[lo] + (ordered[hi] - ordered[lo]) * (pos - lo), 6)
 
 
 def _tshark_rows(
@@ -1029,6 +1031,23 @@ def classify_transactions(
             transaction.slow_basis = None
 
 
+def _refresh_unmatched_packet_snapshot(
+    correlation: dict[str, Any], transactions: list[RoamTransaction]
+) -> None:
+    """STA 상관 후 최종 판정값으로 미매칭 패킷 스냅샷을 갱신한다.
+
+    ``correlate_station_logs``는 STA 시간을 붙이기 전에 미매칭 행을 직렬화한다.
+    이후 ``classify_transactions``가 pcap 폴백 판정을 채우므로, 갱신하지 않으면
+    같은 보고서의 ``transactions``와 ``correlation.unmatched_packets``가 서로 다른
+    ``is_slow`` 값을 보일 수 있다(TEST19 실측 162.9ms 이벤트).
+    """
+    correlation["unmatched_packets"] = [
+        asdict(transaction)
+        for transaction in transactions
+        if transaction.sta_source is None
+    ]
+
+
 def _event_epoch(value: dict[str, Any]) -> Optional[float]:
     for key in ("auth_epoch", "assoc_epoch"):
         raw = value.get(key)
@@ -1339,6 +1358,7 @@ def run_verification(
         station_ledgers, transactions, bindings, sta_match_ms
     )
     classify_transactions(transactions)
+    _refresh_unmatched_packet_snapshot(correlation, transactions)
     progress("분석기 결과와 독립 원장 비교", 90)
     comparison = None
     if analyzer_result is not None:

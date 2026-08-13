@@ -199,7 +199,13 @@ def roam_total_ms(
         `(total_ms, note)`. 계산 불가면 `(None, 사유)` — 값을 지어내지 않고 왜 없는지
         남긴다. 텍스트 모듈처럼 note가 필요 없으면 무시하면 된다.
     """
-    hs_end = handshake.get("end_epoch") if handshake else None
+    # 신규 결과는 첫 msg4의 실제 시각을 쓴다. `end_epoch` 폴백은 이 필드가 없던
+    # 레거시/합성 handshake 입력과의 호환용이며 새 build_handshakes 결과에는 항상
+    # completion_epoch 키가 있다(None이면 msg4 미포착이므로 폴백하지 않는다).
+    if handshake and "completion_epoch" in handshake:
+        hs_end = handshake.get("completion_epoch")
+    else:
+        hs_end = handshake.get("end_epoch") if handshake else None
     if auth_epoch is not None and isinstance(hs_end, (int, float)):
         return round((hs_end - auth_epoch) * 1000, 1), ""
     if auth_epoch is None:
@@ -646,7 +652,7 @@ def analyze(
     # 짝짓기 규칙·느린 로밍 판정 모두 _structured_roaming과 **같아야 한다**
     # (예전엔 로직이 복제돼 있어 화면과 텍스트 리포트가 어긋날 수 있었다).
     # 판정 기준은 gap이 아니라 로밍 전체 소요(Auth 요청 → 4-way 완료)다.
-    from .eapol import build_handshakes, match_four_way
+    from .eapol import build_handshakes, match_four_way_completion
 
     sta_macs = {mac for mac, role in roles.items() if role.get("role") == "STA"}
     handshakes = build_handshakes(frames, roles).get("handshakes", [])
@@ -654,7 +660,9 @@ def analyze(
     sequences: List[SequenceInfo] = []
     for pairing in pair_roaming_sequences(roaming_frames, sta_macs):
         assoc = pairing.assoc
-        hs = match_four_way(assoc.epoch, assoc.ta, handshakes, ap=assoc.ra)
+        hs = match_four_way_completion(
+            assoc.epoch, assoc.ta, handshakes, ap=assoc.ra
+        )
         # 전체 소요 계산은 roam_total_ms(단일 소스) — 화면(structured)과 같은 식을
         # 쓴다. 텍스트 섹션은 사유(note)를 싣지 않으므로 값만 받는다.
         total, _ = roam_total_ms(

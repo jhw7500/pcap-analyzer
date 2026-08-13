@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from analyzer.core.station_match import MATCH_TOLERANCE_SEC
 from scripts import roaming_independent_verify as verify
 
 
@@ -61,6 +62,16 @@ def test_verifier_does_not_import_analyzer_package():
     assert not any(
         name == "analyzer" or name.startswith("analyzer.") for name in imported
     )
+
+
+def test_sta_match_tolerance_policy_matches_analyzer():
+    """독립 구현을 유지하되 비교 정책값은 분석기와 어긋나지 않는다."""
+    assert verify.DEFAULT_STA_MATCH_MS == MATCH_TOLERANCE_SEC * 1000 == 250.0
+
+
+def test_percentile_does_not_expose_binary_float_artifacts():
+    assert verify._percentile([133.6, 133.7], 0.5) == 133.65
+    assert str(verify._percentile([133.6, 133.7], 0.5)) == "133.65"
 
 
 def test_estimate_tsf_offsets_uses_common_beacon_median():
@@ -357,6 +368,23 @@ def test_slow_auth_missing_roam_matches_connected_timestamp():
     assert auth_missing.sta_total_ms == 2400.0
     assert auth_missing.is_slow is True
     assert auth_missing.slow_basis == "sta_log_total"
+
+
+def test_unmatched_packet_snapshot_uses_final_pcap_classification():
+    packet_roam = transaction(
+        sta="00:00:00:00:00:01",
+        ap="00:00:00:00:00:a1",
+        epoch=100.0,
+    )
+    packet_roam.pcap_total_ms = 162.9
+    correlation = {"unmatched_packets": [packet_roam.__dict__.copy()]}
+
+    verify.classify_transactions([packet_roam])
+    verify._refresh_unmatched_packet_snapshot(correlation, [packet_roam])
+
+    assert packet_roam.is_slow is True
+    assert correlation["unmatched_packets"][0]["is_slow"] is True
+    assert correlation["unmatched_packets"][0]["slow_basis"] == "total"
 
 
 def test_auth_backed_candidate_wins_over_assoc_only_tie():

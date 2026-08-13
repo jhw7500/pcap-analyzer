@@ -14,7 +14,7 @@
 작아진다(실측 정답쌍 MAD 20ms vs 오답쌍 4.7~9.5초로 500배 분리).
 """
 import statistics
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -24,9 +24,11 @@ OFFSET_SEARCH_SEC = 30.0
 #: 오프셋 추정 시 같은 로밍으로 볼 1차 창(초). 로밍 주기(~20초)보다 충분히 작아야
 #: 엉뚱한 로밍끼리 짝지어지지 않는다.
 COARSE_WINDOW_SEC = 3.0
-#: 최종 매칭 허용 오차(초). 실측상 로그→공중 지연이 ~110ms이고 산포가 ±170ms라
-#: 200ms면 적중 94~96%다.
-MATCH_TOLERANCE_SEC = 0.2
+#: 최종 매칭 허용 오차(초). TEST9 전체 입력에서 200ms는 동일 STA·동일 AP의 실제
+#: 로밍 2건(잔차 222ms/231ms)을 누락했다. 두 이벤트에서 가장 가까운 다른 로밍은
+#: 20초 이상 떨어져 있고 독립 검증 원장도 같은 로그 에피소드를 가리켰다. 250ms면
+#: 이 2건을 복원하면서 1:1 소비와 AP 일치 조건은 그대로 유지한다.
+MATCH_TOLERANCE_SEC = 0.25
 #: 이 개수보다 적게 매칭되면 신뢰할 수 없는 짝으로 본다.
 MIN_MATCHES = 5
 #: 타임존 차이를 스냅할 격자(초) = 15분. 현존하는 UTC 오프셋은 모두 15분 배수라
@@ -334,12 +336,20 @@ def attach_station_to_sequences(
             t = seq.get("assoc_epoch")
         if not isinstance(t, (int, float)):
             continue
-        i = bisect_left(roam_t_sorted, t)
-        for j in (i - 1, i):
-            if 0 <= j < len(roam_t_sorted):
-                r = t - roam_t_sorted[j]
-                if abs(r) <= tolerance_sec:
-                    candidates.append((abs(r), si, order[j], r))
+        # 시간 창 안의 에피소드를 전부 본 뒤 대상 AP까지 일치하는 후보만 남긴다.
+        # 가장 가까운 두 시각만 본 다음 AP를 거르면, 그 둘이 다른 AP일 때 같은 창의
+        # 올바른 AP 후보를 놓칠 수 있다. TEST9 때문에 창을 250ms로 넓혔어도 다른 AP
+        # 로밍을 잘못 붙이지 않는 핵심 안전장치다.
+        lo = bisect_left(roam_t_sorted, t - tolerance_sec)
+        hi = bisect_right(roam_t_sorted, t + tolerance_sec)
+        seq_ap = (seq.get("ap") or "").lower()
+        for j in range(lo, hi):
+            ri = order[j]
+            target_ap = (roams[ri].target_bssid or "").lower()
+            if seq_ap and target_ap and seq_ap != target_ap:
+                continue
+            r = t - roam_t_sorted[j]
+            candidates.append((abs(r), si, ri, r))
     candidates.sort()
 
     attached = 0
