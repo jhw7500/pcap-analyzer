@@ -568,7 +568,7 @@ def _structured_roaming(
     assoc 직후 첫 4-way duration(four_way_ms)을 부착한다(매칭 실패 시 None).
     """
     from ..core.detector import mac_name
-    from ..core.modules.eapol import match_four_way
+    from ..core.modules.eapol import match_four_way_completion
 
     roaming_frames = [f for f in frames if f.is_roaming_related]
     sta_macs = {mac for mac, role in roles.items() if role.get("role") == "STA"}
@@ -610,7 +610,9 @@ def _structured_roaming(
             else None
         )
         # 4-way를 한 번만 매칭해 duration과 종료 시각을 함께 쓴다.
-        hs = match_four_way(frame.epoch, frame.ta, handshakes or [], ap=frame.ra)
+        hs = match_four_way_completion(
+            frame.epoch, frame.ta, handshakes or [], ap=frame.ra
+        )
         four_way_ms = hs.get("duration_ms") if hs else None
         # 전체 소요와 사유는 roaming.roam_total_ms(단일 소스) — 텍스트 리포트와
         # 같은 식을 쓴다. 같은 계산이 두 곳에 있으면 한쪽만 고쳐져 갈라진다.
@@ -660,8 +662,8 @@ def _structured_roaming(
                 # gap+four_way 단순 합이 아니라 실제 종료 시각에서 계산한다
                 # (Reassoc 요청 ~ 4-way 시작 사이 대기가 빠지기 때문).
                 "total_roam_ms": total_roam_ms,
-                # 4-way를 못 찾으면 전체 소요를 알 수 없다(FT로 생략됐거나
-                # 모니터가 EAPOL을 놓쳤거나) — 지어내지 않고 None.
+                # msg4 완료 시각을 못 찾으면 전체 소요를 알 수 없다(FT로 생략됐거나
+                # 모니터가 EAPOL 완료를 놓쳤거나) — 지어내지 않고 None.
                 "total_basis": "four_way" if total_roam_ms is not None else None,
                 "total_note": total_note,
             }

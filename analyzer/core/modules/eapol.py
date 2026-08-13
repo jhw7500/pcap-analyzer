@@ -171,6 +171,38 @@ def match_four_way(
     return best
 
 
+def match_four_way_completion(
+    assoc_epoch: float,
+    sta: str,
+    handshakes: List[Dict[str, Any]],
+    window_sec: float = HANDSHAKE_GAP_SEC,
+    ap: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Assoc 직후 msg4가 관측된 첫 핸드셰이크를 반환한다.
+
+    EAPOL 탭의 ``complete``는 1~4번을 모두 포착했는지 나타내므로 그대로 엄격하게
+    유지한다. 반면 로밍 전체 소요의 끝점은 STA→AP msg4 자체가 완료 증거다. TEST5
+    실측처럼 msg1·2·4는 있고 msg3만 놓친 경우에도 Auth→msg4 전체시간은 측정할 수
+    있으므로, 로밍 소비자는 이 함수를 사용한다.
+    """
+    best = None
+    for h in handshakes:
+        if h.get("sta") != sta:
+            continue
+        if ap and h.get("ap") != ap:
+            continue
+        messages = h.get("messages")
+        if not isinstance(messages, dict) or "4" not in messages:
+            continue
+        start = h.get("start_epoch")
+        if not isinstance(start, (int, float)):
+            continue
+        if assoc_epoch - 0.05 <= start <= assoc_epoch + window_sec:
+            if best is None or start < best.get("start_epoch", float("inf")):
+                best = h
+    return best
+
+
 def match_four_way_ms(
     assoc_epoch: float,
     sta: str,

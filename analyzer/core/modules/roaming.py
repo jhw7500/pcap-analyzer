@@ -646,7 +646,7 @@ def analyze(
     # 짝짓기 규칙·느린 로밍 판정 모두 _structured_roaming과 **같아야 한다**
     # (예전엔 로직이 복제돼 있어 화면과 텍스트 리포트가 어긋날 수 있었다).
     # 판정 기준은 gap이 아니라 로밍 전체 소요(Auth 요청 → 4-way 완료)다.
-    from .eapol import build_handshakes, match_four_way
+    from .eapol import build_handshakes, match_four_way_completion
 
     sta_macs = {mac for mac, role in roles.items() if role.get("role") == "STA"}
     handshakes = build_handshakes(frames, roles).get("handshakes", [])
@@ -654,7 +654,9 @@ def analyze(
     sequences: List[SequenceInfo] = []
     for pairing in pair_roaming_sequences(roaming_frames, sta_macs):
         assoc = pairing.assoc
-        hs = match_four_way(assoc.epoch, assoc.ta, handshakes, ap=assoc.ra)
+        hs = match_four_way_completion(
+            assoc.epoch, assoc.ta, handshakes, ap=assoc.ra
+        )
         # 전체 소요 계산은 roam_total_ms(단일 소스) — 화면(structured)과 같은 식을
         # 쓴다. 텍스트 섹션은 사유(note)를 싣지 않으므로 값만 받는다.
         total, _ = roam_total_ms(
