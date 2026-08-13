@@ -14,7 +14,7 @@
 작아진다(실측 정답쌍 MAD 20ms vs 오답쌍 4.7~9.5초로 500배 분리).
 """
 import statistics
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -336,12 +336,20 @@ def attach_station_to_sequences(
             t = seq.get("assoc_epoch")
         if not isinstance(t, (int, float)):
             continue
-        i = bisect_left(roam_t_sorted, t)
-        for j in (i - 1, i):
-            if 0 <= j < len(roam_t_sorted):
-                r = t - roam_t_sorted[j]
-                if abs(r) <= tolerance_sec:
-                    candidates.append((abs(r), si, order[j], r))
+        # 시간 창 안의 에피소드를 전부 본 뒤 대상 AP까지 일치하는 후보만 남긴다.
+        # 가장 가까운 두 시각만 본 다음 AP를 거르면, 그 둘이 다른 AP일 때 같은 창의
+        # 올바른 AP 후보를 놓칠 수 있다. TEST9 때문에 창을 250ms로 넓혔어도 다른 AP
+        # 로밍을 잘못 붙이지 않는 핵심 안전장치다.
+        lo = bisect_left(roam_t_sorted, t - tolerance_sec)
+        hi = bisect_right(roam_t_sorted, t + tolerance_sec)
+        seq_ap = (seq.get("ap") or "").lower()
+        for j in range(lo, hi):
+            ri = order[j]
+            target_ap = (roams[ri].target_bssid or "").lower()
+            if seq_ap and target_ap and seq_ap != target_ap:
+                continue
+            r = t - roam_t_sorted[j]
+            candidates.append((abs(r), si, ri, r))
     candidates.sort()
 
     attached = 0

@@ -236,6 +236,7 @@ class TestAttachToSequences:
         roam_epoch = st.roams[0].cmd_epoch
         seqs = [{
             "sta": "00:50:43:18:fe:01",
+            "ap": "00:80:4c:e1:09:cc",
             "auth_epoch": roam_epoch - 0.231,
             "assoc_epoch": roam_epoch - 0.221,
         }]
@@ -248,6 +249,25 @@ class TestAttachToSequences:
         assert MATCH_TOLERANCE_SEC == 0.25
         assert attach_station_to_sequences(seqs, st, binding) == 1
         assert seqs[0]["sta_log"]["residual_ms"] == -231.0
+
+    def test_near_episode_for_different_ap_is_not_attached(self, tmp_path):
+        """250ms 창 안이어도 로그가 지목한 AP와 다르면 다른 로밍이다."""
+        st = self._station(tmp_path)
+        roam_epoch = st.roams[0].cmd_epoch
+        seqs = [{
+            "sta": "00:50:43:18:fe:01",
+            "ap": "00:80:4c:e1:09:cb",  # 로그 target은 ...:cc
+            "auth_epoch": roam_epoch + 0.05,
+            "assoc_epoch": roam_epoch + 0.06,
+        }]
+        binding = StationBinding(
+            log_name="1호기",
+            sta_mac="00:50:43:18:fe:01",
+            offset_sec=0.0,
+        )
+
+        assert attach_station_to_sequences(seqs, st, binding) == 0
+        assert "sta_log" not in seqs[0]
 
     def test_one_log_episode_attaches_to_only_one_sequence(self, tmp_path):
         """같은 로그 로밍이 여러 시퀀스에 재사용되면 안 된다 — **1:1 매칭**.

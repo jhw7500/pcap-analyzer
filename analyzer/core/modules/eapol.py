@@ -21,6 +21,10 @@ except (ImportError, ValueError):
 # 같은 STA의 EAPOL 메시지 간격이 이 시간을 넘으면 별개 핸드셰이크로 분리.
 # 4-way는 정상적으로 수십 ms 안에 끝나고, 재전송을 감안해도 초 단위를 넘지 않는다.
 HANDSHAKE_GAP_SEC = 5.0
+# 일부 드라이버/관측점에서는 Assoc 요청과 EAPOL msg1의 캡처 시각이 거의 동시에
+# 기록돼 순서가 수십 ms 뒤집힌다. 실제 TEST 로그에서 쓰던 50ms 허용치를 이름 붙여
+# 로밍 매칭 함수들이 같은 근거를 공유하게 한다.
+ASSOC_EAPOL_SLACK_SEC = 0.05
 
 
 def _parse_msgnr(raw: str) -> Optional[int]:
@@ -50,7 +54,7 @@ def _sta_ap_of(frame: FrameType, sta_macs: set) -> Optional[tuple]:
 
 def _finalize(hs: Dict[str, Any]) -> Dict[str, Any]:
     """진행 중 핸드셰이크 상태 → 직렬화용 dict."""
-    msgs = hs["msgs"]  # {msgnr: {"count": n, "retry_frames": m}}
+    msgs = hs["msgs"]
     messages = {}
     for nr in sorted(msgs):
         m = msgs[nr]
@@ -58,8 +62,21 @@ def _finalize(hs: Dict[str, Any]) -> Dict[str, Any]:
         messages[str(nr)] = {
             "count": m["count"],
             "retries": max(m["count"] - 1, m["retry_frames"]),
+            "first_epoch": m["first_epoch"],
+            "last_epoch": m["last_epoch"],
         }
     complete = all(str(n) in messages for n in (1, 2, 3, 4))
+    msg1_epoch = messages.get("1", {}).get("first_epoch")
+    completion_epoch = messages.get("4", {}).get("first_epoch")
+    # 4-way duration은 시작(msg1)과 완료(msg4)를 모두 직접 관측했을 때만 안다.
+    # 그룹 첫/끝 프레임으로 계산하면 msg1 누락 시 부분 구간을 전체처럼 보이게 하고,
+    # msg4 뒤 재전송이 있으면 완료 시각을 늦춘다.
+    duration_ms = (
+        round((completion_epoch - msg1_epoch) * 1000, 1)
+        if isinstance(msg1_epoch, (int, float))
+        and isinstance(completion_epoch, (int, float))
+        else None
+    )
     return {
         "sta": hs["sta"],
         "sta_name": hs["sta_name"],
@@ -67,7 +84,8 @@ def _finalize(hs: Dict[str, Any]) -> Dict[str, Any]:
         "ap_name": hs["ap_name"],
         "start_epoch": hs["start_epoch"],
         "end_epoch": hs["end_epoch"],
-        "duration_ms": round((hs["end_epoch"] - hs["start_epoch"]) * 1000, 1),
+        "completion_epoch": completion_epoch,
+        "duration_ms": duration_ms,
         "messages": messages,
         "retry_total": sum(m["retries"] for m in messages.values()),
         "complete": complete,
@@ -127,8 +145,17 @@ def build_handshakes(
                 "frame_refs": [],
             }
         hs["end_epoch"] = f.epoch
-        m = hs["msgs"].setdefault(msgnr, {"count": 0, "retry_frames": 0})
+        m = hs["msgs"].setdefault(
+            msgnr,
+            {
+                "count": 0,
+                "retry_frames": 0,
+                "first_epoch": f.epoch,
+                "last_epoch": f.epoch,
+            },
+        )
         m["count"] += 1
+        m["last_epoch"] = f.epoch
         if f.retry:
             m["retry_frames"] += 1
         hs["frame_refs"].append(f.number)
@@ -165,7 +192,7 @@ def match_four_way(
         start = h.get("start_epoch")
         if not isinstance(start, (int, float)):
             continue
-        if assoc_epoch - 0.05 <= start <= assoc_epoch + window_sec:
+        if assoc_epoch - ASSOC_EAPOL_SLACK_SEC <= start <= assoc_epoch + window_sec:
             if best is None or start < best.get("start_epoch", float("inf")):
                 best = h
     return best
@@ -197,8 +224,18 @@ def match_four_way_completion(
         start = h.get("start_epoch")
         if not isinstance(start, (int, float)):
             continue
-        if assoc_epoch - 0.05 <= start <= assoc_epoch + window_sec:
-            if best is None or start < best.get("start_epoch", float("inf")):
+        if assoc_epoch - ASSOC_EAPOL_SLACK_SEC <= start <= assoc_epoch + window_sec:
+            # 같은 start_epoch가 들어오면 더 많은 메시지를 포착한 그룹을 우선해
+            # 외부/레거시 입력의 리스트 순서에 따라 결과가 달라지지 않게 한다.
+            best_messages = best.get("messages", {}) if best else {}
+            if (
+                best is None
+                or start < best.get("start_epoch", float("inf"))
+                or (
+                    start == best.get("start_epoch")
+                    and len(messages) > len(best_messages)
+                )
+            ):
                 best = h
     return best
 

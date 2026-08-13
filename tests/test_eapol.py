@@ -35,6 +35,7 @@ class TestBuildHandshakes:
         assert h["complete"] is True
         assert h["start_epoch"] == 1000.0
         assert h["end_epoch"] == 1000.03
+        assert h["completion_epoch"] == 1000.03
         assert h["duration_ms"] == 30.0
         assert h["retry_total"] == 0
         assert set(h["messages"]) == {"1", "2", "3", "4"}
@@ -65,6 +66,32 @@ class TestBuildHandshakes:
         assert h["messages"]["2"]["retries"] == 0
         assert h["retry_total"] == 2
         assert h["complete"] is True
+
+    def test_msg4_timestamp_not_trailing_group_frame_is_completion(self):
+        frames = [
+            _eapol(1, 1000.000, 1),
+            _eapol(2, 1000.010, 2),
+            _eapol(3, 1000.020, 3),
+            _eapol(4, 1000.030, 4),
+            _eapol(5, 1000.050, 2, retry=True),
+        ]
+
+        h = build_handshakes(frames, SAMPLE_ROLES)["handshakes"][0]
+
+        assert h["end_epoch"] == 1000.05  # 그룹 경계는 보존
+        assert h["completion_epoch"] == 1000.03
+        assert h["duration_ms"] == 30.0
+
+    def test_missing_msg1_does_not_expose_partial_duration(self):
+        frames = [
+            _eapol(1, 1000.010, 2),
+            _eapol(2, 1000.030, 4),
+        ]
+
+        h = build_handshakes(frames, SAMPLE_ROLES)["handshakes"][0]
+
+        assert h["completion_epoch"] == 1000.03
+        assert h["duration_ms"] is None
 
     def test_two_handshakes_split_by_new_msg1(self):
         frames = [
@@ -200,6 +227,25 @@ class TestRoamingFourWayIntegration:
         assert seq["four_way_ms"] == 30.0
         assert seq["total_roam_ms"] == 130.0
         assert seq["total_basis"] == "four_way"
+
+    def test_sequence_uses_msg4_not_later_retransmission_as_roam_end(self):
+        frames = [
+            make_frame(number=1, epoch=1000.0, ta=STA1, ra=AP1, subtype="11"),
+            make_frame(number=2, epoch=1000.05, ta=STA1, ra=AP1, subtype="0"),
+            _eapol(3, 1000.100, 1),
+            _eapol(4, 1000.110, 2),
+            _eapol(5, 1000.120, 3),
+            _eapol(6, 1000.130, 4),
+            _eapol(7, 1000.180, 2, retry=True),
+        ]
+        handshakes = build_handshakes(frames, SAMPLE_ROLES)["handshakes"]
+
+        seq = _structured_roaming(
+            frames, SAMPLE_ROLES, handshakes=handshakes
+        )["sequences"][0]
+
+        assert seq["four_way_ms"] == 30.0
+        assert seq["total_roam_ms"] == 130.0
 
 
 class TestPerSecondBytes:
