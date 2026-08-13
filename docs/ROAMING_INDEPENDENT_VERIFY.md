@@ -185,6 +185,35 @@ pcap 전체 소요로 판정됐으며 둘 다 느리지 않았다. 분석기 전
 - `tmp/test18_validation/independent-result.json`
 - `tmp/test18_validation/independent-result.md`
 
+## TEST19 기준 결과
+
+2026-08-13에 `tmp/20260721_CFI/TEST19`의 주 무선 캡처, DFK 2조각,
+유선 GT와 1~3호기 `wpa.log`를 입력하여 확인했다. 2호기 로그에는 이전 시험 구간이
+함께 들어 있었지만 AP·시각 상관으로 현재 캡처의 48건만 선택했다. DFK는 Beacon TSF
+기준 `-181.098099초`로 정렬됐고 공통 프레임 311,297건을 제거한 뒤 분석 프레임
+343,285건을 유지했다.
+
+| 항목 | 독립 검증 결과 |
+|---|---:|
+| 패킷 로밍 거래 | 133 |
+| STA 로그 명령 | 192 (성공 192, 실패 0) |
+| PCAP↔STA 매칭 | 130 |
+| 느린 로밍 | 1 (pcap 기준) |
+| 판정 가능 / 불가 | 133 / 0 |
+| STA 체감 p50 / p95 | 115ms / 133.65ms |
+
+분석기 전체 결과와 strict 비교에서 요약·개별 이벤트 차이가 모두 0건이었다. 이 입력은
+로그 범위 밖 패킷 로밍 3건 중 162.9ms 이벤트 하나가 pcap 기준 느림이었다. 이를 통해
+독립 결과의 `transactions`에는 최종 판정이 있지만 `correlation.unmatched_packets`에는
+판정 전 값이 남는 내부 불일치를 발견했고, 최종 분류 후 스냅샷을 갱신하도록 수정했다.
+백분위의 이진 부동소수점 노출(`133.64999999999998`)도 함께 정규화했다.
+
+재현 산출물(로컬, git 제외):
+
+- `tmp/test19_validation/analyzer-result.json`
+- `tmp/test19_validation/independent-fixed-result.json`
+- `tmp/test19_validation/independent-fixed-result.md`
+
 ## Association 반복 병합 창 실측
 
 TEST13(주 스니퍼, DFK 저장 실패)과 TEST14(주 스니퍼+DFK)를 각각 2시간 전체 구간에서
