@@ -121,6 +121,18 @@ def test_single_association_request_is_a_station_candidate():
     assert candidates == [sta]
 
 
+def test_station_candidates_reject_invalid_or_group_addresses():
+    ap = "00:00:00:00:00:aa"
+    events = [
+        packet(epoch=1.0, subtype=0, ta="00:00:00:00:00:00", ra=ap),
+        packet(epoch=2.0, subtype=0, ta="01:00:5e:00:00:01", ra=ap),
+        packet(epoch=3.0, subtype=0, ta="not-a-mac", ra=ap),
+        packet(epoch=4.0, subtype=0, ta="02:00:00:00:00:01", ra=ap),
+    ]
+
+    assert verify.detect_station_macs(events) == ["02:00:00:00:00:01"]
+
+
 def test_packet_ledger_collapses_same_attempt_even_when_retry_arrives_first():
     sta, ap = "00:00:00:00:00:01", "00:00:00:00:00:aa"
     events = [
@@ -269,6 +281,42 @@ def test_auto_binding_and_correlation_are_one_to_one():
     assert bindings["two"].sta == sta2
     assert bindings["one"].offset_sec == pytest.approx(2.0)
     assert correlation["matched"] == 4
+    assert not correlation["unmatched_station_success"]
+    assert not correlation["unmatched_packets"]
+
+
+def test_auth_missing_transaction_uses_assoc_epoch_for_station_matching():
+    sta, ap = "00:00:00:00:00:01", "00:00:00:00:00:a1"
+    packet_roam = verify.RoamTransaction(
+        sta=sta,
+        ap=ap,
+        auth_epoch=None,
+        assoc_epoch=102.0,
+        auth_number=None,
+        assoc_number=2,
+        auth_basis=None,
+        gap_ms=None,
+        pcap_total_ms=None,
+    )
+    logs = {
+        "one": [
+            verify.StationRoam(
+                "one", 1, ap, 100.0, 100.11, 110.0, False, ""
+            )
+        ]
+    }
+
+    bindings, _ = verify.bind_stations(logs, [packet_roam])
+    correlation = verify.correlate_station_logs(
+        logs, [packet_roam], bindings
+    )
+
+    assert bindings["one"].sta == sta
+    assert bindings["one"].matched == 1
+    assert bindings["one"].offset_sec == pytest.approx(2.0)
+    assert correlation["matched"] == 1
+    assert packet_roam.sta_source == "one"
+    assert packet_roam.sta_total_ms == 110.0
     assert not correlation["unmatched_station_success"]
     assert not correlation["unmatched_packets"]
 

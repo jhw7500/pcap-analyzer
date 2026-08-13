@@ -103,6 +103,32 @@ python3 scripts/roaming_independent_verify.py \
 - `tmp/test14_validation/independent-result.md`
 - `tmp/test14_validation/web-independent-result.json` (웹 어댑터 경로)
 
+## TEST13 기준 결과
+
+2026-08-13에 `tmp/20260723_CFI/TEST13`의 주 무선 3조각과 1~3호기
+`wpa.log`를 입력하여 확인했다. DFK pcap은 192바이트로 정상 저장되지 않아 입력에서
+제외했다.
+
+| 항목 | 독립 검증 결과 |
+|---|---:|
+| 패킷 로밍 거래 | 862 |
+| STA 로그 명령 | 927 (성공 926, 실패 1) |
+| PCAP↔STA 매칭 | 862 |
+| 느린 로밍(>150ms) | 9 |
+| 판정 가능 / 불가 | 862 / 0 |
+| STA 체감 p50 / p95 | 110ms / 138ms |
+
+분석기 전체 결과와 strict 비교에서 요약·개별 이벤트 차이가 모두 0건이었다. 이 입력에는
+송신 주소가 `00:00:00:00:00:00`인 시험성 Assoc 프레임과 Auth가 포착되지 않고
+Reassoc만 포착된 실제 로밍이 함께 있다. 독립 검증기는 전자를 STA 후보에서 제외하고,
+후자는 분석기와 독립적으로 Assoc 시각을 사용해 STA 로그에 연결한다.
+
+재현 산출물(로컬, git 제외):
+
+- `tmp/test13_validation/analyzer-result.json`
+- `tmp/test13_validation/independent-fixed-result.json`
+- `tmp/test13_validation/independent-fixed-result.md`
+
 ## Association 반복 병합 창 실측
 
 TEST13(주 스니퍼, DFK 저장 실패)과 TEST14(주 스니퍼+DFK)를 각각 2시간 전체 구간에서

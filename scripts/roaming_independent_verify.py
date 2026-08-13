@@ -67,6 +67,8 @@ _CONNECTED_RE = re.compile(
 _FAIL_RE = re.compile(
     r"(AUTH_TIMED_OUT|CTRL-EVENT-ASSOC-REJECT|CTRL-EVENT-DISCONNECTED)"
 )
+_MAC_RE = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$", re.I)
+_ZERO_MAC = "00:00:00:00:00:00"
 
 
 @dataclass
@@ -137,6 +139,13 @@ def _bool(value: str) -> bool:
 def _subtype(value: str) -> int:
     raw = _first(value)
     return int(raw, 16) if raw.lower().startswith("0x") else int(raw)
+
+
+def _is_usable_station_mac(mac: str) -> bool:
+    """Assoc 요청 송신자로 인정할 수 있는 유효한 유니캐스트 MAC인지 확인한다."""
+    if not isinstance(mac, str) or not _MAC_RE.fullmatch(mac) or mac == _ZERO_MAC:
+        return False
+    return not (int(mac[:2], 16) & 0x01)
 
 
 def _percentile(values: list[float], fraction: float) -> Optional[float]:
@@ -418,7 +427,20 @@ def detect_station_macs(events: list[PacketEvent]) -> list[str]:
     # 빈도 휴리스틱을 더하면 로밍이 1회뿐인 작은 캡처를 조용히 누락하므로, 해당
     # subtype의 송신자를 전부 STA로 취급하는 것이 패킷 의미에도 전수검사에도 맞다.
     return sorted(
-        {event.ta for event in events if event.subtype in {0, 2} and event.ta}
+        {
+            event.ta
+            for event in events
+            if event.subtype in {0, 2} and _is_usable_station_mac(event.ta)
+        }
+    )
+
+
+def _transaction_epoch(transaction: RoamTransaction) -> float:
+    """STA 로그와 대조할 패킷 시각. Auth 미포착이면 Assoc 시각을 사용한다."""
+    return (
+        transaction.auth_epoch
+        if transaction.auth_epoch is not None
+        else transaction.assoc_epoch
     )
 
 
@@ -614,8 +636,8 @@ def score_station_binding(
     successes = [roam for roam in station_roams if not roam.failed]
     packet_by_ap: dict[str, list[float]] = defaultdict(list)
     for roam in packet_roams:
-        if roam.sta == sta and roam.auth_epoch is not None:
-            packet_by_ap[roam.ap].append(roam.auth_epoch)
+        if roam.sta == sta:
+            packet_by_ap[roam.ap].append(_transaction_epoch(roam))
     for epochs in packet_by_ap.values():
         epochs.sort()
 
@@ -820,8 +842,10 @@ def correlate_station_logs(
     for station, score in bindings.items():
         candidates_by_ap: dict[str, list[tuple[float, int]]] = defaultdict(list)
         for index, packet in enumerate(packet_roams):
-            if packet.sta == score.sta and packet.auth_epoch is not None:
-                candidates_by_ap[packet.ap].append((packet.auth_epoch, index))
+            if packet.sta == score.sta:
+                candidates_by_ap[packet.ap].append(
+                    (_transaction_epoch(packet), index)
+                )
         for values in candidates_by_ap.values():
             values.sort()
         for log_roam in station_ledgers[station]:
