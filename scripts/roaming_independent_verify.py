@@ -67,6 +67,8 @@ _CONNECTED_RE = re.compile(
 _FAIL_RE = re.compile(
     r"(AUTH_TIMED_OUT|CTRL-EVENT-ASSOC-REJECT|CTRL-EVENT-DISCONNECTED)"
 )
+_MAC_RE = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$", re.I)
+_ZERO_MAC = "00:00:00:00:00:00"
 
 
 @dataclass
@@ -137,6 +139,13 @@ def _bool(value: str) -> bool:
 def _subtype(value: str) -> int:
     raw = _first(value)
     return int(raw, 16) if raw.lower().startswith("0x") else int(raw)
+
+
+def _is_usable_station_mac(mac: str) -> bool:
+    """Assoc 요청 송신자로 인정할 수 있는 유효한 유니캐스트 MAC인지 확인한다."""
+    if not isinstance(mac, str) or not _MAC_RE.fullmatch(mac) or mac == _ZERO_MAC:
+        return False
+    return not (int(mac[:2], 16) & 0x01)
 
 
 def _percentile(values: list[float], fraction: float) -> Optional[float]:
@@ -418,7 +427,20 @@ def detect_station_macs(events: list[PacketEvent]) -> list[str]:
     # 빈도 휴리스틱을 더하면 로밍이 1회뿐인 작은 캡처를 조용히 누락하므로, 해당
     # subtype의 송신자를 전부 STA로 취급하는 것이 패킷 의미에도 전수검사에도 맞다.
     return sorted(
-        {event.ta for event in events if event.subtype in {0, 2} and event.ta}
+        {
+            event.ta
+            for event in events
+            if event.subtype in {0, 2} and _is_usable_station_mac(event.ta)
+        }
+    )
+
+
+def _transaction_epoch(transaction: RoamTransaction) -> float:
+    """STA 로그와 대조할 패킷 시각. Auth 미포착이면 Assoc 시각을 사용한다."""
+    return (
+        transaction.auth_epoch
+        if transaction.auth_epoch is not None
+        else transaction.assoc_epoch
     )
 
 
@@ -610,21 +632,57 @@ def score_station_binding(
     sta: str,
     packet_roams: list[RoamTransaction],
     tolerance_ms: float = DEFAULT_STA_MATCH_MS,
+    anchor_mode: str = "auto",
 ) -> PairScore:
+    """로그와 패킷 STA 후보의 시각 일치도를 계산한다.
+
+    Auth는 ROAM 명령 시각, Auth 미포착 Assoc는 CONNECTED 완료 시각과 대조한다.
+    ``auto``는 Auth 근거가 있으면 우선 사용하고 없을 때만 Assoc-only로 폴백한다.
+    """
+    if anchor_mode == "auto":
+        auth_score = score_station_binding(
+            station,
+            station_roams,
+            sta,
+            packet_roams,
+            tolerance_ms,
+            anchor_mode="auth",
+        )
+        if auth_score.matched > 0:
+            return auth_score
+        return score_station_binding(
+            station,
+            station_roams,
+            sta,
+            packet_roams,
+            tolerance_ms,
+            anchor_mode="assoc",
+        )
+    if anchor_mode not in {"auth", "assoc"}:
+        raise ValueError(f"알 수 없는 STA 바인딩 앵커: {anchor_mode}")
+
     successes = [roam for roam in station_roams if not roam.failed]
     packet_by_ap: dict[str, list[float]] = defaultdict(list)
     for roam in packet_roams:
-        if roam.sta == sta and roam.auth_epoch is not None:
+        if roam.sta != sta:
+            continue
+        if anchor_mode == "auth" and roam.auth_epoch is not None:
             packet_by_ap[roam.ap].append(roam.auth_epoch)
+        elif anchor_mode == "assoc" and roam.auth_epoch is None:
+            packet_by_ap[roam.ap].append(roam.assoc_epoch)
     for epochs in packet_by_ap.values():
         epochs.sort()
+
+    def log_epoch(roam: StationRoam) -> Optional[float]:
+        return roam.command_epoch if anchor_mode == "auth" else roam.connected_epoch
 
     # 장비와 pcap 시계가 수시간 이상 벌어져도 먼저 offset을 배울 수 있어야 한다.
     # 같은 AP의 시간순 이벤트를 비례 인덱스로 맞추고 주변 shift도 보아, 전체
     # Cartesian product 없이 O(events)개의 coarse cluster를 만든다.
     station_by_ap: dict[str, list[StationRoam]] = defaultdict(list)
     for roam in successes:
-        station_by_ap[roam.target_ap].append(roam)
+        if log_epoch(roam) is not None:
+            station_by_ap[roam.target_ap].append(roam)
     offset_buckets: dict[float, list[float]] = defaultdict(list)
     for ap, log_rows in station_by_ap.items():
         packet_epochs = packet_by_ap.get(ap, [])
@@ -640,7 +698,9 @@ def score_station_binding(
                 candidate_index = packet_index + shift
                 if not 0 <= candidate_index < len(packet_epochs):
                     continue
-                raw = packet_epochs[candidate_index] - log_rows[log_index].command_epoch
+                anchor = log_epoch(log_rows[log_index])
+                assert anchor is not None
+                raw = packet_epochs[candidate_index] - anchor
                 offset_buckets[round(raw, 1)].append(raw)
     if not offset_buckets:
         return PairScore(station, sta, 0.0, 0, None)
@@ -657,8 +717,11 @@ def score_station_binding(
     for _, offset in candidates:
         residuals = []
         for roam in successes:
+            anchor = log_epoch(roam)
+            if anchor is None:
+                continue
             delta = _nearest_delta(
-                packet_by_ap.get(roam.target_ap, []), roam.command_epoch + offset
+                packet_by_ap.get(roam.target_ap, []), anchor + offset
             )
             if delta is not None and abs(delta) <= tolerance:
                 residuals.append(delta)
@@ -668,8 +731,11 @@ def score_station_binding(
         best_offset += statistics.median(best_residuals)
     residuals = []
     for roam in successes:
+        anchor = log_epoch(roam)
+        if anchor is None:
+            continue
         delta = _nearest_delta(
-            packet_by_ap.get(roam.target_ap, []), roam.command_epoch + best_offset
+            packet_by_ap.get(roam.target_ap, []), anchor + best_offset
         )
         if delta is not None and abs(delta) <= tolerance:
             residuals.append(delta)
@@ -758,7 +824,7 @@ def bind_stations(
 ) -> tuple[dict[str, PairScore], dict[str, dict[str, PairScore]]]:
     stations = list(station_ledgers)
     stas = sorted({roam.sta for roam in packet_roams})
-    matrix = {
+    fallback_matrix = {
         station: {
             sta: score_station_binding(
                 station, station_ledgers[station], sta, packet_roams, tolerance_ms
@@ -778,12 +844,67 @@ def bind_stations(
                 f"unknown_mac={unknown_macs}"
             )
         return {
-            station: matrix[station][explicit[station]] for station in stations
-        }, matrix
+            station: fallback_matrix[station][explicit[station]]
+            for station in stations
+        }, fallback_matrix
     if len(stations) > len(stas):
         raise RuntimeError("STA 로그 수가 패킷 STA 후보 수보다 많아 자동 바인딩 불가")
     if not stations:
-        return {}, matrix
+        return {}, fallback_matrix
+
+    # 자동 바인딩에서는 Auth가 포착된 거래를 우선한다. Auth 없는 Assoc/Reassoc은
+    # 후보마다 자체 offset을 만들 수 있어, 희소 로그에서는 무관한 STA도 matched=1,
+    # MAD=0이 되어 MAC 정렬 순서로 오배정될 수 있다. Auth 근거가 하나라도 있으면
+    # 그 행만 사용하고, 전혀 없을 때만 Assoc-only 점수로 폴백한다.
+    auth_matrix = {
+        station: {
+            sta: score_station_binding(
+                station,
+                station_ledgers[station],
+                sta,
+                packet_roams,
+                tolerance_ms,
+                anchor_mode="auth",
+            )
+            for sta in stas
+        }
+        for station in stations
+    }
+    matrix: dict[str, dict[str, PairScore]] = {}
+    for station in stations:
+        auth_scores = auth_matrix[station]
+        if any(score.matched > 0 for score in auth_scores.values()):
+            matrix[station] = auth_scores
+            continue
+
+        fallback_scores = fallback_matrix[station]
+        best_matched = max(
+            (score.matched for score in fallback_scores.values()), default=0
+        )
+        if best_matched <= 0:
+            raise RuntimeError(
+                f"{station}: STA 자동 바인딩 후보가 없다 — --bind NAME=MAC 필요"
+            )
+        best = [
+            score
+            for score in fallback_scores.values()
+            if score.matched == best_matched
+        ]
+        best_mad = min(
+            score.residual_mad_ms
+            if score.residual_mad_ms is not None
+            else math.inf
+            for score in best
+        )
+        tied = [score for score in best if score.residual_mad_ms == best_mad]
+        if len(tied) > 1:
+            candidates = ", ".join(sorted(score.sta for score in tied))
+            raise RuntimeError(
+                f"{station}: Auth 없는 STA 후보가 모호함({candidates}) — "
+                "--bind NAME=MAC 필요"
+            )
+        matrix[station] = fallback_scores
+
     # matched 수를 MAD보다 항상 우선하는 가중치로 변환한 뒤 O(N^3)으로 푼다.
     unit = len(stations) * 1_000_001
     weights = []
@@ -801,10 +922,17 @@ def bind_stations(
     assignment = _maximum_weight_assignment(weights)
     if len(assignment) != len(stations) or any(index < 0 for index in assignment):
         raise RuntimeError("STA 자동 바인딩 후보가 없다")
-    return {
+    selected = {
         station: matrix[station][stas[assignment[index]]]
         for index, station in enumerate(stations)
-    }, matrix
+    }
+    empty = [station for station, score in selected.items() if score.matched <= 0]
+    if empty:
+        raise RuntimeError(
+            "STA 자동 바인딩의 고유한 근거가 없다: "
+            f"{', '.join(empty)} — --bind NAME=MAC 필요"
+        )
+    return selected, matrix
 
 
 def correlate_station_logs(
@@ -820,29 +948,51 @@ def correlate_station_logs(
     for station, score in bindings.items():
         candidates_by_ap: dict[str, list[tuple[float, int]]] = defaultdict(list)
         for index, packet in enumerate(packet_roams):
-            if packet.sta == score.sta and packet.auth_epoch is not None:
-                candidates_by_ap[packet.ap].append((packet.auth_epoch, index))
+            if packet.sta == score.sta:
+                candidates_by_ap[packet.ap].append(
+                    (_transaction_epoch(packet), index)
+                )
         for values in candidates_by_ap.values():
             values.sort()
         for log_roam in station_ledgers[station]:
             if log_roam.failed:
                 continue
-            expected = log_roam.command_epoch + score.offset_sec
+            auth_expected = log_roam.command_epoch + score.offset_sec
+            assoc_expected = (
+                log_roam.connected_epoch + score.offset_sec
+                if log_roam.connected_epoch is not None
+                else auth_expected
+            )
             candidates = candidates_by_ap.get(log_roam.target_ap, [])
             epochs = [value[0] for value in candidates]
-            pos = bisect_left(epochs, expected)
-            nearby = candidates[max(0, pos - 2) : min(len(candidates), pos + 3)]
+            nearby_by_index: dict[int, tuple[float, int]] = {}
+            for expected in {auth_expected, assoc_expected}:
+                pos = bisect_left(epochs, expected)
+                for item in candidates[max(0, pos - 2) : min(len(candidates), pos + 3)]:
+                    nearby_by_index[item[1]] = item
+            nearby = list(nearby_by_index.values())
             available = [item for item in nearby if item[1] not in used_packets]
             if not available:
                 unmatched_logs.append(asdict(log_roam))
                 continue
             epoch, packet_index = min(
-                available, key=lambda item: abs(item[0] - expected)
+                available,
+                key=lambda item: abs(
+                    item[0]
+                    - (
+                        auth_expected
+                        if packet_roams[item[1]].auth_epoch is not None
+                        else assoc_expected
+                    )
+                ),
+            )
+            packet = packet_roams[packet_index]
+            expected = (
+                auth_expected if packet.auth_epoch is not None else assoc_expected
             )
             if abs(epoch - expected) > tolerance:
                 unmatched_logs.append(asdict(log_roam))
                 continue
-            packet = packet_roams[packet_index]
             packet.sta_source = station
             packet.sta_total_ms = log_roam.total_ms
             used_packets.add(packet_index)

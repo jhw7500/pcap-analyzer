@@ -17,6 +17,9 @@
 4. Auth부터 Assoc/Reassoc까지 독립 로밍 거래 원장을 만든다. 새 Auth가 없는 동일
    STA→AP/subtype의 200ms 이내 반복은 하나의 연결 시도로 묶는다.
 5. STA 로그별 로밍 원장을 만들고 AP·시간 잔차로 STA MAC과 자동 바인딩한다.
+   자동 바인딩은 Auth가 포착된 거래를 우선하며, Auth 없는 Assoc-only 후보끼리
+   동률이면 임의 선택하지 않고 `--bind`를 요구한다. 바인딩 후 Auth 미포착 거래는
+   ROAM 시작이 아니라 STA의 CONNECTED 완료 시각과 Assoc 시각을 대조한다.
 6. STA 체감시간을 우선하여 150ms 초과를 느린 로밍으로 판정하고, STA 로그가 없는
    거래만 pcap 100ms 기준으로 보완한다.
 7. `--analyzer-result`가 있으면 총건수·느림·판정 가능·STA 부착과 개별 이벤트를
@@ -102,6 +105,32 @@ python3 scripts/roaming_independent_verify.py \
 - `tmp/test14_validation/independent-result.json`
 - `tmp/test14_validation/independent-result.md`
 - `tmp/test14_validation/web-independent-result.json` (웹 어댑터 경로)
+
+## TEST13 기준 결과
+
+2026-08-13에 `tmp/20260723_CFI/TEST13`의 주 무선 3조각과 1~3호기
+`wpa.log`를 입력하여 확인했다. DFK pcap은 192바이트로 정상 저장되지 않아 입력에서
+제외했다.
+
+| 항목 | 독립 검증 결과 |
+|---|---:|
+| 패킷 로밍 거래 | 862 |
+| STA 로그 명령 | 927 (성공 926, 실패 1) |
+| PCAP↔STA 매칭 | 862 |
+| 느린 로밍(>150ms) | 9 |
+| 판정 가능 / 불가 | 862 / 0 |
+| STA 체감 p50 / p95 | 110ms / 138ms |
+
+분석기 전체 결과와 strict 비교에서 요약·개별 이벤트 차이가 모두 0건이었다. 이 입력에는
+송신 주소가 `00:00:00:00:00:00`인 시험성 Assoc 프레임과 Auth가 포착되지 않고
+Reassoc만 포착된 실제 로밍이 함께 있다. 독립 검증기는 전자를 STA 후보에서 제외하고,
+후자는 분석기와 독립적으로 Assoc 시각을 사용해 STA 로그에 연결한다.
+
+재현 산출물(로컬, git 제외):
+
+- `tmp/test13_validation/analyzer-result.json`
+- `tmp/test13_validation/independent-fixed-result.json`
+- `tmp/test13_validation/independent-fixed-result.md`
 
 ## Association 반복 병합 창 실측
 
