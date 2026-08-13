@@ -132,6 +132,33 @@ Reassoc만 포착된 실제 로밍이 함께 있다. 독립 검증기는 전자�
 - `tmp/test13_validation/independent-fixed-result.json`
 - `tmp/test13_validation/independent-fixed-result.md`
 
+## TEST9 기준 결과
+
+2026-08-13에 `tmp/20260722_CFI/TEST9`의 주 무선 3조각, DFK 3조각,
+1~3호기 `wpa.log`를 입력하여 확인했다. DFK 캡처는 시험 중 약 50분에 중단됐지만,
+주 캡처와 겹치는 구간은 Beacon TSF로 정렬하고 나머지 구간은 주 캡처로 보존했다.
+
+| 항목 | 독립 검증 결과 |
+|---|---:|
+| 병합 후 분석 프레임 | 1,464,728 |
+| 패킷 로밍 거래 | 861 |
+| STA 로그 명령 | 918 (성공 918, 실패 0) |
+| PCAP↔STA 매칭 | 842 |
+| 느린 로밍(>150ms) | 19 |
+| 판정 가능 / 불가 | 861 / 0 |
+| STA 체감 p50 / p95 | 96ms / 138ms |
+
+최초 strict 비교에서는 분석기의 STA 부착이 840건으로 독립 원장보다 2건 적었다.
+두 이벤트는 동일 STA·동일 AP 로그와 일치했고 잔차는 222ms/231ms였으며, 가장 가까운
+다른 로밍은 20초 이상 떨어져 있었다. 분석기의 200ms 허용 창을 독립 검증 정책과 같은
+250ms로 맞춘 뒤 STA 부착 842건, 요약 차이 0건, 개별 이벤트 차이 0건으로 일치했다.
+
+재현 산출물(로컬, git 제외):
+
+- `tmp/test9_validation/analyzer-result.json`
+- `tmp/test9_validation/independent-fixed-result.json`
+- `tmp/test9_validation/independent-fixed-result.md`
+
 ## Association 반복 병합 창 실측
 
 TEST13(주 스니퍼, DFK 저장 실패)과 TEST14(주 스니퍼+DFK)를 각각 2시간 전체 구간에서

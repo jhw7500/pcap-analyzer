@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from analyzer.core.station_match import MATCH_TOLERANCE_SEC
 from scripts import roaming_independent_verify as verify
 
 
@@ -61,6 +62,11 @@ def test_verifier_does_not_import_analyzer_package():
     assert not any(
         name == "analyzer" or name.startswith("analyzer.") for name in imported
     )
+
+
+def test_sta_match_tolerance_policy_matches_analyzer():
+    """독립 구현을 유지하되 비교 정책값은 분석기와 어긋나지 않는다."""
+    assert verify.DEFAULT_STA_MATCH_MS == MATCH_TOLERANCE_SEC * 1000 == 250.0
 
 
 def test_estimate_tsf_offsets_uses_common_beacon_median():

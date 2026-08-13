@@ -13,6 +13,8 @@ from analyzer.core.station_log import (
     parse_wpa_log,
 )
 from analyzer.core.station_match import (
+    MATCH_TOLERANCE_SEC,
+    StationBinding,
     attach_station_to_sequences,
     bind_stations,
     estimate_offset,
@@ -227,6 +229,25 @@ class TestAttachToSequences:
         binds = bind_stations([st], frames, {"00:50:43:18:fe:01": [roam_epoch + 0.05]})
         assert attach_station_to_sequences(seqs, st, binds[0]) == 0
         assert "sta_log" not in seqs[0]
+
+    def test_test9_valid_231ms_residual_is_attached(self, tmp_path):
+        """TEST9의 동일 STA·AP 실측 잔차 231ms를 정책 창 안에서 보존한다."""
+        st = self._station(tmp_path)
+        roam_epoch = st.roams[0].cmd_epoch
+        seqs = [{
+            "sta": "00:50:43:18:fe:01",
+            "auth_epoch": roam_epoch - 0.231,
+            "assoc_epoch": roam_epoch - 0.221,
+        }]
+        binding = StationBinding(
+            log_name="1호기",
+            sta_mac="00:50:43:18:fe:01",
+            offset_sec=0.0,
+        )
+
+        assert MATCH_TOLERANCE_SEC == 0.25
+        assert attach_station_to_sequences(seqs, st, binding) == 1
+        assert seqs[0]["sta_log"]["residual_ms"] == -231.0
 
     def test_one_log_episode_attaches_to_only_one_sequence(self, tmp_path):
         """같은 로그 로밍이 여러 시퀀스에 재사용되면 안 된다 — **1:1 매칭**.
