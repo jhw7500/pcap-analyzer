@@ -1,6 +1,10 @@
 """AI 모듈 테스트 — 프롬프트 생성, 프로바이더 분기."""
+import asyncio
+from unittest.mock import AsyncMock, patch
+
 from ai.prompts import build_review_prompt
-from ai.reviewer import SYSTEM_PROMPT
+from ai.reviewer import SYSTEM_PROMPT, build_system_prompt, run_review
+from analyzer.core.modules.roaming import STA_SLOW_POLICY
 
 
 class TestBuildReviewPrompt:
@@ -146,6 +150,42 @@ class TestSystemPrompt:
     def test_system_prompt_warns_against_chipset_assumption(self):
         """88Q9098도 사용자 설정으로 동작이 바뀌므로 단일 칩셋 가정을 피하라는 가이드 필수."""
         assert "사용자 설정" in SYSTEM_PROMPT or "사용자 측 설정" in SYSTEM_PROMPT
+
+    def test_legacy_result_uses_legacy_roaming_policy(self):
+        system = build_system_prompt({"roaming": {"sequences": []}})
+
+        assert "구버전 저장 결과 정책" in system
+        assert "STA 체감값으로 재판정하지 않음" in system
+        assert "STA 로그 매칭 시 ROAM 명령" not in system
+
+    def test_new_result_uses_sta_preferred_roaming_policy(self):
+        system = build_system_prompt(
+            {"roaming": {"slow_policy": STA_SLOW_POLICY, "sequences": []}}
+        )
+
+        assert "STA 로그 매칭 시 ROAM 명령→CONNECTED >150ms" in system
+        assert "로그 미매칭 시 pcap Auth→4-way 완료 >100ms" in system
+        assert "구버전 저장 결과 정책" not in system
+
+    def test_run_review_passes_policy_specific_system_prompt(self):
+        structured = {"roaming": {"sequences": []}}
+        ai_call = AsyncMock(return_value="검토 완료")
+
+        with (
+            patch(
+                "ai.reviewer.config.get",
+                side_effect=lambda key: {
+                    "ai_provider": "openai",
+                    "ai_api_key": "test-key",
+                    "ai_model": "test-model",
+                }.get(key, ""),
+            ),
+            patch("ai.reviewer.call_ai", ai_call),
+        ):
+            result = asyncio.run(run_review(structured))
+
+        assert result["review"] == "검토 완료"
+        assert "구버전 저장 결과 정책" in ai_call.await_args.args[4]
 
 
 class TestCorrelationsInPrompt:
