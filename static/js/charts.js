@@ -1433,7 +1433,8 @@
         const loss = gtExchanges.map((e, i) => ({ e, i }))
             .filter(x => x.e.rtt_ms == null && x.e.late_rtt_ms == null);
         // 유선 exchanges는 1만+ 건이 일상 규모 — 스프레드 대신 reduce (PR #25 리뷰).
-        const maxRtt = ok.length ? ok.reduce((m, e) => Math.max(m, e.rtt_ms), 0) : 1;
+        const maxRtt = Math.max(1, gtExchanges.reduce(
+            (m, e) => Math.max(m, e.rtt_ms ?? e.late_rtt_ms ?? 0), 0));
         const traces = [];
         if (ok.length) traces.push({
             x: ok.map(e => new Date(e.epoch * 1000)), y: ok.map(e => e.rtt_ms),

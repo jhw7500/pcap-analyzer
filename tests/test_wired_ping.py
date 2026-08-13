@@ -135,6 +135,14 @@ def test_timeout_aware_wired_chart_relabels_streaks():
     assert "인접 Timeout/NG 간격 ≤2초" in src
 
 
+def test_wired_loss_marker_scales_against_late_rtts():
+    """무응답 X 마커가 초 단위 지연 응답 아래에 묻히지 않는다."""
+    from pathlib import Path
+
+    src = Path("static/js/charts.js").read_text(encoding="utf-8")
+    assert "e.rtt_ms ?? e.late_rtt_ms ?? 0" in src
+
+
 def test_trailing_unanswered_dropped_with_warning(tmp_path, monkeypatch):
     """캡처 끝이 **확인된** 경우, 그 끝에 붙은 꼬리 무응답은 NG로 세지 않는다."""
     body = (
