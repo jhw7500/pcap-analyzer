@@ -632,11 +632,18 @@ def score_station_binding(
     sta: str,
     packet_roams: list[RoamTransaction],
     tolerance_ms: float = DEFAULT_STA_MATCH_MS,
+    auth_only: bool = False,
 ) -> PairScore:
+    """로그와 패킷 STA 후보의 시각 일치도를 계산한다.
+
+    ``auth_only``는 자동 바인딩용 강한 근거 모드다. Assoc 시각은 이미 선택된
+    STA에 Auth 미포착 로밍을 붙이는 데는 유효하지만, 후보마다 임의 offset을 새로
+    학습하는 단계에 섞으면 무관한 Assoc-only STA도 1건/MAD 0으로 동률이 된다.
+    """
     successes = [roam for roam in station_roams if not roam.failed]
     packet_by_ap: dict[str, list[float]] = defaultdict(list)
     for roam in packet_roams:
-        if roam.sta == sta:
+        if roam.sta == sta and (not auth_only or roam.auth_epoch is not None):
             packet_by_ap[roam.ap].append(_transaction_epoch(roam))
     for epochs in packet_by_ap.values():
         epochs.sort()
@@ -780,7 +787,7 @@ def bind_stations(
 ) -> tuple[dict[str, PairScore], dict[str, dict[str, PairScore]]]:
     stations = list(station_ledgers)
     stas = sorted({roam.sta for roam in packet_roams})
-    matrix = {
+    fallback_matrix = {
         station: {
             sta: score_station_binding(
                 station, station_ledgers[station], sta, packet_roams, tolerance_ms
@@ -800,12 +807,67 @@ def bind_stations(
                 f"unknown_mac={unknown_macs}"
             )
         return {
-            station: matrix[station][explicit[station]] for station in stations
-        }, matrix
+            station: fallback_matrix[station][explicit[station]]
+            for station in stations
+        }, fallback_matrix
     if len(stations) > len(stas):
         raise RuntimeError("STA 로그 수가 패킷 STA 후보 수보다 많아 자동 바인딩 불가")
     if not stations:
-        return {}, matrix
+        return {}, fallback_matrix
+
+    # 자동 바인딩에서는 Auth가 포착된 거래를 우선한다. Auth 없는 Assoc/Reassoc은
+    # 후보마다 자체 offset을 만들 수 있어, 희소 로그에서는 무관한 STA도 matched=1,
+    # MAD=0이 되어 MAC 정렬 순서로 오배정될 수 있다. Auth 근거가 하나라도 있으면
+    # 그 행만 사용하고, 전혀 없을 때만 Assoc-only 점수로 폴백한다.
+    auth_matrix = {
+        station: {
+            sta: score_station_binding(
+                station,
+                station_ledgers[station],
+                sta,
+                packet_roams,
+                tolerance_ms,
+                auth_only=True,
+            )
+            for sta in stas
+        }
+        for station in stations
+    }
+    matrix: dict[str, dict[str, PairScore]] = {}
+    for station in stations:
+        auth_scores = auth_matrix[station]
+        if any(score.matched > 0 for score in auth_scores.values()):
+            matrix[station] = auth_scores
+            continue
+
+        fallback_scores = fallback_matrix[station]
+        best_matched = max(
+            (score.matched for score in fallback_scores.values()), default=0
+        )
+        if best_matched <= 0:
+            raise RuntimeError(
+                f"{station}: STA 자동 바인딩 후보가 없다 — --bind NAME=MAC 필요"
+            )
+        best = [
+            score
+            for score in fallback_scores.values()
+            if score.matched == best_matched
+        ]
+        best_mad = min(
+            score.residual_mad_ms
+            if score.residual_mad_ms is not None
+            else math.inf
+            for score in best
+        )
+        tied = [score for score in best if score.residual_mad_ms == best_mad]
+        if len(tied) > 1:
+            candidates = ", ".join(sorted(score.sta for score in tied))
+            raise RuntimeError(
+                f"{station}: Auth 없는 STA 후보가 모호함({candidates}) — "
+                "--bind NAME=MAC 필요"
+            )
+        matrix[station] = fallback_scores
+
     # matched 수를 MAD보다 항상 우선하는 가중치로 변환한 뒤 O(N^3)으로 푼다.
     unit = len(stations) * 1_000_001
     weights = []
@@ -823,10 +885,17 @@ def bind_stations(
     assignment = _maximum_weight_assignment(weights)
     if len(assignment) != len(stations) or any(index < 0 for index in assignment):
         raise RuntimeError("STA 자동 바인딩 후보가 없다")
-    return {
+    selected = {
         station: matrix[station][stas[assignment[index]]]
         for index, station in enumerate(stations)
-    }, matrix
+    }
+    empty = [station for station, score in selected.items() if score.matched <= 0]
+    if empty:
+        raise RuntimeError(
+            "STA 자동 바인딩의 고유한 근거가 없다: "
+            f"{', '.join(empty)} — --bind NAME=MAC 필요"
+        )
+    return selected, matrix
 
 
 def correlate_station_logs(

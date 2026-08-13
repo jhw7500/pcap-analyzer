@@ -321,6 +321,82 @@ def test_auth_missing_transaction_uses_assoc_epoch_for_station_matching():
     assert not correlation["unmatched_packets"]
 
 
+def test_auth_backed_candidate_wins_over_assoc_only_tie():
+    ap = "00:00:00:00:00:a1"
+    assoc_only = verify.RoamTransaction(
+        sta="00:00:00:00:00:01",
+        ap=ap,
+        auth_epoch=None,
+        assoc_epoch=102.0,
+        auth_number=None,
+        assoc_number=1,
+        auth_basis=None,
+        gap_ms=None,
+        pcap_total_ms=None,
+    )
+    auth_backed = transaction(sta="00:00:00:00:00:02", ap=ap, epoch=102.0)
+    logs = {
+        "one": [
+            verify.StationRoam(
+                "one", 1, ap, 100.0, 100.1, 100.0, False, ""
+            )
+        ]
+    }
+
+    bindings, matrix = verify.bind_stations(logs, [assoc_only, auth_backed])
+
+    assert bindings["one"].sta == auth_backed.sta
+    assert matrix["one"][auth_backed.sta].matched == 1
+    assert matrix["one"][assoc_only.sta].matched == 0
+
+
+def test_assoc_only_ambiguous_auto_binding_requires_explicit_bind():
+    ap = "00:00:00:00:00:a1"
+    packets = [
+        verify.RoamTransaction(
+            sta=f"00:00:00:00:00:0{index}",
+            ap=ap,
+            auth_epoch=None,
+            assoc_epoch=102.0,
+            auth_number=None,
+            assoc_number=index,
+            auth_basis=None,
+            gap_ms=None,
+            pcap_total_ms=None,
+        )
+        for index in (1, 2)
+    ]
+    logs = {
+        "one": [
+            verify.StationRoam(
+                "one", 1, ap, 100.0, 100.1, 100.0, False, ""
+            )
+        ]
+    }
+
+    with pytest.raises(RuntimeError, match=r"Auth 없는 STA 후보가 모호함.*--bind"):
+        verify.bind_stations(logs, packets)
+
+    bindings, _ = verify.bind_stations(
+        logs, packets, explicit={"one": packets[1].sta}
+    )
+    assert bindings["one"].sta == packets[1].sta
+
+
+def test_auto_binding_rejects_assignment_with_zero_evidence():
+    sta1, sta2 = "00:00:00:00:00:01", "00:00:00:00:00:02"
+    ap, other_ap = "00:00:00:00:00:a1", "00:00:00:00:00:a2"
+    packets = [transaction(sta=sta1, ap=ap, epoch=102.0)]
+    packets.append(transaction(sta=sta2, ap=other_ap, epoch=500.0))
+    same_log = verify.StationRoam(
+        "", 1, ap, 100.0, 100.1, 100.0, False, ""
+    )
+    logs = {"one": [same_log], "two": [same_log]}
+
+    with pytest.raises(RuntimeError, match=r"고유한 근거가 없다.*--bind"):
+        verify.bind_stations(logs, packets)
+
+
 def test_station_binding_learns_large_clock_offset():
     sta, ap = "00:00:00:00:00:01", "00:00:00:00:00:a1"
     packets = [
