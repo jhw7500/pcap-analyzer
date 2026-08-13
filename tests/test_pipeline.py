@@ -1230,6 +1230,32 @@ class TestLossJudgedByWiredGroundTruth:
         assert "Ping Timeout/NG 10.0%" in issues[0]["msg"]
         assert "Ping Loss" not in issues[0]["msg"]
 
+    def test_late_only_timeout_uses_late_requests_as_issue_evidence(self):
+        """물리 손실 0건이어도 지연 request 프레임이 Timeout/NG의 근거가 된다."""
+        structured = self._structured(
+            wireless_loss=0.0,
+            wireless_loss_items=0,
+            gt={
+                "total": 100, "ok": 90, "ng": 10, "loss_pct": 10.0,
+                "late_count": 10, "unanswered_count": 0,
+                "reply_timeout_sec": 1.0,
+            },
+        )
+        structured["ping"]["full_list"] = (
+            [{"status": "late", "req_num": 3000 + i, "epoch": 2200.0 + i}
+             for i in range(10)]
+            + [{"status": "matched", "req_num": 4000 + i, "epoch": 2300.0 + i}
+               for i in range(90)]
+        )
+
+        d = _structured_diagnosis(structured)
+        issues = [i for i in d["issues"] if i.get("signal_type") == "high_loss"]
+        assert len(issues) == 1
+        assert issues[0]["frame_refs"] == list(range(3000, 3010))
+        assert issues[0]["time_window"] == {
+            "start_epoch": 2200.0, "end_epoch": 2209.0,
+        }
+
     def test_legacy_gt_keeps_physical_loss_metric_name(self):
         d = _structured_diagnosis(self._structured(
             gt={"total": 100, "ok": 90, "ng": 10, "loss_pct": 10.0},

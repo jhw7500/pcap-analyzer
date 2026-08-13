@@ -123,6 +123,18 @@ def test_timeout_aware_wired_chart_uses_observed_rtts():
     assert "Ping Timeout/NG" in src
 
 
+def test_timeout_aware_wired_chart_relabels_streaks():
+    """지연 응답도 포함한 유선 streak를 물리 손실이라고 표시하지 않는다."""
+    from pathlib import Path
+
+    src = Path("static/js/charts.js").read_text(encoding="utf-8")
+    template = Path("templates/analysis.html").read_text(encoding="utf-8")
+    assert "compareTimeout ? '연속 Timeout/NG 구간' : '연속 손실 구간'" in src
+    assert "const streakKind = gt?.reply_timeout_sec != null ? 'Timeout/NG' : '손실';" in src
+    assert 'id="ping-streak-description"' in template
+    assert "인접 Timeout/NG 간격 ≤2초" in src
+
+
 def test_trailing_unanswered_dropped_with_warning(tmp_path, monkeypatch):
     """캡처 끝이 **확인된** 경우, 그 끝에 붙은 꼬리 무응답은 NG로 세지 않는다."""
     body = (

@@ -14,6 +14,7 @@ from ..core.merge import MergeResult
 from ..core.models import Frame
 from ..core.ping_matching import (
     DEFAULT_REPLY_TIMEOUT_SEC,
+    LATE_STATUS,
     PAIRED_STATUSES,
     PING_MATCH_WINDOW_SEC,
     build_ping_matches,
@@ -1828,11 +1829,18 @@ def _structured_diagnosis(
     # 건강도와 **같은 값**으로 판정한다 — 점수는 유선 확정으로 계산해 놓고 이슈만
     # 무선 관측으로 올리면, 리포트가 "손실 96점"과 "Ping Loss 8.24% high"를 나란히
     # 말하는 자기모순이 된다. 근거 프레임은 무선에서만 소싱할 수 있으므로(유선
-    # frame.number를 섞으면 프레임 테이블 조회가 깨진다) 무선 손실 근거가 없으면
-    # `_add_net_issue`가 이 이슈를 드롭한다 — 유선 확정 손실의 상세는
+    # frame.number를 섞으면 프레임 테이블 조회가 깨진다). 물리 손실 판정은 무선
+    # 손실 request를, timeout-aware 판정은 무선 손실+late request를 근거로 쓴다.
+    # 둘 다 없으면 `_add_net_issue`가 드롭하며 유선 상세는
     # `_ground_truth_issue_candidates`가 streak별로 따로 낸다.
     if loss_pct_used is not None and loss_pct_used > LOSS_DANGER_PCT:
-        refs, window = ev.ping_loss_evidence(ping_loss_items)
+        evidence_items = ping_loss_items
+        if loss_metric == LOSS_METRIC_TIMEOUT_NG:
+            evidence_items = ping_loss_items + [
+                item for item in _ping_pairs(ping)
+                if item.get("status") == LATE_STATUS
+            ]
+        refs, window = ev.ping_loss_evidence(evidence_items)
         basis_label = LOSS_BASIS_LABELS.get(loss_basis, "")
         metric_label = LOSS_METRIC_LABELS.get(loss_metric, "Ping Loss")
         _add_net_issue(

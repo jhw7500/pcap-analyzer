@@ -1125,7 +1125,7 @@
                 <div class="${gt.ng > 0 ? 'text-red-400' : 'text-green-400'}">${gt.ng.toLocaleString()}건 (${gt.loss_pct}%)</div></div>
               <div><div class="text-gray-400">전체 요청</div><div>${gt.total.toLocaleString()}건</div></div>
               <div><div class="text-gray-400">${wirelessLossLabel}</div><div>${wirelessLoss}</div></div>
-              <div><div class="text-gray-400">연속 손실 구간</div><div>${(gt.streaks || []).length}곳</div></div>
+              <div><div class="text-gray-400">${compareTimeout ? '연속 Timeout/NG 구간' : '연속 손실 구간'}</div><div>${(gt.streaks || []).length}곳</div></div>
             </div>
             <p class="text-gray-500 text-xs mt-2">
               ${compareTimeout
@@ -1622,10 +1622,14 @@
         const retryWrap = document.getElementById('ping-filter-retry-wrap');
         const obsDetailsEl = document.getElementById('ping-observations-details');
         const streakSrcLabel = document.getElementById('ping-streak-src-label');
+        const streakDescription = document.getElementById('ping-streak-description');
         if (isWired) {
             renderPingStreaksWired();
             renderPingFullTableWired();
             if (streakSrcLabel) streakSrcLabel.textContent = ' (유선 확정)';
+            if (streakDescription) streakDescription.textContent = gt.reply_timeout_sec != null
+                ? '인접 Timeout/NG 간격 ≤2초로 2건 이상 이어진 구간을 대상별로 분리합니다.'
+                : '인접 손실 간격 ≤2초로 2건 이상 이어진 구간을 대상별로 분리합니다.';
             if (flowWrap) flowWrap.classList.add('hidden');
             if (retryWrap) retryWrap.classList.add('hidden');
             if (obsDetailsEl) obsDetailsEl.classList.add('hidden');
@@ -1633,6 +1637,8 @@
             renderPingStreaksWireless();
             renderPingFullTable();
             if (streakSrcLabel) streakSrcLabel.textContent = '';
+            if (streakDescription) streakDescription.textContent =
+                '인접 손실 간격 ≤2초로 2건 이상 이어진 구간을 장치(흐름)별로 분리 — 전역 타임라인과 달리 장치가 섞이지 않습니다.';
             if (flowWrap) flowWrap.classList.remove('hidden');
             if (retryWrap) retryWrap.classList.remove('hidden');
             if (obsDetailsEl) obsDetailsEl.classList.remove('hidden');
@@ -1970,8 +1976,9 @@
     function renderPingStreaksWired() {
         if (!streakTbody) return;
         const streaks = (gt && gt.streaks) || [];
+        const streakKind = gt?.reply_timeout_sec != null ? 'Timeout/NG' : '손실';
         if (!streaks.length) {
-            streakTbody.innerHTML = '<tr><td colspan="6" class="text-gray-500 text-center py-6">유선 연속 손실 구간 없음 (산발적 발생)</td></tr>';
+            streakTbody.innerHTML = `<tr><td colspan="6" class="text-gray-500 text-center py-6">유선 연속 ${streakKind} 구간 없음 (산발적 발생)</td></tr>`;
             return;
         }
         const fmtE = e => (typeof e === 'number') ? new Date(e * 1000).toLocaleTimeString('en-GB') : '-';
