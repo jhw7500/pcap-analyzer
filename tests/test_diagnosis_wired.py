@@ -200,6 +200,17 @@ def test_candidate_without_anomaly_uses_normal_traffic_as_refs():
     assert "이상 징후 없음" in cands[0]["issue"]["msg"]
 
 
+def test_timeout_aware_candidate_uses_timeout_ng_category():
+    """Timeout 판정 이슈의 category와 본문 용어를 같은 이름으로 유지한다."""
+    gt = {**GT, "reply_timeout_sec": 1.0}
+    frames = [_ping_anchor(number=7, epoch=1005.2)]
+
+    candidate = _ground_truth_issue_candidates(gt, frames)[0]
+
+    assert candidate["issue"]["category"] == "Ping Timeout/NG"
+    assert "유선 Ping Timeout/NG" in candidate["issue"]["msg"]
+
+
 def test_no_frames_in_window_drops_candidate():
     """구간에 무선 프레임이 아예 없으면(캡처 구멍) 근거를 못 대므로 후보 없음."""
     frames = [make_frame(number=9, epoch=2000.0)]

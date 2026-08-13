@@ -123,6 +123,15 @@ def test_timeout_aware_wired_chart_uses_observed_rtts():
     assert "Ping Timeout/NG" in src
 
 
+def test_timeout_aware_wireless_chart_labels_observed_rtts():
+    """지연 응답을 포함하는 무선 KPI는 관측 RTT임을 라벨에 명시한다."""
+    from pathlib import Path
+
+    src = Path("static/js/charts.js").read_text(encoding="utf-8")
+    assert "{ label: '평균 관측 RTT', value: s.avg" in src
+    assert "{ label: 'P95 관측 RTT', value: s.p95" in src
+
+
 def test_timeout_aware_wired_chart_relabels_streaks():
     """지연 응답도 포함한 유선 streak를 물리 손실이라고 표시하지 않는다."""
     from pathlib import Path

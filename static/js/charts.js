@@ -1148,8 +1148,8 @@
                 { label: '지연 응답', value: late + '건', color: late > 0 ? 'text-orange-400' : '' },
                 { label: '무응답 (Loss)', value: s.loss_count + '건 (' + s.loss_pct + '%)',
                   color: s.loss_count > 0 ? 'text-red-400' : '' },
-                { label: '평균 RTT', value: s.avg != null ? s.avg + 'ms' : '—', color: s.avg == null ? 'text-gray-500' : '' },
-                { label: 'P95 RTT', value: s.p95 != null ? s.p95 + 'ms' : '—', color: s.p95 == null ? 'text-gray-500' : (s.p95 > 10 ? 'text-yellow-400' : '') },
+                { label: '평균 관측 RTT', value: s.avg != null ? s.avg + 'ms' : '—', color: s.avg == null ? 'text-gray-500' : '' },
+                { label: 'P95 관측 RTT', value: s.p95 != null ? s.p95 + 'ms' : '—', color: s.p95 == null ? 'text-gray-500' : (s.p95 > 10 ? 'text-yellow-400' : '') },
             ] : [
                 { label: 'Ping 응답', value: s.count + '건', color: '' },
                 { label: 'Ping Loss', value: s.loss_count + '건 (' + s.loss_pct + '%)', color: s.loss_count > 0 ? 'text-red-400' : '' },

@@ -451,6 +451,39 @@ def test_pair_exchanges_can_preserve_late_reply_separately():
     assert ex.late_rtt == pytest.approx(1.5)
 
 
+def test_pair_exchanges_late_reply_does_not_cross_next_same_key_request():
+    """재사용된 seq의 다음 요청 응답을 이전 요청의 지연 응답으로 빌리지 않는다."""
+    frames = [
+        (1.0, "10.0.0.1", "10.0.0.2", "8", "7", "1", ""),
+        (11.0, "10.0.0.1", "10.0.0.2", "8", "7", "1", ""),
+        (11.5, "10.0.0.2", "10.0.0.1", "0", "7", "1", ""),
+    ]
+
+    first, second = ep.pair_exchanges(
+        frames, "10.0.0.1", timeout=1.0, late_window=30.0
+    )
+
+    assert first.rtt is None
+    assert first.late_rtt is None
+    assert second.rtt == pytest.approx(0.5)
+
+
+def test_pair_exchanges_on_time_reply_can_cover_retry_copy():
+    """1초 안의 동일 키 중복 요청은 기존 무선 retry 사본 계약을 유지한다."""
+    frames = [
+        (1.0, "10.0.0.1", "10.0.0.2", "8", "7", "1", ""),
+        (1.1, "10.0.0.1", "10.0.0.2", "8", "7", "1", ""),
+        (1.5, "10.0.0.2", "10.0.0.1", "0", "7", "1", ""),
+    ]
+
+    first, second = ep.pair_exchanges(
+        frames, "10.0.0.1", timeout=1.0, late_window=30.0
+    )
+
+    assert first.rtt == pytest.approx(0.5)
+    assert second.rtt == pytest.approx(0.4)
+
+
 def test_pair_exchanges_does_not_borrow_other_targets_reply():
     """같은 (ident, seq) 라도 상대 IP 가 다르면 남의 응답이다."""
     frames = [

@@ -1,7 +1,7 @@
 """프레임 사전 인덱싱 — O(N) 한 번으로 모든 분석 모듈이 O(1)~O(log N) 접근 가능"""
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
-from typing import List, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 from .models import Frame
 
 
@@ -11,9 +11,17 @@ class FrameIndex:
     한 번 O(N)으로 구축하면 이후 접근은 O(1) 또는 O(log N).
     """
 
-    def __init__(self, frames: List[Frame], roles: Dict):
+    def __init__(
+        self,
+        frames: List[Frame],
+        roles: Dict,
+        analysis_context: Dict[str, Any] | None = None,
+    ):
         self.frames = frames
         self.epochs = [f.epoch for f in frames]
+        # 모든 분석 모듈은 analyze(frames, roles, index) 고정 시그니처를 쓴다.
+        # 실행별 옵션은 모듈 인자를 늘리지 않고 이 공용 컨텍스트로 전달한다.
+        self.analysis_context = dict(analysis_context or {})
 
         # STA별 프레임 인덱스
         self.by_sta: Dict[str, List[Frame]] = defaultdict(list)

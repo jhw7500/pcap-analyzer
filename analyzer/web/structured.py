@@ -1358,7 +1358,7 @@ def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None, signal_stas=N
     없어 이슈를 만들지 않는다(근거 없는 결론 금지) — 알려진 한계.
     """
     timeout_aware = "reply_timeout_sec" in gt
-    issue_category = "Ping Timeout" if timeout_aware else "유선 손실"
+    issue_category = "Ping Timeout/NG" if timeout_aware else "유선 손실"
     issue_head = "유선 Ping Timeout/NG" if timeout_aware else "유선 확정 손실"
     signal_cliffs = signal_cliffs if isinstance(signal_cliffs, dict) else {}
     signal_stas = signal_stas if isinstance(signal_stas, dict) else {}

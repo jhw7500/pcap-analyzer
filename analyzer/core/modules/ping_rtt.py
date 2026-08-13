@@ -7,9 +7,14 @@ from ..ping_matching import DEFAULT_REPLY_TIMEOUT_SEC, LATE_STATUS, build_ping_m
 
 def analyze(
     frames: List[Frame], roles: Dict[str, Dict[str, Any]], index=None,
-    reply_timeout_sec: float = DEFAULT_REPLY_TIMEOUT_SEC,
 ) -> AnalysisSection:
     lines = []
+
+    reply_timeout_sec = DEFAULT_REPLY_TIMEOUT_SEC
+    if index is not None:
+        reply_timeout_sec = index.analysis_context.get(
+            "ping_timeout_sec", DEFAULT_REPLY_TIMEOUT_SEC
+        )
 
     ping = build_ping_matches(frames, roles, reply_timeout_sec=reply_timeout_sec)
     pairs = ping.get("pairs", [])

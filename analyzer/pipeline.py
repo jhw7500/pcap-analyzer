@@ -434,7 +434,11 @@ def run_analysis(
         return {"cancelled": True}
 
     _progress("프레임 인덱싱 중...", 40)
-    index = FrameIndex(frames, roles)
+    index = FrameIndex(
+        frames,
+        roles,
+        analysis_context={"ping_timeout_sec": ping_timeout_sec},
+    )
 
     _progress("분석 모듈 실행 중...", 50)
 
@@ -465,14 +469,7 @@ def run_analysis(
             roaming_text_index = len(text_sections)
             text_sections.append(None)
             continue
-        if mod is ping_rtt:
-            text_sections.append(
-                mod.analyze(
-                    frames, roles, index, reply_timeout_sec=ping_timeout_sec
-                )
-            )
-        else:
-            text_sections.append(mod.analyze(frames, roles, index))
+        text_sections.append(mod.analyze(frames, roles, index))
 
     # 구조화된 데이터 (웹 시각화용) — 90→99% 단계별 진행
     overview_section = text_sections[0]
