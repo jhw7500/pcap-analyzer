@@ -15,10 +15,11 @@ from analyzer.core.thresholds import (
     RTT_DANGER_MS,
     RTT_WARN_MS,
 )
+from analyzer.core.modules.roaming import STA_SLOW_POLICY
 from .provider import call_ai
 from .prompts import build_review_prompt
 
-SYSTEM_PROMPT = (
+_SYSTEM_PROMPT_HEAD = (
     "당신은 자동차 WiFi 네트워크 전문 분석가입니다. "
     "대상 칩셋은 Marvell 88Q9098 (IEEE 802.11a/b/g/n/ac/ax, 2x2 MIMO, "
     "최대 2.4GHz 600Mbps · 5GHz 1.2Gbps). "
@@ -30,8 +31,9 @@ SYSTEM_PROMPT = (
     f"- 로밍 gap_ms: ≤{ROAM_GAP_WARN_MS}ms 양호 / "
     f"{ROAM_GAP_WARN_MS}~{ROAM_GAP_DANGER_MS}ms 주의 / "
     f">{ROAM_GAP_DANGER_MS}ms 위험(전체 소요의 하한)\n"
-    f"- 느린 로밍: STA 로그 매칭 시 ROAM 명령→CONNECTED >{STA_ROAM_SLOW_MS}ms; "
-    f"로그 미매칭 시 pcap Auth→4-way 완료 >{ROAM_GAP_DANGER_MS}ms\n"
+)
+
+_SYSTEM_PROMPT_TAIL = (
     f"- Ping RTT: avg ≤{RTT_WARN_MS}ms 양호 / {RTT_WARN_MS}~{RTT_DANGER_MS}ms 주의"
     f" / >{RTT_DANGER_MS}ms 위험\n"
     f"- Ping loss: ≤{LOSS_WARN_PCT}% 양호 / {LOSS_WARN_PCT}~{LOSS_DANGER_PCT}% 주의"
@@ -58,6 +60,39 @@ SYSTEM_PROMPT = (
     "correlation이 0건이면 이 섹션 자체를 생략하고 1~5번 항목만 작성."
 )
 
+
+def build_system_prompt(structured: dict) -> str:
+    """분석 당시 로밍 판정 정책과 일치하는 SYSTEM 프롬프트를 만든다.
+
+    구버전 결과에는 ``slow_policy``가 없고 저장 당시 pcap 전체 소요 100ms만으로
+    판정했다. 여기에 신규 STA 150ms 우선 정책을 주입하면 USER 프롬프트와 모순되므로
+    정책 키가 명시된 신규 결과에만 신규 문구를 사용한다.
+    """
+    roaming = structured.get("roaming") if isinstance(structured, dict) else None
+    sta_policy = (
+        isinstance(roaming, dict)
+        and roaming.get("slow_policy") == STA_SLOW_POLICY
+    )
+    if sta_policy:
+        slow_rule = (
+            f"- 느린 로밍: STA 로그 매칭 시 ROAM 명령→CONNECTED "
+            f">{STA_ROAM_SLOW_MS}ms; 로그 미매칭 시 pcap Auth→4-way 완료 "
+            f">{ROAM_GAP_DANGER_MS}ms\n"
+        )
+    else:
+        slow_rule = (
+            f"- 느린 로밍: pcap Auth→4-way 완료 >{ROAM_GAP_DANGER_MS}ms "
+            "(구버전 저장 결과 정책; STA 체감값으로 재판정하지 않음)\n"
+        )
+    return _SYSTEM_PROMPT_HEAD + slow_rule + _SYSTEM_PROMPT_TAIL
+
+
+# 외부 import 하위호환과 임계값 기준 테스트용. 신규 분석의 canonical 정책을 나타낸다.
+SYSTEM_PROMPT = build_system_prompt(
+    {"roaming": {"slow_policy": STA_SLOW_POLICY}}
+)
+
+
 async def run_review(structured: dict) -> dict:
     """AI 리뷰를 실행하고 결과를 반환한다."""
     provider = config.get("ai_provider")
@@ -71,5 +106,7 @@ async def run_review(structured: dict) -> dict:
         return {"error": "API 키가 없습니다. 설정 페이지에서 입력하세요."}
 
     prompt = build_review_prompt(structured)
-    response = await call_ai(provider, api_key, model, prompt, SYSTEM_PROMPT)
+    response = await call_ai(
+        provider, api_key, model, prompt, build_system_prompt(structured)
+    )
     return {"review": response, "prompt_used": prompt}

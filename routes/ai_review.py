@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 import config
 from analyzer.errors import ErrorCode, error_payload
 from ai.prompts import build_review_prompt
-from ai.reviewer import SYSTEM_PROMPT, run_review
+from ai.reviewer import build_system_prompt, run_review
 
 router = APIRouter()
 
@@ -32,7 +32,7 @@ async def ai_prompt_json(analysis_id: str):
     assert result is not None
     structured = result.get("structured", {})
     return JSONResponse({
-        "system": SYSTEM_PROMPT,
+        "system": build_system_prompt(structured),
         "prompt": build_review_prompt(structured),
     })
 
@@ -45,7 +45,12 @@ async def ai_prompt_text(analysis_id: str):
         return err
     assert result is not None
     structured = result.get("structured", {})
-    text = "[SYSTEM]\n" + SYSTEM_PROMPT + "\n\n[USER]\n" + build_review_prompt(structured)
+    text = (
+        "[SYSTEM]\n"
+        + build_system_prompt(structured)
+        + "\n\n[USER]\n"
+        + build_review_prompt(structured)
+    )
     return PlainTextResponse(text, media_type="text/plain; charset=utf-8")
 
 

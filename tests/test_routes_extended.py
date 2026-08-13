@@ -5,6 +5,7 @@ import threading
 from fastapi.testclient import TestClient
 
 from app import app
+from analyzer.core.modules.roaming import STA_SLOW_POLICY
 from tests.conftest import remove_analysis_files
 import config
 from routes.upload import _sanitize_job_id, _jobs, _jobs_lock
@@ -247,6 +248,45 @@ class TestAnalysisWithData:
             resp = client.get("/")
             assert resp.status_code == 200
             assert "test.pcap" in resp.text
+        finally:
+            remove_analysis_files(path)
+
+
+class TestAiPromptRoamingPolicy:
+    """내보내는 AI 프롬프트도 분석 당시 로밍 정책과 일치해야 한다."""
+
+    def test_legacy_prompt_endpoints_use_pcap_total_policy(self):
+        fake_id, path = _create_fake_analysis()
+        try:
+            json_resp = client.get(f"/api/ai/prompt/{fake_id}")
+            assert json_resp.status_code == 200
+            assert "구버전 저장 결과 정책" in json_resp.json()["system"]
+            assert "STA 체감값으로 재판정하지 않음" in json_resp.json()["system"]
+
+            text_resp = client.get(f"/api/ai/prompt/{fake_id}/text")
+            assert text_resp.status_code == 200
+            assert "구버전 저장 결과 정책" in text_resp.text
+            assert "STA 로그 매칭 시 ROAM 명령" not in text_resp.text
+        finally:
+            remove_analysis_files(path)
+
+    def test_new_prompt_endpoints_use_sta_first_policy(self):
+        fake_id, path = _create_fake_analysis()
+        try:
+            result = json.loads(path.read_text(encoding="utf-8"))
+            result["structured"]["roaming"]["slow_policy"] = STA_SLOW_POLICY
+            path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+
+            json_resp = client.get(f"/api/ai/prompt/{fake_id}")
+            assert json_resp.status_code == 200
+            system = json_resp.json()["system"]
+            assert "STA 로그 매칭 시 ROAM 명령→CONNECTED >150ms" in system
+            assert "로그 미매칭 시 pcap Auth→4-way 완료 >100ms" in system
+            assert "구버전 저장 결과 정책" not in system
+
+            text_resp = client.get(f"/api/ai/prompt/{fake_id}/text")
+            assert text_resp.status_code == 200
+            assert "STA 로그 매칭 시 ROAM 명령→CONNECTED >150ms" in text_resp.text
         finally:
             remove_analysis_files(path)
 
