@@ -58,6 +58,18 @@ class TestStructuredSignal:
 
 
 class TestStructuredPing:
+    def test_custom_timeout_is_preserved_and_classifies_late(self):
+        frames = [
+            make_frame(number=1, epoch=1000, icmp_type="8", ip_src="10.0.0.1",
+                       ip_dst="10.0.0.2", icmp_seq="1"),
+            make_frame(number=2, epoch=1001.5, icmp_type="0", ip_src="10.0.0.2",
+                       ip_dst="10.0.0.1", icmp_seq="1"),
+        ]
+        result = _structured_ping(frames, SAMPLE_ROLES, reply_timeout_sec=1.0)
+        assert result["stats"]["reply_timeout_sec"] == 1.0
+        assert result["stats"]["late_count"] == 1
+        assert ping_pairs(result)[0]["status"] == "late"
+
     def test_matched_pair(self):
         frames = [
             make_frame(

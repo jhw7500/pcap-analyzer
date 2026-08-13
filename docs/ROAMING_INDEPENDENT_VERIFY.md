@@ -120,11 +120,11 @@ python3 scripts/roaming_independent_verify.py \
 모든 손실값은 분석기가 건강도 판정에 실제 사용한 `wired_gt` 기준이다. 무선 관측 손실은
 모니터 캡처 누락이 섞이므로 별도 관측값으로 남지만 위 표의 판정 손실에는 사용하지 않았다.
 
-TEST14의 프레임·건강도·Retry·손실은 전체 분석 산출물 `result.json`에서, 최종 로밍
-값은 수정 후 실제 분석 로직을 돌린 `fix-validation.json`에서 가져왔다. 수정 전 전체
-산출물은 중복 association 때문에 `884 / 12 / 882 / 2 / STA 880`이었고, 수정 후
-`882 / 12 / 882 / 0 / STA 880`이 됐다. 전체 분석을 다시 생성하지 않았다는 점을
-숨기지 않기 위해 두 산출물의 출처를 구분한다.
+TEST14의 프레임·건강도·Retry·손실·로밍은 수정 후 11개 모듈을 모두 다시 실행한
+`analyzer-result-current.json`에서 가져왔다. 이 전체 산출물은
+`882 / 12 / 882 / 0 / STA 880`이며 독립 검증과 요약·개별 이벤트 차이가 0건이다.
+수정 전 `result.json`의 `884 / 12 / 882 / 2 / STA 880`은 중복 association 회귀를
+검출하는 negative control로 계속 보존한다.
 
 ## 분석기와 독립 검증기 최종 대조
 
@@ -178,7 +178,8 @@ analyzer result의 roaming sequence를 독립 검증기가 읽어 집계한 값�
 ## TEST14 기준 결과
 
 2026-08-12에 `tmp/20260723_CFI/TEST14`의 주 무선 3조각, DFK 7조각, 1~3호기
-`wpa.log`를 입력하여 확인했다.
+`wpa.log`를 입력해 최초 검증했고, 2026-08-13에 수정된 현재 `main`으로 11개
+전체 모듈과 strict 독립 비교를 다시 실행했다.
 
 | 항목 | 독립 검증 결과 |
 |---|---:|
@@ -189,13 +190,17 @@ analyzer result의 roaming sequence를 독립 검증기가 읽어 집계한 값�
 | 판정 가능 / 불가 | 882 / 0 |
 | STA 체감 p50 / p95 | 111ms / 139ms |
 
-수정 후 표적 분석 결과 `tmp/test14_validation/fix-validation.json`과 요약값이 모두
-일치했다. 반대로 수정 전 전체 결과에는 분석기 전용 이벤트 2건이 남아 총 884건,
+수정 후 표적 분석 `fix-validation.json`과 11개 전체 모듈 재분석
+`analyzer-result-current.json` 모두 독립 원장과 요약·개별 이벤트가 일치했다.
+반대로 수정 전 전체 결과에는 분석기 전용 이벤트 2건이 남아 총 884건,
 판정 불가 2건으로 보고되었고, 독립 비교기가 이 차이를 검출했다. 즉 현재 결과 일치뿐
 아니라 발견했던 중복 계수 회귀도 실제 데이터에서 탐지할 수 있다.
 
 재현 산출물(로컬, git 제외):
 
+- `tmp/test14_validation/analyzer-result-current.json`
+- `tmp/test14_validation/independent-current-result.json`
+- `tmp/test14_validation/independent-current-result.md`
 - `tmp/test14_validation/independent-result.json`
 - `tmp/test14_validation/independent-result.md`
 - `tmp/test14_validation/web-independent-result.json` (웹 어댑터 경로)

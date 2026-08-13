@@ -103,6 +103,22 @@ def test_wired_filters_forwarded_to_build_ground_truth(monkeypatch):
     assert captured["time_start"] == "2026-01-01 10:00:00"
     assert captured["time_end"] == "2026-01-01 11:00:00"
     assert captured["ip_filter"] == "10.0.0.2"
+    assert captured["reply_timeout"] == 1.0
+
+
+def test_custom_ping_timeout_forwarded_to_ground_truth(monkeypatch):
+    captured = {}
+
+    def _fake_build_ground_truth(_pcap_path, **kwargs):
+        captured.update(kwargs)
+        return dict(GT_OK)
+
+    _patch_common(monkeypatch, dict(GT_OK))
+    monkeypatch.setattr(pipeline, "build_ground_truth", _fake_build_ground_truth)
+    pipeline.run_analysis(
+        "wireless.pcapng", wired_path="wired.pcapng", ping_timeout_sec=2.5
+    )
+    assert captured["reply_timeout"] == 2.5
 
 
 def test_upstream_topology_scopes_to_target_sta(monkeypatch):

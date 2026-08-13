@@ -2,15 +2,16 @@
 
 from typing import Any, Dict, List
 from ..models import Frame, AnalysisSection
-from ..ping_matching import build_ping_matches
+from ..ping_matching import DEFAULT_REPLY_TIMEOUT_SEC, LATE_STATUS, build_ping_matches
 
 
 def analyze(
-    frames: List[Frame], roles: Dict[str, Dict[str, Any]], index=None
+    frames: List[Frame], roles: Dict[str, Dict[str, Any]], index=None,
+    reply_timeout_sec: float = DEFAULT_REPLY_TIMEOUT_SEC,
 ) -> AnalysisSection:
     lines = []
 
-    ping = build_ping_matches(frames, roles)
+    ping = build_ping_matches(frames, roles, reply_timeout_sec=reply_timeout_sec)
     pairs = ping.get("pairs", [])
 
     if not pairs:
@@ -26,7 +27,12 @@ def analyze(
     lines.append("-" * 85)
 
     for i, p in enumerate(pairs):
-        r = "R" if p["has_retry"] else " "
+        flags = []
+        if p["has_retry"]:
+            flags.append("R")
+        if p.get("status") == LATE_STATUS:
+            flags.append("LATE")
+        r = ",".join(flags) or " "
         lines.append(
             f"{i + 1:>3} | #{p['req_num']:>5}→#{p['reply_num']:<5} | "
             f"{p['rtt_ms']:>7.2f} | {p['src']:>14}→{p['dst']:<14} | "
@@ -61,5 +67,13 @@ def analyze(
                 f"{p['rtt_ms']:.1f}ms → {p['dst_mac']} ({p['dst']})"
             )
 
-    summary = f"ping {len(pairs)}쌍, avg {sum(rtts) / len(rtts):.1f}ms"
+    late_count = ping["stats"].get("late_count", 0)
+    lines.append(
+        f"Timeout {reply_timeout_sec:g}초: 정상 {len(pairs) - late_count}건, "
+        f"지연 응답 {late_count}건, 무응답 {ping['stats'].get('loss_count', 0)}건"
+    )
+    summary = (
+        f"ping {len(pairs)}쌍, 지연 {late_count}건"
+        f"(>{reply_timeout_sec:g}초), avg {sum(rtts) / len(rtts):.1f}ms"
+    )
     return AnalysisSection(title="5. Ping RTT 분석", lines=lines, summary=summary)

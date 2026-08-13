@@ -8,8 +8,9 @@
 ## 결과 출처와 해석
 
 - 분석기 원본: `tmp/test*_validation/analyzer-result.json`
-- TEST14 전체 분석 원본: `tmp/test14_validation/result.json`
-- TEST14 수정 후 로밍 재검증: `tmp/test14_validation/fix-validation.json`
+- TEST14 수정 후 전체 분석: `tmp/test14_validation/analyzer-result-current.json`
+- TEST14 수정 전 전체 분석(회귀 검출용): `tmp/test14_validation/result.json`
+- TEST14 수정 후 표적 로밍 재검증: `tmp/test14_validation/fix-validation.json`
 - `tmp/`는 대용량 실측 산출물이므로 git에는 포함하지 않는다. 이 문서는 해당 JSON의
   `text_sections`, `structured.diagnosis`, `structured.eapol`,
   `structured.roaming`을 요약한 추적 문서다.
@@ -156,22 +157,22 @@ TEST13·14 장시간 검증 결과는 다음과 같다.
 | 모듈 | TEST13 | TEST14 |
 |---|---:|---:|
 | 캡처 시간 | 7,215초 | 7,251초 |
-| Retry MCS | 7.0%, fallback 3,370 | 11.0%, fallback 4,211 |
-| Retry burst | 5,852건, 평균 62.2ms | 6,755건, 평균 77.2ms |
+| Retry MCS | 7.0%, fallback 3,370 | 11.0%, fallback 3,419 |
+| Retry burst | 5,852건, 평균 62.2ms | 6,191건, 평균 60.2ms |
 | 로밍 | 862건, 느림 9 | 최종 882건, 느림 12 |
-| Ping RTT | 52,954쌍, 평균 0.4ms | 없음(무선 reply 미포착) |
-| 제어 트래픽 | 152,905건 | 72,388건 |
+| Ping RTT | 52,954쌍, 평균 0.4ms | 48,506쌍, 평균 1.6ms |
+| 제어 트래픽 | 152,905건 | 164,005건 |
 | 신호 분석 대상 | STA 6대 | STA 7대 |
 | 분당 통계 | 121분, 핫스팟 0 | 122분, 핫스팟 4 |
-| 로밍 영향 | 862건 중 문제 45 | 수정 전 전체 산출물 914건 중 문제 909 |
-| 무선 Ping loss 출력 | 1,067건 | 없음(단방향이라 판정 불가) |
-| EAPOL 전체/완결/미완결 | 890 / 824 / 66 | 950 / 876 / 74 |
-| 종합 진단 summary | WARNING 6건 | WARNING 3건 |
+| 로밍 영향 | 862건 중 문제 45 | 882건 중 문제 52 |
+| 무선 Ping loss 출력 | 1,067건 | 210건 |
+| EAPOL 전체/완결/미완결 | 890 / 824 / 66 | 957 / 865 / 92 |
+| 종합 진단 summary | WARNING 6건 | WARNING 6건 |
 
-TEST14의 전체 `result.json`은 association 중복 병합 수정 전에 생성돼 로밍 섹션에
-884건·판정 불가 2건이 남아 있다. 표의 최종 882건·판정 불가 0건은 같은 분석기의
-수정 후 로밍 로직을 실행한 `fix-validation.json` 값이다. 로밍 영향 섹션을 포함한
-11개 전체 섹션은 아직 수정 후 전체 pcap으로 재생성하지 않았으므로 수정 전임을 명시했다.
+TEST14는 2026-08-13에 수정된 현재 `main`으로 11개 전체 섹션을 재생성했다.
+`analyzer-result-current.json`의 로밍 882건·느림 12건·판정 가능 882건·불가 0건·
+STA 부착 880건은 표적 검증과 독립 원장에 모두 일치했다. 수정 전 `result.json`은
+중복 association 2건을 검출하는 negative control로 보존한다.
 
 ## 분석기가 제시한 주요 진단
 
@@ -223,9 +224,9 @@ TEST14의 전체 `result.json`은 association 중복 병합 수정 전에 생성
   79.5~87.8%, 신호 급강하는 1,785~1,823건이었다. gap을 못 잰 로밍 1건도 STA 로그
   전체시간으로 판정돼 최종 판정 불가는 0건이다.
 - **TEST14:** 느린 로밍 12건은 주요 STA별 5/3/4건이었다. 특정 HE MCS retry는
-  79.7~86.7%였고 별도 STA에서 전체 Retry 23.6%, 16.4%도 high로 탐지됐다. 무선
-  캡처에는 Ping reply가 없어 무선 RTT/손실은 판정 불가지만, 유선 GT 손실 1.06%는
-  건강도 판정에 사용됐다.
+  79.7~86.7%였고 별도 STA에서 전체 Retry 23.6%, 16.4%도 high로 탐지됐다.
+  무선 캡처에서 Ping RTT 48,506쌍·무응답 request 210건을 관측했고, 건강도의 손실
+  판정은 더 신뢰할 수 있는 유선 GT 55,180회 중 585건(1.06%)을 사용했다.
 
 ## 입력 예외
 
@@ -236,5 +237,5 @@ TEST14의 전체 `result.json`은 association 중복 병합 수정 전에 생성
 - `20260723_CFI/TEST13`: DFK가 192바이트로 정상 저장되지 않아 제외했다.
 - `20260723_CFI/TEST7_1호기`: 원본 DFK 끝의 길이 0 손상 블록 때문에
   `tmp/sync3/TEST7_1호기/..._20260723160038_.pcap` 정상 동기화 사본을 사용했다.
-- `20260723_CFI/TEST14`: 위에서 설명한 대로 전체 리포트는 중복 병합 수정 전,
-  최종 로밍 결과는 수정 후 표적 실행 산출물이다.
+- `20260723_CFI/TEST14`: 수정 전 전체 `result.json`은 회귀 검출용으로 보존하고,
+  문서 표의 값은 수정 후 전체 `analyzer-result-current.json`에서 갱신했다.

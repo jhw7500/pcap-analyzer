@@ -437,6 +437,20 @@ def test_pair_exchanges_ignores_reply_beyond_timeout():
     assert ep.pair_exchanges(frames, "10.0.0.1", timeout=5.0)[0].rtt == pytest.approx(2.5)
 
 
+def test_pair_exchanges_can_preserve_late_reply_separately():
+    frames = [
+        (1.0, "10.0.0.1", "10.0.0.2", "8", "7", "1", ""),
+        (2.5, "10.0.0.2", "10.0.0.1", "0", "7", "1", ""),
+    ]
+    ex = ep.pair_exchanges(
+        frames, "10.0.0.1", timeout=1.0, late_window=30.0
+    )[0]
+    assert not ex.answered
+    assert ex.response_observed
+    assert ex.rtt is None
+    assert ex.late_rtt == pytest.approx(1.5)
+
+
 def test_pair_exchanges_does_not_borrow_other_targets_reply():
     """같은 (ident, seq) 라도 상대 IP 가 다르면 남의 응답이다."""
     frames = [

@@ -48,7 +48,9 @@ def test_counts_ok_ng_and_loss_pct(tmp_path):
     assert gt["total"] == 3 and gt["ok"] == 2 and gt["ng"] == 1
     assert gt["loss_pct"] == pytest.approx(33.33)
     assert gt["sender"] == "10.0.0.1"
-    assert gt["targets"] == {"10.0.0.2": {"total": 3, "ng": 1}}
+    assert gt["targets"] == {
+        "10.0.0.2": {"total": 3, "ng": 1, "late": 0, "unanswered": 1}
+    }
     assert gt["ng_epochs"] == [101.0]
     assert gt["trailing_dropped"] == 0
 
@@ -78,6 +80,26 @@ def test_streaks_grouped_per_target(tmp_path):
     assert st["end_epoch"] == pytest.approx(103.0)
     assert st["count"] == 3
     assert st["duration_sec"] == pytest.approx(2.0)
+
+
+def test_late_reply_is_timeout_but_separate_from_unanswered(tmp_path):
+    body = (
+        "printf '100.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        "printf '101.5\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+        "printf '102.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t2\\t\\n'\n"
+        "printf '102.1\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t2\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body), reply_timeout=1.0
+    )
+    assert gt["total"] == 2
+    assert gt["ok"] == 1
+    assert gt["ng"] == 1
+    assert gt["late_count"] == 1
+    assert gt["unanswered_count"] == 0
+    assert gt["reply_timeout_sec"] == 1.0
+    assert gt["exchanges"][0]["rtt_ms"] is None
+    assert gt["exchanges"][0]["late_rtt_ms"] == pytest.approx(1500.0)
 
 
 def test_trailing_unanswered_dropped_with_warning(tmp_path, monkeypatch):
@@ -110,6 +132,13 @@ def test_wireless_capture_returns_error(tmp_path):
 def test_missing_tshark_returns_error():
     gt = wired_ping.build_ground_truth("x.pcapng", tshark_path="/nonexistent/tshark-xyz")
     assert "tshark" in gt["error"]
+
+
+def test_invalid_reply_timeout_rejected_before_tshark():
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path="/nonexistent/tshark-xyz", reply_timeout=0
+    )
+    assert "Ping timeout" in gt["error"]
 
 
 def test_all_requests_unanswered_100_loss(tmp_path, monkeypatch):
@@ -219,7 +248,9 @@ def test_ip_filter_target_only_selects_matching_sender_and_narrows(tmp_path):
     assert "error" not in gt
     assert gt["sender"] == "10.0.0.1"
     assert gt["total"] == 1
-    assert gt["targets"] == {"10.0.0.3": {"total": 1, "ng": 0}}
+    assert gt["targets"] == {
+        "10.0.0.3": {"total": 1, "ng": 0, "late": 0, "unanswered": 0}
+    }
 
 
 def test_ip_filter_keeps_all_when_sender_listed(tmp_path):
@@ -870,7 +901,10 @@ def test_exchanges_and_rtt_stats_exposed(tmp_path):
     answered = [e for e in gt["exchanges"] if e["rtt_ms"] is not None]
     assert len(answered) == gt["ok"]
     assert all(e["rtt_ms"] > 0 for e in answered)
-    assert all(set(e) == {"epoch", "target", "rtt_ms"} for e in gt["exchanges"])
+    assert all(
+        set(e) == {"epoch", "target", "rtt_ms", "late_rtt_ms"}
+        for e in gt["exchanges"]
+    )
 
     rs = gt["rtt_stats"]
     assert rs["n"] == gt["ok"]

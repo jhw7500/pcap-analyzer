@@ -13,6 +13,8 @@ from ..core.channels import ap_channel_map, freq_to_band, freq_to_channel, parse
 from ..core.merge import MergeResult
 from ..core.models import Frame
 from ..core.ping_matching import (
+    DEFAULT_REPLY_TIMEOUT_SEC,
+    PAIRED_STATUSES,
     PING_MATCH_WINDOW_SEC,
     build_ping_matches,
     find_time_streaks,
@@ -481,7 +483,7 @@ def _ping_per_sec(full_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     각 초: 전체 {loss, matched, total, loss_pct, avg_rtt} + 장치(STA)별 동일 지표(by_dev).
     by_dev 키는 _sta_of가 IP↔장치 학습으로 식별한 장치명(미상이면 IP/'?').
     hover에서 그 시점 어느 STA가 손실/지연 주범인지 분해해 보여주기 위함.
-    matched=정상 응답, loss/loss_gap=손실. 그 외 status는 무시.
+    matched/late=응답, loss/loss_gap=손실. 그 외 status는 무시.
     """
     def _blank() -> Dict[str, Any]:
         return {"loss": 0, "matched": 0, "rtt_sum": 0.0, "rtt_count": 0}
@@ -498,7 +500,7 @@ def _ping_per_sec(full_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not isinstance(epoch, (int, float)):
             continue
         status = p.get("status")
-        if status == "matched":
+        if status in PAIRED_STATUSES:
             is_loss = False
         elif status in ("loss", "loss_gap"):
             is_loss = True
@@ -538,9 +540,12 @@ def _ping_per_sec(full_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _structured_ping(
-    frames: List[Frame], roles: Dict[str, Dict[str, Any]]
+    frames: List[Frame], roles: Dict[str, Dict[str, Any]],
+    reply_timeout_sec: float = DEFAULT_REPLY_TIMEOUT_SEC,
 ) -> Dict[str, Any]:
-    ping = build_ping_matches(frames, roles, PING_MATCH_WINDOW_SEC)
+    ping = build_ping_matches(
+        frames, roles, PING_MATCH_WINDOW_SEC, reply_timeout_sec=reply_timeout_sec
+    )
     ping["timeline"] = _ping_per_sec(ping.get("full_list", []))
     ping["loss_streaks"] = _ping_loss_streaks(ping.get("full_list", []))
     # pairs/losses는 full_list와 **같은 entry 객체**를 담은 부분수열이라
@@ -1341,6 +1346,9 @@ def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None, signal_stas=N
     테이블 조회가 깨진다. 캡처 구멍(창 안에 무선 프레임 0건)은 근거를 댈 수
     없어 이슈를 만들지 않는다(근거 없는 결론 금지) — 알려진 한계.
     """
+    timeout_aware = "reply_timeout_sec" in gt
+    issue_category = "Ping Timeout" if timeout_aware else "유선 손실"
+    issue_head = "유선 Ping Timeout/NG" if timeout_aware else "유선 확정 손실"
     signal_cliffs = signal_cliffs if isinstance(signal_cliffs, dict) else {}
     signal_stas = signal_stas if isinstance(signal_stas, dict) else {}
     mapping = _sender_sta_macs_by_target(
@@ -1428,7 +1436,7 @@ def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None, signal_stas=N
         if cliffs:
             reasons.append(f"RSSI 절벽 {len(cliffs)}건")
 
-        head = (f"유선 확정 손실 {streak.get('count')}건 "
+        head = (f"{issue_head} {streak.get('count')}건 "
                 f"({streak.get('target', '?')}, {streak.get('duration_sec')}초)")
         if reasons:
             # 매핑 실패 시 귀속이 불확실하므로 severity를 medium으로 낮춘다
@@ -1443,13 +1451,13 @@ def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None, signal_stas=N
                 anomaly.update(_cliff_frame_refs(cliffs, signal_stas, frames, index))
             refs = sorted(anomaly) if anomaly else [f.number for f in scoped]
             issue = {
-                "severity": severity, "category": "유선 손실",
+                "severity": severity, "category": issue_category,
                 "msg": f"{head} — 구간 내 무선: {', '.join(reasons)} ({sta_label})",
                 "action": "통합 타임라인에서 해당 구간의 로밍·재전송·RSSI를 확인하세요.",
             }
         else:
             issue = {
-                "severity": "medium", "category": "유선 손실",
+                "severity": "medium", "category": issue_category,
                 "msg": (f"{head} — 구간 내 무선 이상 징후 없음 "
                         f"(트래픽 {len(scoped)}건 정상, {sta_label})"),
                 "action": "무선 구간 외 원인(유선/AP 상위단)을 의심하세요.",

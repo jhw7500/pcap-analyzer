@@ -331,7 +331,7 @@
 <!-- Ping 분석 탭 -->
 <div class="tab-content hidden" id="tab-ping">
     <div id="ping-ground-truth" class="hidden mb-4"></div>
-    <div class="grid grid-cols-4 gap-4 mb-4" id="ping-kpi"></div>
+<div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-4" id="ping-kpi"></div>
     <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4">
         <div class="flex items-center justify-between mb-2">
             <h3 class="text-sm font-semibold text-gray-400">Ping RTT 시계열 <span id="ping-rtt-legend">(초록=정상, 노랑=Retry, 빨강X=Loss)</span></h3>
@@ -383,6 +383,7 @@
                     <select id="ping-filter-status" class="bg-gray-700 border border-gray-600 rounded px-2 py-1">
                         <option value="">전체</option>
                         <option value="matched">응답</option>
+                        <option value="late">지연 응답</option>
                         <option value="loss">손실</option>
                     </select>
                 </label>

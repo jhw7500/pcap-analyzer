@@ -15,6 +15,7 @@ class ErrorCode(str, Enum):
     MERGE_FAILED = "MERGE_FAILED"
     NO_FRAMES = "NO_FRAMES"
     INVALID_TIME_FILTER = "INVALID_TIME_FILTER"
+    INVALID_PING_TIMEOUT = "INVALID_PING_TIMEOUT"
     CANCELLED = "CANCELLED"
     ANALYSIS_NOT_FOUND = "ANALYSIS_NOT_FOUND"
     ANALYSIS_CORRUPTED = "ANALYSIS_CORRUPTED"
@@ -69,6 +70,10 @@ ERROR_CATALOG: Dict[ErrorCode, Dict[str, str]] = {
     ErrorCode.INVALID_TIME_FILTER: {
         "message": "시간 필터를 해석할 수 없습니다.",
         "hint": "시작/종료 시각은 \"YYYY-MM-DD HH:MM[:SS]\" 형식으로 입력하세요(초는 생략 가능).",
+    },
+    ErrorCode.INVALID_PING_TIMEOUT: {
+        "message": "Ping timeout 값이 올바르지 않습니다.",
+        "hint": "0초 초과 30초 이하의 숫자를 입력하세요. 기본값은 1초입니다.",
     },
     ErrorCode.CANCELLED: {
         "message": "분석이 취소되었습니다.",

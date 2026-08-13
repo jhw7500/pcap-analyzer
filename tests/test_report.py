@@ -673,6 +673,28 @@ def test_ping_section_with_ground_truth():
     assert text.index("유선 확정") < text.index("무선 관측")
 
 
+def test_ping_section_renders_timeout_and_late_separately():
+    structured = {"ping": {
+        "stats": {
+            "count": 98, "loss_count": 2, "loss_pct": 2.0,
+            "reply_timeout_sec": 1.0, "late_count": 3,
+            "timeout_count": 5, "timeout_pct": 5.0,
+            "avg": 4.0, "p95": 8.0,
+        },
+        "ground_truth": {
+            "total": 100, "ok": 95, "ng": 5, "loss_pct": 5.0,
+            "reply_timeout_sec": 1.0, "late_count": 3,
+            "unanswered_count": 2,
+        },
+    }}
+    text = "\n".join(_ping_section(structured))
+    assert "Timeout/NG 5건" in text
+    assert "기준 1초" in text
+    assert "지연 응답 3건" in text
+    assert "무응답 2건" in text
+    assert "Timeout 5.0%(5)" in text
+
+
 def test_ping_section_without_ground_truth_unchanged():
     structured = {"ping": {"stats": {"count": 90, "loss_pct": 10.0, "loss_count": 10,
                                      "avg": 5.2, "p95": 9.9}}}

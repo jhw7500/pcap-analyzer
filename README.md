@@ -10,6 +10,8 @@ WLAN(802.11) pcap 파일을 업로드하면 `tshark`로 프레임을 추출하�
 
 - **자동 역할 감지**: Beacon/ProbeResp/BSSID 휴리스틱으로 AP와 STA 분리
 - **11개 분석 모듈**: 개요, Retry MCS/Burst, 로밍, Ping RTT/Loss, 제어 트래픽, 신호 품질, 초당 통계, 로밍 영향, 종합 진단
+- **Ping timeout 분류**: 업로드 화면에서 제한시간(기본 1초)을 설정하고 정상 응답,
+  제한시간 이후 지연 응답, 끝까지 무응답을 각각 표시
 - **종합 진단 탭**: 네트워크 건강도 점수 + 문제점 우선순위 리스트 + STA별 상세 진단
 - **AI 리뷰**: Claude 또는 OpenAI API로 분석 결과 자동 해석 (선택)
 - **리포트 export**: 마크다운 / 인쇄용 HTML / PDF(선택)로 분석 결과 외부 공유
@@ -53,7 +55,7 @@ python3 app.py
 ### 4. 분석
 
 1. 메인 페이지에서 `.pcap`/`.pcapng`/`.cap` 파일 드래그 또는 선택
-2. (선택) WPA 암호화 해제용 SSID/passphrase, 필터(MAC/IP/시간) 입력
+2. (선택) WPA 암호화 해제용 SSID/passphrase, 필터(MAC/IP/시간), Ping timeout 입력
 3. "분석 시작" 클릭 → 진행률 표시 → 결과 페이지 자동 이동
 4. (선택) 결과 페이지에서 "AI 리뷰" 버튼으로 자동 해석
 

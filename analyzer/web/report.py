@@ -801,8 +801,13 @@ def _ping_section(structured: Dict[str, Any]) -> List[str]:
     gt = ping.get("ground_truth") or {}
     gt_lines: List[str] = []
     if isinstance(gt, dict) and isinstance(gt.get("total"), int) and gt["total"] > 0:
+        ng_label = "Timeout/NG" if "reply_timeout_sec" in gt else "손실"
         gparts = [f"요청 {gt['total']:,}",
-                  f"손실 {gt.get('ng', 0):,}건 ({gt.get('loss_pct', 0.0)}%)"]
+                  f"{ng_label} {gt.get('ng', 0):,}건 ({gt.get('loss_pct', 0.0)}%)"]
+        if "reply_timeout_sec" in gt:
+            gparts.append(f"기준 {gt['reply_timeout_sec']:g}초")
+            gparts.append(f"지연 응답 {gt.get('late_count', 0):,}건")
+            gparts.append(f"무응답 {gt.get('unanswered_count', 0):,}건")
         rs = gt.get("rtt_stats")
         if isinstance(rs, dict):
             gparts.append(f"평균 RTT {rs['avg_ms']}ms")
@@ -811,8 +816,12 @@ def _ping_section(structured: Dict[str, Any]) -> List[str]:
         streaks = gt.get("streaks") or []
         if streaks:
             worst = max(streaks, key=lambda s: s.get("count", 0))
+            streak_label = (
+                "유선 Timeout/NG 구간"
+                if "reply_timeout_sec" in gt else "유선 손실 구간"
+            )
             gt_lines.append(
-                f"- 유선 손실 구간 {len(streaks)}곳 — 최장 {worst.get('count', 0)}건"
+                f"- {streak_label} {len(streaks)}곳 — 최장 {worst.get('count', 0)}건"
                 f"/{worst.get('duration_sec', 0)}초 ({_clean_inline(str(worst.get('target', '?')))})"
             )
     # 측정 불가(ICMP 없음) 캡처 — '응답 0 · Loss 0%'는 무결점으로 오독되므로 N/A 명시
@@ -829,6 +838,13 @@ def _ping_section(structured: Dict[str, Any]) -> List[str]:
     parts = []
     if stats.get("count") is not None:
         parts.append(f"응답 {stats['count']:,}")
+    if "reply_timeout_sec" in stats:
+        parts.append(f"기준 {stats['reply_timeout_sec']:g}초")
+        parts.append(f"지연 응답 {stats.get('late_count', 0):,}")
+        parts.append(
+            f"Timeout {stats.get('timeout_pct', 0)}%"
+            f"({stats.get('timeout_count', 0):,})"
+        )
     if stats.get("loss_pct") is not None:
         lc = stats.get("loss_count")
         suffix = f"({lc:,})" if isinstance(lc, int) else ""

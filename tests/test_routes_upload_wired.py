@@ -55,6 +55,35 @@ def test_without_wired_file_wired_path_empty(mock_run, _tshark, tmp_path, monkey
 
 
 @patch("routes.upload.config.detect_tshark", return_value="tshark")
+@patch("routes.upload.run_analysis")
+def test_ping_timeout_default_and_custom_reach_pipeline(mock_run, _tshark, tmp_path, monkeypatch):
+    import config
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    mock_run.side_effect = _ok_result
+
+    resp = client.post("/api/upload", files={
+        "file": ("w.pcapng", PCAP_MAGIC, "application/octet-stream"),
+    })
+    assert resp.status_code == 200
+    assert mock_run.call_args.kwargs["ping_timeout_sec"] == 1.0
+
+    resp = client.post("/api/upload", data={"ping_timeout_sec": "2.5"}, files={
+        "file": ("w.pcapng", PCAP_MAGIC, "application/octet-stream"),
+    })
+    assert resp.status_code == 200
+    assert mock_run.call_args.kwargs["ping_timeout_sec"] == 2.5
+
+
+@patch("routes.upload.config.detect_tshark", return_value="tshark")
+def test_invalid_ping_timeout_is_rejected_before_upload(_tshark):
+    resp = client.post("/api/upload", data={"ping_timeout_sec": "0"}, files={
+        "file": ("w.pcapng", PCAP_MAGIC, "application/octet-stream"),
+    })
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "INVALID_PING_TIMEOUT"
+
+
+@patch("routes.upload.config.detect_tshark", return_value="tshark")
 def test_wired_file_invalid_magic_rejected(_tshark):
     resp = client.post("/api/upload", files={
         "file": ("w.pcapng", PCAP_MAGIC, "application/octet-stream"),

@@ -57,6 +57,12 @@
                     <input type="text" name="time_end" placeholder="YYYY-MM-DD HH:MM:SS" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
                 </div>
                 <div>
+                    <label class="block text-xs text-gray-500 mb-1">Ping timeout (초)</label>
+                    <input type="number" name="ping_timeout_sec" value="1" min="0.001" max="30" step="0.1"
+                           class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
+                    <p class="text-gray-500 text-xs mt-1">이 시간 이후 도착한 응답은 지연 응답으로 별도 표시합니다. 기본 1초.</p>
+                </div>
+                <div>
                     <label class="block text-sm text-gray-400 mb-1">유선 pcap (선택 — ping ground truth)</label>
                     <input type="file" name="wired_file" id="wired-file" multiple accept=".pcap,.pcapng,.cap"
                            data-max-mb="{{ max_upload_mb }}"
