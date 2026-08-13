@@ -205,7 +205,7 @@
         fullList.forEach(p => {
             if (typeof p.epoch !== 'number') return;
             let isLoss;
-            if (p.status === 'matched') isLoss = false;
+            if (p.status === 'matched' || p.status === 'late') isLoss = false;
             else if (p.status === 'loss' || p.status === 'loss_gap') isLoss = true;
             else return;
             const sec = Math.floor(p.epoch);  // 백엔드 _ping_per_sec의 int(epoch)와 동등(epoch는 양수)

@@ -13,6 +13,9 @@ from ..core.channels import ap_channel_map, freq_to_band, freq_to_channel, parse
 from ..core.merge import MergeResult
 from ..core.models import Frame
 from ..core.ping_matching import (
+    DEFAULT_REPLY_TIMEOUT_SEC,
+    LATE_STATUS,
+    PAIRED_STATUSES,
     PING_MATCH_WINDOW_SEC,
     build_ping_matches,
     find_time_streaks,
@@ -481,7 +484,7 @@ def _ping_per_sec(full_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     각 초: 전체 {loss, matched, total, loss_pct, avg_rtt} + 장치(STA)별 동일 지표(by_dev).
     by_dev 키는 _sta_of가 IP↔장치 학습으로 식별한 장치명(미상이면 IP/'?').
     hover에서 그 시점 어느 STA가 손실/지연 주범인지 분해해 보여주기 위함.
-    matched=정상 응답, loss/loss_gap=손실. 그 외 status는 무시.
+    matched/late=응답, loss/loss_gap=손실. 그 외 status는 무시.
     """
     def _blank() -> Dict[str, Any]:
         return {"loss": 0, "matched": 0, "rtt_sum": 0.0, "rtt_count": 0}
@@ -498,7 +501,7 @@ def _ping_per_sec(full_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not isinstance(epoch, (int, float)):
             continue
         status = p.get("status")
-        if status == "matched":
+        if status in PAIRED_STATUSES:
             is_loss = False
         elif status in ("loss", "loss_gap"):
             is_loss = True
@@ -538,9 +541,12 @@ def _ping_per_sec(full_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _structured_ping(
-    frames: List[Frame], roles: Dict[str, Dict[str, Any]]
+    frames: List[Frame], roles: Dict[str, Dict[str, Any]],
+    reply_timeout_sec: float = DEFAULT_REPLY_TIMEOUT_SEC,
 ) -> Dict[str, Any]:
-    ping = build_ping_matches(frames, roles, PING_MATCH_WINDOW_SEC)
+    ping = build_ping_matches(
+        frames, roles, PING_MATCH_WINDOW_SEC, reply_timeout_sec=reply_timeout_sec
+    )
     ping["timeline"] = _ping_per_sec(ping.get("full_list", []))
     ping["loss_streaks"] = _ping_loss_streaks(ping.get("full_list", []))
     # pairs/losses는 full_list와 **같은 entry 객체**를 담은 부분수열이라
@@ -1179,6 +1185,16 @@ LOSS_BASIS_LABELS = {
     LOSS_BASIS_WIRELESS: "무선 관측",
 }
 
+#: 건강도 ``component_scores.loss``가 실제로 뜻하는 모집단. 키는 하위호환을
+#: 위해 유지하되, 신규 유선 GT는 지연 응답도 NG로 세므로 화면/리포트가 이를
+#: 물리적 Loss라고 오표시하지 않도록 의미를 별도 직렬화한다.
+LOSS_METRIC_PHYSICAL = "loss"
+LOSS_METRIC_TIMEOUT_NG = "timeout_ng"
+LOSS_METRIC_LABELS = {
+    LOSS_METRIC_PHYSICAL: "Ping Loss",
+    LOSS_METRIC_TIMEOUT_NG: "Ping Timeout/NG",
+}
+
 
 def _loss_for_judgment(ping, wireless_loss_pct, ping_available):
     """손실 판정에 쓸 `(loss_pct, basis)`. 판정 불가면 `(None, None)`.
@@ -1341,6 +1357,9 @@ def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None, signal_stas=N
     테이블 조회가 깨진다. 캡처 구멍(창 안에 무선 프레임 0건)은 근거를 댈 수
     없어 이슈를 만들지 않는다(근거 없는 결론 금지) — 알려진 한계.
     """
+    timeout_aware = "reply_timeout_sec" in gt
+    issue_category = "Ping Timeout/NG" if timeout_aware else "유선 손실"
+    issue_head = "유선 Ping Timeout/NG" if timeout_aware else "유선 확정 손실"
     signal_cliffs = signal_cliffs if isinstance(signal_cliffs, dict) else {}
     signal_stas = signal_stas if isinstance(signal_stas, dict) else {}
     mapping = _sender_sta_macs_by_target(
@@ -1428,7 +1447,7 @@ def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None, signal_stas=N
         if cliffs:
             reasons.append(f"RSSI 절벽 {len(cliffs)}건")
 
-        head = (f"유선 확정 손실 {streak.get('count')}건 "
+        head = (f"{issue_head} {streak.get('count')}건 "
                 f"({streak.get('target', '?')}, {streak.get('duration_sec')}초)")
         if reasons:
             # 매핑 실패 시 귀속이 불확실하므로 severity를 medium으로 낮춘다
@@ -1443,13 +1462,13 @@ def _ground_truth_issue_candidates(gt, frames, signal_cliffs=None, signal_stas=N
                 anomaly.update(_cliff_frame_refs(cliffs, signal_stas, frames, index))
             refs = sorted(anomaly) if anomaly else [f.number for f in scoped]
             issue = {
-                "severity": severity, "category": "유선 손실",
+                "severity": severity, "category": issue_category,
                 "msg": f"{head} — 구간 내 무선: {', '.join(reasons)} ({sta_label})",
                 "action": "통합 타임라인에서 해당 구간의 로밍·재전송·RSSI를 확인하세요.",
             }
         else:
             issue = {
-                "severity": "medium", "category": "유선 손실",
+                "severity": "medium", "category": issue_category,
                 "msg": (f"{head} — 구간 내 무선 이상 징후 없음 "
                         f"(트래픽 {len(scoped)}건 정상, {sta_label})"),
                 "action": "무선 구간 외 원인(유선/AP 상위단)을 의심하세요.",
@@ -1533,6 +1552,16 @@ def _structured_diagnosis(
     # 무선 관측값도 버리지 않는다 — summary에 그대로 남겨 두 값의 차이가 곧
     # 캡처 커버리지를 말해준다. 어느 쪽으로 판정했는지는 `loss_basis`로 드러낸다.
     loss_pct_used, loss_basis = _loss_for_judgment(ping, loss_pct, ping_available)
+    gt = ping.get("ground_truth")
+    loss_metric = None
+    if loss_pct_used is not None:
+        loss_metric = (
+            LOSS_METRIC_TIMEOUT_NG
+            if loss_basis == LOSS_BASIS_WIRED
+            and isinstance(gt, dict)
+            and "reply_timeout_sec" in gt
+            else LOSS_METRIC_PHYSICAL
+        )
     loss_score = (
         max(0, 100 - loss_pct_used * 10) if loss_pct_used is not None else None
     )
@@ -1800,17 +1829,27 @@ def _structured_diagnosis(
     # 건강도와 **같은 값**으로 판정한다 — 점수는 유선 확정으로 계산해 놓고 이슈만
     # 무선 관측으로 올리면, 리포트가 "손실 96점"과 "Ping Loss 8.24% high"를 나란히
     # 말하는 자기모순이 된다. 근거 프레임은 무선에서만 소싱할 수 있으므로(유선
-    # frame.number를 섞으면 프레임 테이블 조회가 깨진다) 무선 손실 근거가 없으면
-    # `_add_net_issue`가 이 이슈를 드롭한다 — 유선 확정 손실의 상세는
+    # frame.number를 섞으면 프레임 테이블 조회가 깨진다). 물리 손실 판정은 무선
+    # 손실 request를, timeout-aware 판정은 무선 손실+late request를 근거로 쓴다.
+    # 둘 다 없으면 `_add_net_issue`가 드롭하며 유선 상세는
     # `_ground_truth_issue_candidates`가 streak별로 따로 낸다.
     if loss_pct_used is not None and loss_pct_used > LOSS_DANGER_PCT:
-        refs, window = ev.ping_loss_evidence(ping_loss_items)
+        evidence_items = ping_loss_items
+        if loss_metric == LOSS_METRIC_TIMEOUT_NG:
+            evidence_items = ping_loss_items + [
+                item for item in _ping_pairs(ping)
+                if item.get("status") == LATE_STATUS
+            ]
+        refs, window = ev.ping_loss_evidence(evidence_items)
         basis_label = LOSS_BASIS_LABELS.get(loss_basis, "")
+        metric_label = LOSS_METRIC_LABELS.get(loss_metric, "Ping Loss")
         _add_net_issue(
             {
                 "severity": "high",
                 "category": "Ping",
-                "msg": f"Ping Loss {loss_pct_used}%" + (f" ({basis_label})" if basis_label else ""),
+                "msg": f"{metric_label} {loss_pct_used}%" + (
+                    f" ({basis_label})" if basis_label else ""
+                ),
                 "action": "네트워크 안정성 점검, 로밍 구간 확인",
             },
             refs, window, signal_type="high_loss",
@@ -1948,6 +1987,9 @@ def _structured_diagnosis(
             # loss_pct와 다르며, 두 값의 차이가 곧 캡처 커버리지를 말해준다.
             "loss_pct_used": loss_pct_used,
             "loss_basis": loss_basis,
+            # component_scores.loss와 loss_pct_used의 표시 의미. 구버전 결과에는
+            # 키가 없고 소비자는 기존 Ping Loss 라벨로 폴백한다.
+            "loss_metric": loss_metric,
             "roaming_total": len(roam_seqs),
             "roaming_slow": len(slow_roams),
             # 느린 로밍 비율의 실제 분모와, 판정 불가 건수를 숨기지 않는다 —

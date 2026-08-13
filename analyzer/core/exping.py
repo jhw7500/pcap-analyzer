@@ -91,16 +91,22 @@ SheetRow = tuple[
 class Exchange:
     """echo request 한 건과 그 응답.
 
-    `rtt` 가 None 이면 인정 시간 안에 응답이 없었다는 뜻이다.
+    `rtt` 가 None 이면 인정 시간 안에 응답이 없었다는 뜻이다. `late_rtt`는
+    선택한 추가 관찰 창 안에서 뒤늦게 확인된 응답이며 EXPING 판정은 계속 NG다.
     """
 
     time: float
     target: str
     rtt: float | None
+    late_rtt: float | None = None
 
     @property
     def answered(self) -> bool:
         return self.rtt is not None
+
+    @property
+    def response_observed(self) -> bool:
+        return self.rtt is not None or self.late_rtt is not None
 
 
 # --------------------------------------------------------------------------
@@ -353,22 +359,30 @@ def pick_sender(frames: list[IcmpFrame]) -> str:
 
 
 def pair_exchanges(
-    frames: list[IcmpFrame], sender: str, timeout: float = DEFAULT_REPLY_TIMEOUT
+    frames: list[IcmpFrame], sender: str, timeout: float = DEFAULT_REPLY_TIMEOUT,
+    late_window: float | None = None,
 ) -> list[Exchange]:
     """요청 시각 순으로 (요청, 응답) 을 짝짓는다.
 
     응답은 (ident, seq, 상대IP) 로 찾는다. 대상이 여러 개면 EXPING 은 대상을 번갈아
     보내고 로그도 그 순서 그대로다 — 그래서 대상별로 나누지 않고 시각 순 한 줄로 낸다.
+    `late_window`를 주면 timeout 이후 그 창까지의 첫 응답을 `late_rtt`에 보존하되,
+    `answered`/EXPING OK 판정에는 포함하지 않는다.
 
-    **짝지은 응답을 목록에서 빼지 않는다.** 같은 키가 창 안에 두 번 나오면 같은 응답이
-    여러 요청에 매핑될 수 있는데, 그래도 그냥 두는 이유:
+    **짝지은 응답을 목록에서 빼지 않는다.** 같은 키가 timeout 창 안에 두 번 나오면
+    같은 응답이 여러 요청에 매핑될 수 있는데, 그래도 그냥 두는 이유:
 
     - seq 순환은 못 온다. icmp.seq 는 16비트라 관측된 8.5 ping/s 로 2시간 넘게 걸리는데,
-      응답 인정 창은 1초다.
+      정상 응답 인정 창은 기본 1초, 설정 가능한 최대도 30초다.
     - 창 안에서 키가 겹치는 경우는 모니터 캡처의 802.11 retry 사본뿐이다. 그때는 문제가
       "응답 재사용"이 아니라 **요청 행 자체가 중복**인 것이라(무선 11,224 대 유선 9,296),
       응답을 소비하도록 바꾸면 OK 9,467 → 7,967 로 되레 틀려진다.
     - 지원 대상인 유선 캡처에서는 중복 키가 0건이라 아무 차이가 없다.
+
+    단, timeout을 넘긴 지연 응답은 다음 동일 키 요청 시각을 건너지 않는다. 긴
+    `late_window` 때문에 다음 요청의 정상 응답을 이전 요청의 지연 응답으로 빌리면
+    관측 RTT 통계가 오염되므로, 어느 요청의 응답인지 불명확한 경우 보수적으로
+    이전 요청은 무응답으로 둔다.
     """
     replies: dict[tuple[str, str, str], list[float]] = {}
     for epoch, src, dst, typ, ident, seq, _wlan in frames:
@@ -381,10 +395,34 @@ def pair_exchanges(
         (f for f in frames if f[3] == ICMP_ECHO_REQUEST and f[1] == sender),
         key=lambda f: f[0],
     )
+    next_request_epochs: list[float | None] = [None] * len(requests)
+    next_by_key: dict[tuple[str, str, str], float] = {}
+    for i in range(len(requests) - 1, -1, -1):
+        epoch, _src, dst, _typ, ident, seq, _wlan = requests[i]
+        key = (ident, seq, dst)
+        next_request_epochs[i] = next_by_key.get(key)
+        next_by_key[key] = epoch
+
     out: list[Exchange] = []
-    for epoch, _src, dst, _typ, ident, seq, _wlan in requests:
-        cand = [x for x in replies.get((ident, seq, dst), ()) if epoch <= x <= epoch + timeout]
-        out.append(Exchange(epoch, dst, (cand[0] - epoch) if cand else None))
+    for request, next_request_epoch in zip(requests, next_request_epochs):
+        epoch, _src, dst, _typ, ident, seq, _wlan = request
+        horizon = max(timeout, late_window or timeout)
+        cand = [x for x in replies.get((ident, seq, dst), ()) if epoch <= x <= epoch + horizon]
+        observed_rtt = (cand[0] - epoch) if cand else None
+        if (
+            observed_rtt is not None
+            and observed_rtt > timeout
+            and next_request_epoch is not None
+            and cand[0] >= next_request_epoch
+        ):
+            observed_rtt = None
+        on_time = observed_rtt is not None and observed_rtt <= timeout
+        out.append(Exchange(
+            epoch,
+            dst,
+            observed_rtt if on_time else None,
+            observed_rtt if observed_rtt is not None and not on_time else None,
+        ))
     return out
 
 

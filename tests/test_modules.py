@@ -1,4 +1,6 @@
 """분석 모듈 11개 + compare_ap 단위 테스트."""
+import inspect
+
 from tests.conftest import make_frame, AP1, STA1, SAMPLE_ROLES
 from analyzer.core.indexer import FrameIndex
 from analyzer.core.modules import (
@@ -104,6 +106,29 @@ class TestRoaming:
 
 
 class TestPingRtt:
+    def test_analyze_keeps_common_module_signature(self):
+        assert list(inspect.signature(ping_rtt.analyze).parameters) == [
+            "frames", "roles", "index",
+        ]
+
+    def test_timeout_comes_from_shared_analysis_context(self):
+        frames = [
+            make_frame(number=1, epoch=1000, icmp_type="8", icmp_ident="7",
+                       ip_src="10.0.0.1", ip_dst="10.0.0.2",
+                       ta=STA1, ra=AP1, icmp_seq="1"),
+            make_frame(number=2, epoch=1001.5, icmp_type="0", icmp_ident="7",
+                       ip_src="10.0.0.2", ip_dst="10.0.0.1",
+                       ta=AP1, ra=STA1, icmp_seq="1"),
+        ]
+        index = FrameIndex(
+            frames, SAMPLE_ROLES,
+            analysis_context={"ping_timeout_sec": 1.0},
+        )
+
+        sec = ping_rtt.analyze(frames, SAMPLE_ROLES, index)
+
+        assert any("Timeout 1초: 정상 0건, 지연 응답 1건" in line for line in sec.lines)
+
     def test_ping_matching(self):
         frames = [
             make_frame(number=1, epoch=1000, icmp_type="8", ip_src="10.0.0.1", ip_dst="10.0.0.2",

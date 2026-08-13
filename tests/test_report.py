@@ -113,6 +113,20 @@ def test_correlations_section_with_signals_labels():
     assert "Retry 27%" in md
 
 
+def test_timeout_aware_correlation_uses_timeout_label():
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {
+            "summary": {"loss_metric": "timeout_ng"},
+            "correlations": [{
+                "title": "Ping timeout 영향", "confidence": 0.8,
+                "signals": [{"type": "high_loss"}],
+            }],
+        },
+    }))
+    assert "결합 신호: Ping Timeout/NG" in md
+    assert "결합 신호: Ping Loss" not in md
+
+
 def test_correlations_c_numbering_continuous_with_invalid_items():
     """non-dict 항목이 섞여도 C1, C2 연속 번호."""
     md = build_report_markdown(_result(structured={
@@ -673,6 +687,28 @@ def test_ping_section_with_ground_truth():
     assert text.index("유선 확정") < text.index("무선 관측")
 
 
+def test_ping_section_renders_timeout_and_late_separately():
+    structured = {"ping": {
+        "stats": {
+            "count": 98, "loss_count": 2, "loss_pct": 2.0,
+            "reply_timeout_sec": 1.0, "late_count": 3,
+            "timeout_count": 5, "timeout_pct": 5.0,
+            "avg": 4.0, "p95": 8.0,
+        },
+        "ground_truth": {
+            "total": 100, "ok": 95, "ng": 5, "loss_pct": 5.0,
+            "reply_timeout_sec": 1.0, "late_count": 3,
+            "unanswered_count": 2,
+        },
+    }}
+    text = "\n".join(_ping_section(structured))
+    assert "Timeout/NG 5건" in text
+    assert "기준 1초" in text
+    assert "지연 응답 3건" in text
+    assert "무응답 2건" in text
+    assert "Timeout 5.0%(5)" in text
+
+
 def test_ping_section_without_ground_truth_unchanged():
     structured = {"ping": {"stats": {"count": 90, "loss_pct": 10.0, "loss_count": 10,
                                      "avg": 5.2, "p95": 9.9}}}
@@ -740,6 +776,37 @@ def test_health_summary_line_always_present():
     assert "Ping Loss 3.0%" in md
     assert "로밍 8회(느린 2)" in md
     assert "지연구간 4건" in md and "이상프레임 1건" in md
+
+
+def test_timeout_aware_health_summary_uses_timeout_ng_name():
+    md = build_report_markdown(_result(structured={
+        "diagnosis": {
+            "health": {"score": 70, "grade": "주의"},
+            "component_scores": {"retry": 100, "loss": 0, "roaming": 100},
+            "summary": {
+                "retry_pct": 0, "loss_pct": 2.0,
+                "loss_pct_used": 10.0, "loss_basis": "wired_gt",
+                "loss_metric": "timeout_ng",
+            },
+        },
+    }))
+    assert "Ping Timeout/NG 10.0% (유선 확정)" in md
+    assert "Ping Loss 10.0%" not in md
+
+
+def test_timeout_aware_wired_report_uses_observed_rtt_stats():
+    md = build_report_markdown(_result(structured={
+        "ping": {"ground_truth": {
+            "total": 2, "ok": 1, "ng": 1, "loss_pct": 50.0,
+            "reply_timeout_sec": 1.0, "late_count": 1, "unanswered_count": 0,
+            "rtt_stats": {"n": 1, "avg_ms": 100.0, "p95_ms": 100.0},
+            "observed_rtt_stats": {"n": 2, "avg_ms": 800.0, "p95_ms": 1500.0},
+        }},
+        "diagnosis": {"component_scores": {"loss": 0}},
+    }))
+    assert "평균 관측 RTT 800.0ms" in md
+    assert "P95 관측 RTT 1500.0ms" in md
+    assert "평균 RTT 100.0ms" not in md
 
 
 def test_sta_diags_sub_scores_rendered():

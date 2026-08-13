@@ -26,6 +26,7 @@ from .detector import mac_name
 
 
 PING_MATCH_WINDOW_SEC = 30.0
+DEFAULT_REPLY_TIMEOUT_SEC = 1.0
 # seq gap 검출 시 wrap-around나 ident 충돌로 인한 거대한 점프는 무시
 _MAX_REASONABLE_GAP = 1000
 
@@ -34,6 +35,22 @@ _MAX_REASONABLE_GAP = 1000
 # 장치별(structured.py) 탐지가 이 상수와 find_time_streaks를 공유해 기준을 단일화한다.
 LOSS_STREAK_GAP_SEC = 2.0
 LOSS_STREAK_MIN_LEN = 2
+
+
+def validate_reply_timeout_sec(
+    value: float, window_sec: float = PING_MATCH_WINDOW_SEC
+) -> float:
+    """Ping 응답 제한시간을 검증해 float로 반환한다."""
+    import math
+
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or not 0 < value <= window_sec
+    ):
+        raise ValueError(f"Ping timeout은 0초 초과 {window_sec:g}초 이하여야 합니다.")
+    return float(value)
 
 
 def find_time_streaks(
@@ -133,6 +150,8 @@ def _flow_key_for_reply_swapped(f: Frame) -> Tuple[str, str, str]:
 #: (ping_pairs/ping_losses), 생성부가 리터럴을 쓰면 한쪽만 바뀌었을 때 조용히
 #: 빈 목록이 된다 — 예외도 로그도 없이 ping 근거가 통째로 사라진다.
 MATCHED_STATUS = "matched"
+LATE_STATUS = "late"
+PAIRED_STATUSES = (MATCHED_STATUS, LATE_STATUS)
 LOSS_STATUS = "loss"
 LOSS_GAP_STATUS = "loss_gap"
 LOSS_STATUSES = (LOSS_STATUS, LOSS_GAP_STATUS)
@@ -179,7 +198,9 @@ def build_ping_matches(
     frames: List[Frame],
     roles: Dict[str, Dict[str, Any]],
     window_sec: float = PING_MATCH_WINDOW_SEC,
+    reply_timeout_sec: float = DEFAULT_REPLY_TIMEOUT_SEC,
 ) -> Dict[str, Any]:
+    reply_timeout_sec = validate_reply_timeout_sec(reply_timeout_sec, window_sec)
     # === Phase 1: 흐름별 수집 + retry dedup ===
     request_flows: Dict[Tuple[str, str, str], List[Frame]] = {}
     reply_flows: Dict[Tuple[str, str, str], List[Frame]] = {}
@@ -254,7 +275,12 @@ def build_ping_matches(
             if match is not None:
                 matched_req_ids.add(id(req))
                 matched_reply_ids.add(id(match))
-                entry = _entry_from_frame(req, roles, MATCHED_STATUS, reply=match)
+                status = (
+                    MATCHED_STATUS
+                    if match.epoch - req.epoch <= reply_timeout_sec
+                    else LATE_STATUS
+                )
+                entry = _entry_from_frame(req, roles, status, reply=match)
                 full_list.append(entry)
                 pairs.append(entry)
 
@@ -379,6 +405,9 @@ def build_ping_matches(
     else:
         capture_mode = "none"
 
+    late_count = sum(1 for p in pairs if p.get("status") == LATE_STATUS)
+    on_time_count = len(pairs) - late_count
+    timeout_count = late_count + len(losses)
     extra_stats = {
         "req_total_raw": req_total_raw,
         "req_retry_bit": req_retry_bit,
@@ -389,6 +418,10 @@ def build_ping_matches(
         "reply_unique_count": len(reply_unique_keys),
         # 신규 필드
         "rtt_matched": len(pairs),
+        "reply_timeout_sec": reply_timeout_sec,
+        "on_time_count": on_time_count,
+        "late_count": late_count,
+        "timeout_count": timeout_count,
         "seq_gap_losses": seq_gap_losses,
         "unmeasurable_count": unmeasurable_count,
         # Phase 2b 교차 검증 결과 — 양방향 흐름에서만 의미 있음
@@ -406,8 +439,10 @@ def build_ping_matches(
     measurable_base = len(pairs) + len(losses) + unmeasurable_count
     if measurable_base:
         stats["loss_pct"] = round(len(losses) * 100 / measurable_base, 2)
+        stats["timeout_pct"] = round(timeout_count * 100 / measurable_base, 2)
     else:
         stats["loss_pct"] = 0
+        stats["timeout_pct"] = 0
 
     return {
         "full_list": full_list,
@@ -516,7 +551,7 @@ def ping_pairs(ping: Dict[str, Any]) -> List[Dict[str, Any]]:
         return got
     return [
         e for e in (ping.get("full_list") or [])
-        if isinstance(e, dict) and e.get("status") == MATCHED_STATUS
+        if isinstance(e, dict) and e.get("status") in (MATCHED_STATUS, LATE_STATUS)
     ]
 
 

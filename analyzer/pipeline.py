@@ -11,6 +11,11 @@ from .core.channels import ap_channel_map
 from .core.detector import detect_roles
 from .core.indexer import FrameIndex
 from .core.merge import merge_captures
+from .core.ping_matching import (
+    DEFAULT_REPLY_TIMEOUT_SEC,
+    PING_MATCH_WINDOW_SEC,
+    validate_reply_timeout_sec,
+)
 from .core.timeparse import parse_local_epoch
 from .core.wired_ping import build_ground_truth
 from .core.modules import (
@@ -23,7 +28,6 @@ from .web.anomaly_frames import detect_anomalies
 from .web.signal_cliff import analyze_signal_cliffs
 from .web.evidence import build_debug_block
 from .web.structured import (
-    PING_MATCH_WINDOW_SEC,
     is_special_ip,
     _structured_overview,
     _structured_signal,
@@ -190,8 +194,17 @@ def run_analysis(
     station_logs: Optional[List[Dict[str, Any]]] = None,
     progress_cb: Optional[Callable[[str, int], None]] = None,
     cancel_event: Optional[Any] = None,
+    ping_timeout_sec: float = DEFAULT_REPLY_TIMEOUT_SEC,
 ) -> Dict[str, Any]:
     """전체 분석 파이프라인 실행. 구조화된 결과를 반환."""
+
+    try:
+        ping_timeout_sec = validate_reply_timeout_sec(ping_timeout_sec)
+    except ValueError as exc:
+        return {
+            "error": str(exc),
+            "error_code": "INVALID_PING_TIMEOUT",
+        }
 
     def _cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
@@ -421,7 +434,11 @@ def run_analysis(
         return {"cancelled": True}
 
     _progress("프레임 인덱싱 중...", 40)
-    index = FrameIndex(frames, roles)
+    index = FrameIndex(
+        frames,
+        roles,
+        analysis_context={"ping_timeout_sec": ping_timeout_sec},
+    )
 
     _progress("분석 모듈 실행 중...", 50)
 
@@ -477,7 +494,9 @@ def run_analysis(
         return {"cancelled": True}
 
     _progress("시각화: Ping 데이터 생성 중...", 93)
-    structured["ping"] = _structured_ping(frames, roles)
+    structured["ping"] = _structured_ping(
+        frames, roles, reply_timeout_sec=ping_timeout_sec
+    )
     if _cancelled():
         return {"cancelled": True}
 
@@ -523,6 +542,7 @@ def run_analysis(
                 time_end=time_end,
                 ip_filter=ip_filter,
                 derived_ip_filter=wired_derived_filter,
+                reply_timeout=ping_timeout_sec,
                 cancel_event=cancel_event,
             )
             if gt.get("cancelled"):

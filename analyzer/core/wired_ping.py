@@ -1,6 +1,6 @@
 """유선(포트 미러) pcap에서 ping ground truth를 만든다.
 
-검증된 exping의 ICMP 추출·매칭 규칙(응답 인정 상한 1초)을 재사용한다 — 대시보드용
+검증된 exping의 ICMP 추출·매칭 규칙(기본 응답 인정 상한 1초)을 재사용한다 — 대시보드용
 으로 EXPING xlsx 재현 규칙(RTT 정수 보정, 전각 문자열)은 쓰지 않고 Exchange 수준
 에서 소비한다. docs/EXPING.md 참조.
 
@@ -15,7 +15,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import exping
-from .ping_matching import find_time_streaks
+from .ping_matching import (
+    PING_MATCH_WINDOW_SEC,
+    find_time_streaks,
+    validate_reply_timeout_sec,
+)
 from .timeparse import parse_local_epoch as _parse_local_epoch
 
 #: streaks 항목 수 상한 — 비정상 캡처(수천 구간)로 결과 JSON이 비대해지는 것 방지
@@ -28,14 +32,26 @@ _CAPINFOS_TIMEOUT_SEC = 30
 _CAPINFOS_POLL_SEC = 0.2
 
 
-def _rtt_stats(exchanges: List["exping.Exchange"]) -> Optional[Dict[str, Any]]:
+def _rtt_stats(
+    exchanges: List["exping.Exchange"], *, include_late: bool = False
+) -> Optional[Dict[str, Any]]:
     """응답 있는 exchange의 RTT 통계(ms). 응답 0건이면 None — 정직한 공백
     원칙(스펙 §1): 0이나 가짜 값으로 채우면 '무손실·0ms'로 오독된다.
+
+    기본값은 기존 계약대로 timeout 이내 ``rtt``만 집계한다. ``include_late``면
+    정상 응답은 ``rtt``, timeout 초과 응답은 ``late_rtt``를 사용해 실제로 관측된
+    모든 reply의 RTT를 집계한다. 한 exchange에는 둘 중 하나만 설정된다.
 
     p95는 정렬 후 nearest-rank(ceil(0.95*n)-1 인덱스) — 외부 의존성 없이
     n=1에서도 안전하다.
     """
-    rtts = sorted(x.rtt for x in exchanges if x.rtt is not None)
+    rtts = sorted(
+        observed
+        for x in exchanges
+        if (observed := x.rtt if x.rtt is not None else (
+            x.late_rtt if include_late else None
+        )) is not None
+    )
     if not rtts:
         return None
     n = len(rtts)
@@ -119,8 +135,11 @@ def _filter_exchanges(
             # 버려, 응답이 마침 end_epoch에 정확히 걸치는 경우(무선 필터
             # `frame.time < time_end`는 그 프레임을 배제)까지 answered로 새어
             # 나갔다 — 무선의 배타적 `<`와 정확히 같은 경계에서 일치시킨다.
-            response_outside = x.rtt is None or (x.time + x.rtt) >= end_epoch
-            if near_boundary and response_outside:
+            observed_rtt = x.rtt if x.rtt is not None else x.late_rtt
+            response_outside = (
+                observed_rtt is not None and (x.time + observed_rtt) >= end_epoch
+            )
+            if near_boundary and (response_outside or observed_rtt is None):
                 boundary_excluded += 1
                 continue
             kept.append(x)
@@ -309,7 +328,7 @@ def _drop_unreachable_tail(
     kept: List["exping.Exchange"] = []
     dropped = 0
     for x in exchanges:
-        if not x.answered and x.time > threshold:
+        if not x.response_observed and x.time > threshold:
             dropped += 1
             continue
         kept.append(x)
@@ -343,7 +362,10 @@ def _unverified_unanswered_count(
         return 0
     # IcmpFrame은 tuple 별칭(namedtuple 아님) — 첫 필드(epoch)만 필요하므로 언패킹.
     latest = max(epoch for epoch, *_rest in frames)
-    return sum(1 for x in exchanges if not x.answered and x.time + reply_timeout >= latest)
+    return sum(
+        1 for x in exchanges
+        if not x.response_observed and x.time + reply_timeout >= latest
+    )
 
 
 def build_ground_truth(
@@ -409,6 +431,10 @@ def build_ground_truth(
     미확인"과 구분하기 위해)에도 확인해 같은 값을 반환한다.
     """
     warnings: List[str] = []
+    try:
+        reply_timeout = validate_reply_timeout_sec(reply_timeout)
+    except ValueError as exc:
+        return {"error": str(exc), "warnings": warnings}
     # 추출 경고만 담는 **전용** 리스트. 공용 warnings를 그대로 넘기면
     # `extraction_partial = bool(warnings)`가 "이 줄 이전에 다른 경고가 추가되지
     # 않는다"는 암묵적 순서 계약에 의존하게 된다 — 나중에 누가 무관한 정보성
@@ -484,7 +510,9 @@ def build_ground_truth(
 
     # 요청↔응답 짝짓기는 전체 캡처 기준(필터 이전) — 창 끝 근처 요청의 응답이
     # 창 밖(그러나 캡처 안)에 있어도 매칭돼야 하기 때문.
-    exchanges = exping.pair_exchanges(frames, sender, reply_timeout)
+    exchanges = exping.pair_exchanges(
+        frames, sender, reply_timeout, late_window=PING_MATCH_WINDOW_SEC
+    )
 
     # drop 이전 체크: sender가 보낸 요청이 하나도 없는 경우 (pick_sender가 cohort에서
     # sender를 뽑은 이상 이론상 도달하지 않지만, 방어적으로 유지)
@@ -548,14 +576,21 @@ def build_ground_truth(
             return {"error": "필터 구간에 echo request 가 없다", "warnings": warnings}
 
     ng = [x for x in exchanges if not x.answered]
+    late = [x for x in exchanges if x.late_rtt is not None]
+    unanswered = [x for x in exchanges if not x.response_observed]
     targets: Dict[str, Dict[str, int]] = {}
     for x in exchanges:
-        t = targets.setdefault(x.target, {"total": 0, "ng": 0})
+        t = targets.setdefault(x.target, {"total": 0, "ng": 0, "late": 0, "unanswered": 0})
         t["total"] += 1
         t["ng"] += 0 if x.answered else 1
+        t["late"] += 1 if x.late_rtt is not None else 0
+        t["unanswered"] += 0 if x.response_observed else 1
 
     streaks: List[Dict[str, Any]] = []
     for target in sorted(targets):
+        # EXPING의 연속 NG 계약을 유지한다. 지연 응답도 timeout/NG이므로 포함하며,
+        # 소비자는 신규 reply_timeout_sec가 있으면 이를 물리적 손실이 아니라
+        # "Timeout/NG 구간"으로 표시한다.
         epochs = sorted(x.time for x in ng if x.target == target)
         for si, ei in find_time_streaks(epochs):
             streaks.append({
@@ -575,6 +610,9 @@ def build_ground_truth(
         "total": total,
         "ok": total - len(ng),
         "ng": len(ng),
+        "late_count": len(late),
+        "unanswered_count": len(unanswered),
+        "reply_timeout_sec": reply_timeout,
         "loss_pct": round(len(ng) * 100 / total, 2) if total else 0.0,
         "sender": sender,
         "targets": targets,
@@ -591,12 +629,19 @@ def build_ground_truth(
     # 모두 반영된 뒤의 리스트라 total == len(exchanges)가 항상 성립한다.
     result["exchanges"] = [
         {"epoch": x.time, "target": x.target,
-         "rtt_ms": round(x.rtt * 1000, 3) if x.rtt is not None else None}
+         "rtt_ms": round(x.rtt * 1000, 3) if x.rtt is not None else None,
+         "late_rtt_ms": round(x.late_rtt * 1000, 3) if x.late_rtt is not None else None}
         for x in exchanges
     ]
     rtt_stats = _rtt_stats(exchanges)
     if rtt_stats is not None:
         result["rtt_stats"] = rtt_stats
+    observed_rtt_stats = _rtt_stats(exchanges, include_late=True)
+    if observed_rtt_stats is not None:
+        # 신규 timeout-aware 화면은 정상+지연 응답 trace를 모두 보여준다. 기존
+        # rtt_stats(정상 응답 전용)의 의미를 바꾸지 않고 별도 모집단을 노출해 KPI,
+        # 상세 표, 히스토그램이 trace와 같은 관측 응답을 요약하게 한다.
+        result["observed_rtt_stats"] = observed_rtt_stats
     if time_end:
         # 13라운드의 경계 배제(_filter_exchanges: 응답 창이 time_end를 넘어갈
         # 여지가 있고 실제 응답도 경계 밖인 요청 제외)는 유선 GT에만 적용됐다 —

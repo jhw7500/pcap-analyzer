@@ -12,7 +12,7 @@ from analyzer.pipeline import (
     _structured_system_stats,
     _structured_diagnosis,
 )
-from analyzer.casefile_builder import build_casefile
+from analyzer.casefile_builder import _filter_ping_window, build_casefile
 from analyzer.core.ping_matching import ping_losses, ping_pairs
 
 
@@ -58,6 +58,18 @@ class TestStructuredSignal:
 
 
 class TestStructuredPing:
+    def test_custom_timeout_is_preserved_and_classifies_late(self):
+        frames = [
+            make_frame(number=1, epoch=1000, icmp_type="8", ip_src="10.0.0.1",
+                       ip_dst="10.0.0.2", icmp_seq="1"),
+            make_frame(number=2, epoch=1001.5, icmp_type="0", ip_src="10.0.0.2",
+                       ip_dst="10.0.0.1", icmp_seq="1"),
+        ]
+        result = _structured_ping(frames, SAMPLE_ROLES, reply_timeout_sec=1.0)
+        assert result["stats"]["reply_timeout_sec"] == 1.0
+        assert result["stats"]["late_count"] == 1
+        assert ping_pairs(result)[0]["status"] == "late"
+
     def test_matched_pair(self):
         frames = [
             make_frame(
@@ -1048,6 +1060,13 @@ class TestStructuredDiagnosis:
 
 
 class TestCasefileBuilder:
+    def test_casefile_window_keeps_late_reply_in_pairs(self):
+        late = {"epoch": 1001.0, "status": "late", "rtt_ms": 1500.0}
+        window = _filter_ping_window([late], 1000.0, 1002.0)
+        assert window["full_list"] == [late]
+        assert window["pairs"] == [late]
+        assert window["losses"] == []
+
     def test_casefile_ping_parity_exact(self):
         frames = [
             make_frame(
@@ -1191,6 +1210,57 @@ class TestLossJudgedByWiredGroundTruth:
         assert d["summary"]["loss_pct"] == 8.0
         # 100 - 0.38*10 = 96.2 (무선이면 100 - 82.4 = 17.6)
         assert d["component_scores"]["loss"] == 96
+
+    def test_timeout_aware_gt_names_global_metric_and_issue(self):
+        """지연 응답만으로 NG가 커져도 물리적 Ping Loss라고 표시하지 않는다."""
+        d = _structured_diagnosis(self._structured(
+            wireless_loss=10.0,
+            wireless_loss_items=10,
+            gt={
+                "total": 100, "ok": 90, "ng": 10, "loss_pct": 10.0,
+                "late_count": 10, "unanswered_count": 0,
+                "reply_timeout_sec": 1.0,
+            },
+        ))
+
+        assert d["summary"]["loss_metric"] == "timeout_ng"
+        assert d["component_scores"]["loss"] == 0
+        issues = [i for i in d["issues"] if i.get("signal_type") == "high_loss"]
+        assert len(issues) == 1
+        assert "Ping Timeout/NG 10.0%" in issues[0]["msg"]
+        assert "Ping Loss" not in issues[0]["msg"]
+
+    def test_late_only_timeout_uses_late_requests_as_issue_evidence(self):
+        """물리 손실 0건이어도 지연 request 프레임이 Timeout/NG의 근거가 된다."""
+        structured = self._structured(
+            wireless_loss=0.0,
+            wireless_loss_items=0,
+            gt={
+                "total": 100, "ok": 90, "ng": 10, "loss_pct": 10.0,
+                "late_count": 10, "unanswered_count": 0,
+                "reply_timeout_sec": 1.0,
+            },
+        )
+        structured["ping"]["full_list"] = (
+            [{"status": "late", "req_num": 3000 + i, "epoch": 2200.0 + i}
+             for i in range(10)]
+            + [{"status": "matched", "req_num": 4000 + i, "epoch": 2300.0 + i}
+               for i in range(90)]
+        )
+
+        d = _structured_diagnosis(structured)
+        issues = [i for i in d["issues"] if i.get("signal_type") == "high_loss"]
+        assert len(issues) == 1
+        assert issues[0]["frame_refs"] == list(range(3000, 3010))
+        assert issues[0]["time_window"] == {
+            "start_epoch": 2200.0, "end_epoch": 2209.0,
+        }
+
+    def test_legacy_gt_keeps_physical_loss_metric_name(self):
+        d = _structured_diagnosis(self._structured(
+            gt={"total": 100, "ok": 90, "ng": 10, "loss_pct": 10.0},
+        ))
+        assert d["summary"]["loss_metric"] == "loss"
 
     def test_without_gt_uses_wireless(self):
         """구버전 result(ground_truth 키 없음)는 기존 동작 그대로."""

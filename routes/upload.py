@@ -16,6 +16,7 @@ from fastapi.templating import Jinja2Templates
 
 import config
 from analyzer.core.pcap_magic import has_valid_pcap_magic
+from analyzer.core.ping_matching import validate_reply_timeout_sec
 from analyzer.errors import ErrorCode, error_payload
 from analyzer.core.split_merge import merge_split_captures, merged_display_name
 from analyzer.core.station_log import STATION_LOG_FILES
@@ -479,12 +480,19 @@ async def upload_pcap(
     ip_filter: str = Form(""),
     time_start: str = Form(""),
     time_end: str = Form(""),
+    ping_timeout_sec: str = Form("1"),
     independent_validation: bool = Form(False),
     client_job_id: str = Form(""),
 ):
     tshark = config.detect_tshark()
     if not tshark:
         return JSONResponse(error_payload(ErrorCode.TSHARK_MISSING), status_code=500)
+    try:
+        parsed_ping_timeout = validate_reply_timeout_sec(float(ping_timeout_sec))
+    except (TypeError, ValueError):
+        return JSONResponse(
+            error_payload(ErrorCode.INVALID_PING_TIMEOUT), status_code=400
+        )
     if independent_validation and any(
         value.strip() for value in (mac_filter, ip_filter, time_start, time_end)
     ):
@@ -606,6 +614,7 @@ async def upload_pcap(
             wireless_paths=wireless_tmps,
             wired_path=wired_tmp,
             station_logs=station_entries,
+            ping_timeout_sec=parsed_ping_timeout,
             cancel_event=cancel_event,
             progress_cb=analysis_progress,
         )

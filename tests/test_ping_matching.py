@@ -24,6 +24,39 @@ def _reply(seq, epoch, number):
                       icmp_type="0", icmp_seq=str(seq), icmp_ident=IDENT)
 
 
+class TestReplyTimeoutClassification:
+    def test_exact_boundary_is_on_time_and_after_boundary_is_late(self):
+        frames = [
+            _req(1, 1000.0, 1), _reply(1, 1001.0, 2),
+            _req(2, 1002.0, 3), _reply(2, 1003.001, 4),
+        ]
+        result = build_ping_matches(frames, {}, reply_timeout_sec=1.0)
+
+        assert [p["status"] for p in result["pairs"]] == ["matched", "late"]
+        assert result["stats"]["on_time_count"] == 1
+        assert result["stats"]["late_count"] == 1
+        assert result["stats"]["timeout_count"] == 1
+        assert result["stats"]["timeout_pct"] == 50.0
+        assert result["stats"]["loss_count"] == 0
+
+    def test_late_reply_remains_a_pair_not_a_loss(self):
+        result = build_ping_matches(
+            [_req(1, 1000.0, 1), _reply(1, 1002.0, 2)],
+            {},
+            reply_timeout_sec=1.0,
+        )
+        stripped = {k: v for k, v in result.items() if k not in ("pairs", "losses")}
+        assert ping_pairs(stripped)[0]["status"] == "late"
+        assert ping_losses(stripped) == []
+
+    def test_invalid_timeout_is_rejected(self):
+        import pytest
+
+        for value in (0, -1, 31, float("nan"), float("inf")):
+            with pytest.raises(ValueError, match="Ping timeout"):
+                build_ping_matches([], {}, reply_timeout_sec=value)
+
+
 class TestFullyUnobservedExcluded:
     def test_seq_gap_both_missing_not_counted_as_loss(self):
         # req/reply seq 1,2,5 (양쪽 관측). seq 3,4는 양쪽 미관측 → fully_unobserved.
@@ -167,7 +200,9 @@ class TestStatusVocabularyIsShared:
 
         src = inspect.getsource(pm.build_ping_matches)
         src += inspect.getsource(pm._entry_from_frame)
-        for literal in ('"matched"', "'matched'", '"loss"', "'loss'"):
+        for literal in (
+            '"matched"', "'matched'", '"late"', "'late'", '"loss"', "'loss'"
+        ):
             assert literal not in src, f"생성부에 리터럴 {literal}이 남아 있다"
 
     def test_renaming_the_constant_is_caught(self):

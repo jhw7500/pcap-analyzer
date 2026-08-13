@@ -16,7 +16,7 @@
 
     // 옵션 폼 localStorage 캐시 (파일은 제외, 텍스트 옵션만)
     const OPT_KEY = 'pcap.upload.options';
-    const OPT_FIELDS = ['ssid', 'passphrase', 'mac_filter', 'ip_filter', 'time_start', 'time_end', 'independent_validation'];
+    const OPT_FIELDS = ['ssid', 'passphrase', 'mac_filter', 'ip_filter', 'time_start', 'time_end', 'ping_timeout_sec', 'independent_validation'];
     function restoreOptions() {
         try {
             const saved = JSON.parse(localStorage.getItem(OPT_KEY) || '{}');

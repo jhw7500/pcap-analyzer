@@ -48,7 +48,9 @@ def test_counts_ok_ng_and_loss_pct(tmp_path):
     assert gt["total"] == 3 and gt["ok"] == 2 and gt["ng"] == 1
     assert gt["loss_pct"] == pytest.approx(33.33)
     assert gt["sender"] == "10.0.0.1"
-    assert gt["targets"] == {"10.0.0.2": {"total": 3, "ng": 1}}
+    assert gt["targets"] == {
+        "10.0.0.2": {"total": 3, "ng": 1, "late": 0, "unanswered": 1}
+    }
     assert gt["ng_epochs"] == [101.0]
     assert gt["trailing_dropped"] == 0
 
@@ -78,6 +80,76 @@ def test_streaks_grouped_per_target(tmp_path):
     assert st["end_epoch"] == pytest.approx(103.0)
     assert st["count"] == 3
     assert st["duration_sec"] == pytest.approx(2.0)
+
+
+def test_late_reply_is_timeout_but_separate_from_unanswered(tmp_path):
+    body = (
+        "printf '100.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        "printf '101.5\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+        "printf '102.0\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t2\\t\\n'\n"
+        "printf '102.1\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t2\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body), reply_timeout=1.0
+    )
+    assert gt["total"] == 2
+    assert gt["ok"] == 1
+    assert gt["ng"] == 1
+    assert gt["late_count"] == 1
+    assert gt["unanswered_count"] == 0
+    assert gt["reply_timeout_sec"] == 1.0
+    assert gt["exchanges"][0]["rtt_ms"] is None
+    assert gt["exchanges"][0]["late_rtt_ms"] == pytest.approx(1500.0)
+    # 기존 rtt_stats는 정상 응답만이라는 직렬화 계약을 유지한다. 신규 관측
+    # 통계는 실제로 수신한 정상+지연 응답을 모두 포함해 화면 요약과 trace가
+    # 서로 모순되지 않게 한다.
+    assert gt["rtt_stats"] == {
+        "n": 1, "min_ms": 100.0, "avg_ms": 100.0,
+        "max_ms": 100.0, "p95_ms": 100.0,
+    }
+    assert gt["observed_rtt_stats"] == {
+        "n": 2, "min_ms": 100.0, "avg_ms": 800.0,
+        "max_ms": 1500.0, "p95_ms": 1500.0,
+    }
+
+
+def test_timeout_aware_wired_chart_uses_observed_rtts():
+    """유선 KPI와 히스토그램이 지연 응답을 관측 RTT 모집단에 포함한다."""
+    from pathlib import Path
+
+    src = Path("static/js/charts.js").read_text(encoding="utf-8")
+    assert "gt.observed_rtt_stats || gt.rtt_stats" in src
+    assert "e.rtt_ms ?? e.late_rtt_ms" in src
+    assert "Ping Timeout/NG" in src
+
+
+def test_timeout_aware_wireless_chart_labels_observed_rtts():
+    """지연 응답을 포함하는 무선 KPI는 관측 RTT임을 라벨에 명시한다."""
+    from pathlib import Path
+
+    src = Path("static/js/charts.js").read_text(encoding="utf-8")
+    assert "{ label: '평균 관측 RTT', value: s.avg" in src
+    assert "{ label: 'P95 관측 RTT', value: s.p95" in src
+
+
+def test_timeout_aware_wired_chart_relabels_streaks():
+    """지연 응답도 포함한 유선 streak를 물리 손실이라고 표시하지 않는다."""
+    from pathlib import Path
+
+    src = Path("static/js/charts.js").read_text(encoding="utf-8")
+    template = Path("templates/analysis.html").read_text(encoding="utf-8")
+    assert "compareTimeout ? '연속 Timeout/NG 구간' : '연속 손실 구간'" in src
+    assert "const streakKind = gt?.reply_timeout_sec != null ? 'Timeout/NG' : '손실';" in src
+    assert 'id="ping-streak-description"' in template
+    assert "인접 Timeout/NG 간격 ≤2초" in src
+
+
+def test_wired_loss_marker_scales_against_late_rtts():
+    """무응답 X 마커가 초 단위 지연 응답 아래에 묻히지 않는다."""
+    from pathlib import Path
+
+    src = Path("static/js/charts.js").read_text(encoding="utf-8")
+    assert "e.rtt_ms ?? e.late_rtt_ms ?? 0" in src
 
 
 def test_trailing_unanswered_dropped_with_warning(tmp_path, monkeypatch):
@@ -110,6 +182,13 @@ def test_wireless_capture_returns_error(tmp_path):
 def test_missing_tshark_returns_error():
     gt = wired_ping.build_ground_truth("x.pcapng", tshark_path="/nonexistent/tshark-xyz")
     assert "tshark" in gt["error"]
+
+
+def test_invalid_reply_timeout_rejected_before_tshark():
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path="/nonexistent/tshark-xyz", reply_timeout=0
+    )
+    assert "Ping timeout" in gt["error"]
 
 
 def test_all_requests_unanswered_100_loss(tmp_path, monkeypatch):
@@ -219,7 +298,9 @@ def test_ip_filter_target_only_selects_matching_sender_and_narrows(tmp_path):
     assert "error" not in gt
     assert gt["sender"] == "10.0.0.1"
     assert gt["total"] == 1
-    assert gt["targets"] == {"10.0.0.3": {"total": 1, "ng": 0}}
+    assert gt["targets"] == {
+        "10.0.0.3": {"total": 1, "ng": 0, "late": 0, "unanswered": 0}
+    }
 
 
 def test_ip_filter_keeps_all_when_sender_listed(tmp_path):
@@ -764,6 +845,27 @@ def test_time_end_boundary_request_kept_when_reply_arrives_before_boundary(tmp_p
     assert not any("구간 끝 경계 요청" in w for w in gt["warnings"])
 
 
+def test_timeout_before_time_end_kept_when_late_reply_is_after_boundary(tmp_path):
+    """응답 제한시간이 구간 안에서 이미 끝난 요청은 late reply가 time_end 뒤에
+    관측돼도 Timeout/NG 모집단에 남는다."""
+    end_epoch = _local_epoch("2026-01-01 10:00:10")
+    req = end_epoch - 2.0
+    late_rep = end_epoch + 0.2
+    body = (
+        f"printf '{req}\\t10.0.0.1\\t10.0.0.2\\t8\\t7\\t1\\t\\n'\n"
+        f"printf '{late_rep}\\t10.0.0.2\\t10.0.0.1\\t0\\t7\\t1\\t\\n'\n"
+    )
+    gt = wired_ping.build_ground_truth(
+        "x.pcapng", tshark_path=_fake_tshark(tmp_path, body),
+        time_end="2026-01-01 10:00:10", reply_timeout=1.0,
+    )
+    assert "error" not in gt
+    assert gt["total"] == 1
+    assert gt["ng"] == 1
+    assert gt["late_count"] == 1
+    assert not any("구간 끝 경계 요청" in w for w in gt["warnings"])
+
+
 def test_time_end_boundary_keeps_requests_whose_reply_window_closes_inside(tmp_path):
     """응답 창이 경계에서 충분히 멀어 안에서 완전히 닫히는 요청은 정상 포함된다 —
     과잉 배제 방지."""
@@ -870,7 +972,10 @@ def test_exchanges_and_rtt_stats_exposed(tmp_path):
     answered = [e for e in gt["exchanges"] if e["rtt_ms"] is not None]
     assert len(answered) == gt["ok"]
     assert all(e["rtt_ms"] > 0 for e in answered)
-    assert all(set(e) == {"epoch", "target", "rtt_ms"} for e in gt["exchanges"])
+    assert all(
+        set(e) == {"epoch", "target", "rtt_ms", "late_rtt_ms"}
+        for e in gt["exchanges"]
+    )
 
     rs = gt["rtt_stats"]
     assert rs["n"] == gt["ok"]

@@ -15,7 +15,11 @@ EXPING 은 시험에 쓰는 일본산 Windows ping 도구다. 6열 CSV 를 뽑�
 | 로그가 잘렸거나, 시계가 어긋났거나, 아예 없다 | `exping-from-pcap.py` — pcap 에서 재구성 |
 
 > 웹 대시보드도 같은 매칭 규칙을 재사용한다 — 업로드 폼에 유선 pcap을 함께
-> 넣으면 `analyzer/core/wired_ping.py`가 ground truth를 계산한다.
+> 넣으면 `analyzer/core/wired_ping.py`가 ground truth를 계산한다. 업로드 화면의
+> Ping timeout(기본 1초)을 넘긴 응답은 Timeout/NG로 판정하되, 실제 무응답과
+> 혼동하지 않도록 **지연 응답**으로 별도 집계·표시한다. 종합 진단도 이 모집단을
+> 물리적 `Ping Loss`가 아닌 `Ping Timeout/NG`로 표시한다. 유선 RTT 요약과
+> 히스토그램은 정상·지연 응답을 합친 **관측 RTT** 기준이며, 무응답은 제외한다.
 
 실측 사례. 2026-07-21 캠페인은 테스트 9개 전부 EXPING 로그가 **마지막 1,000행(약 2분)만**
 남아 있었고, 그나마 로그 시계가 보정 pcap 대비 **41초** 어긋나 있었다. 20분짜리 시험의

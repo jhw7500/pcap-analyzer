@@ -305,6 +305,17 @@ class TestProjectPingSeriesAlignment:
         assert p["count"] == 3
         assert p["loss_pct"] == 33.3
 
+    def test_late_reply_is_projected_as_an_observed_response(self):
+        axis = build_time_axis(
+            [[_success(1000.0), _loss(1010.0)]], bin_size_sec=10.0
+        )
+        points = project_ping_series(
+            [{"epoch": 1001.0, "status": "late", "rtt_ms": 1500.0}], axis
+        )
+        assert len(points) == 1
+        assert points[0]["success"] == 1
+        assert points[0]["loss"] == 0
+
     def test_loss_gap_status_counts_as_loss(self):
         # seq-gap 추정 손실("loss_gap")도 손실로 집계된다.
         axis = build_time_axis(
