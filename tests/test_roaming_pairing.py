@@ -13,6 +13,7 @@ Reassoc이 수십 초 전 낡은 Auth와 짝지어진 것. 17건 중 16건은 AP
 from tests.conftest import AP1, STA1, make_frame
 
 from analyzer.core.modules.roaming import (
+    _SAME_AUTH_EXCHANGE_SEC,
     ASSOC_ATTEMPT_MAX_SEC,
     GAP_BASIS_REQUEST,
     GAP_BASIS_RESPONSE,
@@ -75,6 +76,19 @@ class TestAnchorConsumption:
         ]
         assert _gaps_ms(pair_roaming_sequences(frames, STA_MACS)) == [5.0, 7.0]
 
+    def test_auth_for_other_ap_is_not_consumed(self):
+        """대상 AP가 다른 Auth는 소비하지도, 다음 로밍까지 남기지도 않는다."""
+        frames = [
+            _auth_req(1, 1000.000, ap=AP1),
+            _reassoc(2, 1000.005, ap=AP2),
+            _reassoc(3, 1005.000, ap=AP1),
+        ]
+
+        pairs = pair_roaming_sequences(frames, STA_MACS)
+
+        assert _gaps_ms(pairs) == [None, None]
+        assert all(pair.auth is None for pair in pairs)
+
 
 class TestAssociationAttemptDedup:
     """같은 로밍 안의 Reassoc 반복이 새 로밍·측정불가로 부풀지 않는다."""
@@ -106,6 +120,18 @@ class TestAssociationAttemptDedup:
         ]
         assert _gaps_ms(pair_roaming_sequences(frames, STA_MACS)) == [5.0, 6.0]
 
+    def test_delayed_retry_does_not_discard_other_ap_auth(self):
+        """AP1 지연 재시도를 버릴 때 진행 중인 AP2 Auth는 보존한다."""
+        frames = [
+            _auth_req(1, 1000.000, ap=AP1),
+            _reassoc(2, 1000.005, ap=AP1),
+            _auth_req(3, 1000.100, ap=AP2),
+            _reassoc(4, 1000.150, ap=AP1),  # 지연 도착한 앞 시도의 반복
+            _reassoc(5, 1000.200, ap=AP2),
+        ]
+
+        assert _gaps_ms(pair_roaming_sequences(frames, STA_MACS)) == [5.0, 100.0]
+
     def test_different_target_without_auth_is_not_merged(self):
         frames = [
             _auth_req(1, 1000.000), _reassoc(2, 1000.005),
@@ -119,6 +145,15 @@ class TestAssociationAttemptDedup:
             _reassoc(3, 1000.005 + ASSOC_ATTEMPT_MAX_SEC + 0.001),
         ]
         assert _gaps_ms(pair_roaming_sequences(frames, STA_MACS)) == [5.0, None]
+
+    def test_independent_verifier_uses_same_attempt_window(self):
+        from scripts.roaming_independent_verify import (
+            DEFAULT_ASSOC_ATTEMPT_MS,
+            DEFAULT_SAME_AUTH_EXCHANGE_MS,
+        )
+
+        assert DEFAULT_ASSOC_ATTEMPT_MS == ASSOC_ATTEMPT_MAX_SEC * 1000
+        assert DEFAULT_SAME_AUTH_EXCHANGE_MS == _SAME_AUTH_EXCHANGE_SEC * 1000
 
 
 class TestApSideFallback:

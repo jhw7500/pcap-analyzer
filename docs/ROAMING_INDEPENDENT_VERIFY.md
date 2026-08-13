@@ -15,7 +15,7 @@
 2. 공통 `(BSSID, Beacon TSF)`의 중앙값으로 관측점 시각을 정렬한다.
 3. 시퀀스·subtype·retry를 기준으로 관측점 간 같은 프레임만 제거한다.
 4. Auth부터 Assoc/Reassoc까지 독립 로밍 거래 원장을 만든다. 새 Auth가 없는 동일
-   STA→AP/subtype의 1초 이내 반복은 하나의 연결 시도로 묶는다.
+   STA→AP/subtype의 200ms 이내 반복은 하나의 연결 시도로 묶는다.
 5. STA 로그별 로밍 원장을 만들고 AP·시간 잔차로 STA MAC과 자동 바인딩한다.
 6. STA 체감시간을 우선하여 150ms 초과를 느린 로밍으로 판정하고, STA 로그가 없는
    거래만 pcap 100ms 기준으로 보완한다.
@@ -102,6 +102,23 @@ python3 scripts/roaming_independent_verify.py \
 - `tmp/test14_validation/independent-result.json`
 - `tmp/test14_validation/independent-result.md`
 - `tmp/test14_validation/web-independent-result.json` (웹 어댑터 경로)
+
+## Association 반복 병합 창 실측
+
+TEST13(주 스니퍼, DFK 저장 실패)과 TEST14(주 스니퍼+DFK)를 각각 2시간 전체 구간에서
+Auth/Assoc/Reassoc/EAPOL 프레임으로 다시 추출하고 병합 창만 바꿔 비교했다.
+
+| 로그 | 창 | 거래 | 병합 반복 | 측정 불가 |
+|---|---:|---:|---:|---:|
+| TEST13 | 100ms | 864 | 135 | 3 |
+| TEST13 | 200ms~1.5s | 864 | 135 | 3 |
+| TEST14 | 100~150ms | 883 | 31 | 1 |
+| TEST14 | 200ms~1.5s | 882 | 32 | 0 |
+
+TEST14에는 154ms 간격의 실제 동일 association 재시도가 있어 150ms 창은 부족했다.
+반면 두 로그 모두 200ms부터 1.5초까지 결과가 더 변하지 않았다. 따라서 1초를 유지할
+실측 이득은 없고 Auth 미포착 별도 로밍을 합칠 범위만 넓어지므로, 분석기와 독립
+검증기 모두 실측상 가장 작은 안정 구간인 **200ms**로 일원화했다.
 
 ## 한계
 

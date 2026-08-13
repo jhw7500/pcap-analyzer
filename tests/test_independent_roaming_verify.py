@@ -146,6 +146,41 @@ def test_packet_ledger_collapses_same_attempt_even_when_retry_arrives_first():
     assert [row.auth_number for row in rows] == [1, 4]
 
 
+def test_packet_ledger_does_not_consume_auth_for_another_ap():
+    sta = "00:00:00:00:00:01"
+    ap1, ap2 = "00:00:00:00:00:a1", "00:00:00:00:00:a2"
+    events = [
+        packet(epoch=1.0, subtype=11, ta=sta, ra=ap1, number=1),
+        packet(epoch=1.1, subtype=2, ta=sta, ra=ap2, number=2),
+        packet(epoch=6.0, subtype=2, ta=sta, ra=ap1, number=3),
+    ]
+
+    rows, _ = verify.build_packet_ledger(events, [sta])
+
+    assert len(rows) == 2
+    assert [row.ap for row in rows] == [ap2, ap1]
+    assert all(row.auth_epoch is None for row in rows)
+    assert all(row.gap_ms is None for row in rows)
+
+
+def test_packet_ledger_delayed_retry_preserves_other_ap_auth():
+    sta = "00:00:00:00:00:01"
+    ap1, ap2 = "00:00:00:00:00:a1", "00:00:00:00:00:a2"
+    events = [
+        packet(epoch=1.000, subtype=11, ta=sta, ra=ap1, number=1),
+        packet(epoch=1.005, subtype=2, ta=sta, ra=ap1, number=2),
+        packet(epoch=1.100, subtype=11, ta=sta, ra=ap2, number=3),
+        packet(epoch=1.150, subtype=2, ta=sta, ra=ap1, number=4),
+        packet(epoch=1.200, subtype=2, ta=sta, ra=ap2, number=5),
+    ]
+
+    rows, meta = verify.build_packet_ledger(events, [sta])
+
+    assert meta["association_repeats_collapsed"] == 1
+    assert [row.ap for row in rows] == [ap1, ap2]
+    assert [row.gap_ms for row in rows] == [5.0, 100.0]
+
+
 def test_parse_wpa_log_builds_success_and_failure_ledger(tmp_path):
     path = tmp_path / "wpa.log"
     path.write_text(
@@ -167,6 +202,27 @@ def test_parse_wpa_log_builds_success_and_failure_ledger(tmp_path):
     assert rows[0].failed is False
     assert rows[1].failed is True
     assert rows[1].fail_reason == "CTRL-EVENT-ASSOC-REJECT"
+
+
+def test_parse_wpa_log_streams_instead_of_reading_whole_file(tmp_path, monkeypatch):
+    path = tmp_path / "wpa.log"
+    path.write_text(
+        "2026-07-23 13:00:00.000 Control interface command "
+        "'ROAM aa:aa:aa:aa:aa:01'\n"
+        "2026-07-23 13:00:00.100 CTRL-EVENT-CONNECTED - Connection to "
+        "aa:aa:aa:aa:aa:01 completed\n",
+        encoding="utf-8",
+    )
+
+    def reject_read_text(*_args, **_kwargs):
+        raise AssertionError("wpa.log 전체 읽기 금지")
+
+    monkeypatch.setattr(Path, "read_text", reject_read_text)
+
+    rows = verify.parse_wpa_log(path, "1호기")
+
+    assert len(rows) == 1
+    assert rows[0].total_ms == 100.0
 
 
 def test_station_timestamp_timezone_is_host_independent():
