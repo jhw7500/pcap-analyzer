@@ -56,20 +56,41 @@
                     <label class="block text-xs text-gray-500 mb-1">종료 시간</label>
                     <input type="text" name="time_end" placeholder="YYYY-MM-DD HH:MM:SS" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
                 </div>
-                <div>
+                <div class="col-span-2">
                     <label class="block text-xs text-gray-500 mb-1">Ping timeout (초)</label>
                     <input type="number" name="ping_timeout_sec" value="1" min="0.001" max="30" step="0.001"
-                           class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
+                           class="w-full max-w-xs bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
                     <p class="text-gray-500 text-xs mt-1">이 시간 이후 도착한 응답은 지연 응답으로 별도 표시합니다. 기본 1초.</p>
                 </div>
-                <div>
-                    <label class="block text-sm text-gray-400 mb-1">유선 pcap (선택 — ping ground truth)</label>
-                    <input type="file" name="wired_file" id="wired-file" multiple accept=".pcap,.pcapng,.cap"
-                           data-max-mb="{{ max_upload_mb }}"
-                           class="w-full text-sm text-gray-300 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-gray-700 file:text-gray-300">
-                    <p class="text-gray-500 text-xs mt-1">포트 미러링 유선 캡처 — 확정 손실률(ground truth) 계산에 사용.
-                        분할된 경우 조각을 함께 선택하면 이어붙입니다.</p>
+
+                <!-- 추가 pcap 입력은 한 블록에 모은다 — 주 캡처(위 드롭존)와 성격이 다른
+                     보조 캡처라 종류별로 흩어져 있으면 어디에 무엇을 올리는지 헷갈린다. -->
+                <div class="col-span-2 bg-gray-900/50 border border-gray-700 rounded-lg p-3">
+                    <p class="text-sm font-semibold text-gray-300 mb-1">추가 pcap 파일 (선택)</p>
+                    <p class="text-gray-500 text-xs mb-3">
+                        주 캡처는 위 드롭존에 올립니다. 여기는 <span class="text-gray-400">성격이 다른 보조 캡처</span>만 —
+                        한 스니퍼가 쪼갠 조각은 여기가 아니라 위 드롭존에 함께 올리세요.
+                    </p>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-1">유선 pcap (ping ground truth)</label>
+                            <input type="file" name="wired_file" id="wired-file" multiple accept=".pcap,.pcapng,.cap"
+                                   data-max-mb="{{ max_upload_mb }}"
+                                   class="w-full text-sm text-gray-300 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-gray-700 file:text-gray-300">
+                            <p class="text-gray-500 text-xs mt-1">포트 미러링 유선 캡처 — 확정 손실률(ground truth) 계산에 사용.
+                                분할된 경우 조각을 함께 선택하면 이어붙입니다.</p>
+                        </div>
+                        <div>
+                            <label class="block text-sm text-gray-400 mb-1">추가 무선 스니퍼 (최대 {{ max_extra_wireless_files }}대)</label>
+                            <input type="file" name="wireless_files" id="wireless-files" multiple accept=".pcap,.pcapng,.cap"
+                                   data-max-mb="{{ max_upload_mb }}"
+                                   data-max-count="{{ max_extra_wireless_files }}"
+                                   class="w-full text-sm text-gray-300 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-gray-700 file:text-gray-300">
+                            <p class="text-gray-500 text-xs mt-1">같은 구간을 <span class="text-gray-400">다른 위치에서 동시에</span> 캡처한 파일 — TSF 정렬 후 중복 제거 통합.</p>
+                        </div>
+                    </div>
                 </div>
+
                 <div class="col-span-2">
                     <label class="block text-sm text-gray-400 mb-1">STA 로그 (선택)</label>
                     <div id="station-drop"
@@ -98,14 +119,6 @@
                         호기 폴더를 통째로 선택하면 STA는 IP로 자동 매칭됩니다.
                     </p>
                     <p id="station-logs-summary" class="text-blue-400 text-xs mt-1 hidden"></p>
-                </div>
-                <div>
-                    <label class="block text-sm text-gray-400 mb-1">추가 무선 스니퍼 (선택 — 최대 3대)</label>
-                    <input type="file" name="wireless_files" id="wireless-files" multiple accept=".pcap,.pcapng,.cap"
-                           data-max-mb="{{ max_upload_mb }}"
-                           class="w-full text-sm text-gray-300 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-gray-700 file:text-gray-300">
-                    <p class="text-gray-500 text-xs mt-1">같은 구간을 <span class="text-gray-400">다른 위치에서 동시에</span> 캡처한 파일 — TSF 정렬 후 중복 제거 통합.
-                        (한 스니퍼가 쪼갠 조각은 여기가 아니라 위 드롭존에 함께 올리세요)</p>
                 </div>
                 <div class="col-span-2 bg-gray-900/50 border border-cyan-800 rounded-lg p-3">
                     <label class="flex items-start gap-3 cursor-pointer">

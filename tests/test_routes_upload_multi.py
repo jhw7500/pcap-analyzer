@@ -1,5 +1,6 @@
 """POST /api/upload의 wireless_files(다중 무선) 처리."""
 import json
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -46,15 +47,32 @@ def test_wireless_files_passed_to_pipeline(mock_run, _tshark, tmp_path, monkeypa
 
 
 @patch("routes.upload.config.detect_tshark", return_value="tshark")
+def test_wireless_files_at_limit_accepted(_tshark, tmp_path, monkeypatch):
+    """관측점이 정확히 상한이면 통과 — 상한을 올렸을 때 그 값이 실제로 열리는지."""
+    import config
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    extra = upload_module._MAX_WIRELESS_FILES - 1
+    files = [("file", ("w1.pcapng", PCAP_MAGIC, "application/octet-stream"))]
+    files += [
+        ("wireless_files", (f"w{i + 2}.pcapng", PCAP_MAGIC, "application/octet-stream"))
+        for i in range(extra)
+    ]
+    with patch("routes.upload.run_analysis", side_effect=_ok_result) as mock_run:
+        resp = client.post("/api/upload", files=files)
+    assert resp.status_code == 200
+    assert len(mock_run.call_args.kwargs["wireless_paths"]) == extra
+
+
+@patch("routes.upload.config.detect_tshark", return_value="tshark")
 def test_wireless_files_over_limit_rejected(_tshark):
-    """file(1) + wireless_files(4) = 총 5개 → 상한(4) 초과로 400."""
-    resp = client.post("/api/upload", files=[
-        ("file", ("w1.pcapng", PCAP_MAGIC, "application/octet-stream")),
-        ("wireless_files", ("w2.pcapng", PCAP_MAGIC, "application/octet-stream")),
-        ("wireless_files", ("w3.pcapng", PCAP_MAGIC, "application/octet-stream")),
-        ("wireless_files", ("w4.pcapng", PCAP_MAGIC, "application/octet-stream")),
-        ("wireless_files", ("w5.pcapng", PCAP_MAGIC, "application/octet-stream")),
-    ])
+    """관측점이 상한을 1개 넘으면 400 — 상한값 자체는 상수에서 읽는다."""
+    over = upload_module._MAX_WIRELESS_FILES  # file(1) + 이만큼 = 상한 + 1
+    files = [("file", ("w1.pcapng", PCAP_MAGIC, "application/octet-stream"))]
+    files += [
+        ("wireless_files", (f"w{i + 2}.pcapng", PCAP_MAGIC, "application/octet-stream"))
+        for i in range(over)
+    ]
+    resp = client.post("/api/upload", files=files)
     assert resp.status_code == 400
     assert resp.json()["code"] == "TOO_MANY_FILES"
 
@@ -140,3 +158,16 @@ def test_wireless_names_substituted_in_order(mock_run, _tshark, tmp_path, monkey
     names = [s["name"] for s in saved["structured"]["sources"] if s["role"] == "wireless"]
     assert names == ["primary.pcapng", "second.pcapng"]
     assert saved["pcap_names"] == ["primary.pcapng", "second.pcapng"]
+
+
+def test_wireless_limit_shown_from_server_constant():
+    """라벨·클라이언트 검사값이 서버 상한에서 나온다.
+
+    둘 중 하나라도 상수를 따로 적어두면 _MAX_WIRELESS_FILES를 바꿨을 때 화면만
+    옛 숫자를 말하게 된다 — 사용자는 서버가 받아주는 개수를 화면으로만 알 수 있다.
+    """
+    expected = upload_module._MAX_WIRELESS_FILES - 1  # 기본(file) 1개 제외
+    html = client.get("/").text
+    tag = re.search(r'<input[^>]+id="wireless-files"[^>]*>', html).group(0)
+    assert f'data-max-count="{expected}"' in tag
+    assert f"최대 {expected}대" in html

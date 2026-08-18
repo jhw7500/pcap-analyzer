@@ -108,12 +108,12 @@ from analyzer.web.structured import (  # noqa: E402
 
 
 def _f(number, epoch, *, ta="", ra="", retry=False, subtype="40",
-       mcs="", mcs_phy="", data_rate="", rssi=""):
+       mcs="", mcs_phy="", data_rate="", rssi="", nss=""):
     return Frame(
         number=number, epoch=epoch, timestamp="", retry=retry, subtype=subtype,
         protocol="", length=100, mcs=mcs, rssi=rssi, ta=ta, ra=ra,
         ip_src="", ip_dst="", icmp_type="", arp_opcode="", tcp_len="",
-        tcp_flags="", seq="", mcs_phy=mcs_phy, data_rate=data_rate,
+        tcp_flags="", seq="", mcs_phy=mcs_phy, data_rate=data_rate, nss=nss,
     )
 
 
@@ -169,6 +169,57 @@ def test_device_bucket_stats_skips_corrupt_epochs():
             "tx_total": 1, "phy_mode_dist": {},
         },
     ]
+
+
+# ── NSS(공간 스트림) 집계 ──────────────────────────────────────────────────
+def test_device_nss_by_phy_and_mcs_cross():
+    """HE는 캡처 필드, HT는 MCS 파생. MCS×NSS 교차에 retry가 함께 나온다."""
+    frames = [
+        _f(1, 1000.0, ta="aa", mcs="0x0007", mcs_phy="HE", nss="0x0001"),
+        _f(2, 1000.1, ta="aa", mcs="0x0007", mcs_phy="HE", nss="0x0001", retry=True),
+        _f(3, 1000.2, ta="aa", mcs="0x0007", mcs_phy="HE", nss="0x0002"),
+        _f(4, 1000.3, ta="aa", mcs="0x0004", mcs_phy="HE", nss="0x0002"),
+        _f(5, 1000.4, ta="aa", mcs="9", mcs_phy="HT"),        # 9 // 8 + 1 = 2SS
+        _f(6, 1000.5, ta="aa", data_rate="6", mcs_phy="Legacy"),  # NSS 개념 없음
+    ]
+    entry = _device_entry_stats(frames, lambda f: f.ta == "aa", "aa", "STA")
+
+    assert entry["nss_by_phy"] == {"HE": {"1": 2, "2": 2}, "HT": {"2": 1}}
+    assert entry["mcs_nss_by_phy"] == {
+        "HE": {
+            "4": {"2": {"total": 1, "retry": 0, "retry_pct": 0}},
+            "7": {
+                "1": {"total": 2, "retry": 1, "retry_pct": 50.0},
+                "2": {"total": 1, "retry": 0, "retry_pct": 0},
+            },
+        },
+        "HT": {"9": {"2": {"total": 1, "retry": 0, "retry_pct": 0}}},
+    }
+    # NSS 스택 합은 기존 MCS 막대 총합과 일치해야 한다 (막대 높이 불변).
+    assert entry["mcs_by_phy"]["HE"] == {"4": 1, "7": 3}
+
+
+def test_device_nss_absent_leaves_empty_dicts():
+    """NSS 미기록 캡처는 빈 dict — 프론트가 기존 PHY×MCS 표시로 폴백한다."""
+    frames = [
+        _f(1, 1000.0, ta="aa", mcs="5", mcs_phy="VHT"),   # nss 필드 없음
+        _f(2, 1000.1, ta="aa", data_rate="6", mcs_phy="Legacy"),
+    ]
+    entry = _device_entry_stats(frames, lambda f: f.ta == "aa", "aa", "STA")
+    assert entry["nss_by_phy"] == {}
+    assert entry["mcs_nss_by_phy"] == {}
+    assert entry["mcs_by_phy"] == {"VHT": {"5": 1}, "Legacy": {"6": 1}}
+
+
+def test_device_nss_partial_coverage_keeps_mcs_total():
+    """일부 프레임만 NSS가 있으면 교차 합 < MCS 총합 — 잔여분이 드러나야 한다."""
+    frames = [
+        _f(1, 1000.0, ta="aa", mcs="5", mcs_phy="VHT", nss="2"),
+        _f(2, 1000.1, ta="aa", mcs="5", mcs_phy="VHT"),   # NSS 미상
+    ]
+    entry = _device_entry_stats(frames, lambda f: f.ta == "aa", "aa", "STA")
+    assert entry["mcs_by_phy"]["VHT"]["5"] == 2
+    assert entry["mcs_nss_by_phy"]["VHT"]["5"]["2"]["total"] == 1
 
 
 # ── _bucket_rssi_timeline (RSSI 1초 버킷 집계) ─────────────────────────────

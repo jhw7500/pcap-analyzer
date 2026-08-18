@@ -59,6 +59,39 @@ class TestFrameProperties:
         assert _make_frame(mcs="11,9").mcs_int == 11
         assert _make_frame(mcs="").mcs_int is None
 
+    def test_nss_int_ht_derived_from_mcs(self):
+        """11n은 NSS 필드가 없어 MCS 인덱스에서 파생한다 (8개 단위)."""
+        assert _make_frame(mcs="0", mcs_phy="HT").nss_int == 1
+        assert _make_frame(mcs="7", mcs_phy="HT").nss_int == 1
+        assert _make_frame(mcs="8", mcs_phy="HT").nss_int == 2
+        assert _make_frame(mcs="15", mcs_phy="HT").nss_int == 2
+        assert _make_frame(mcs="23", mcs_phy="HT").nss_int == 3
+        assert _make_frame(mcs="31", mcs_phy="HT").nss_int == 4
+        # MCS32는 HT duplicate(1SS), MCS33+는 unequal modulation이라 규칙 밖.
+        assert _make_frame(mcs="32", mcs_phy="HT").nss_int == 1
+        assert _make_frame(mcs="33", mcs_phy="HT").nss_int is None
+        assert _make_frame(mcs="", mcs_phy="HT").nss_int is None
+        # HT는 nss 필드가 채워져 있어도 MCS 파생이 우선 — 필드 자체가 없는 PHY다.
+        assert _make_frame(mcs="8", mcs_phy="HT", nss="1").nss_int == 2
+
+    def test_nss_int_from_capture_field(self):
+        """VHT/EHT는 10진, HE(radiotap)는 hex로 온다."""
+        assert _make_frame(mcs="5", mcs_phy="VHT", nss="2").nss_int == 2
+        assert _make_frame(mcs="7", mcs_phy="HE", nss="0x0002").nss_int == 2
+        assert _make_frame(mcs="7", mcs_phy="HE", nss="0x0001").nss_int == 1
+        assert _make_frame(mcs="3", mcs_phy="EHT", nss="4").nss_int == 4
+        # 다중 값은 첫 번째 (rssi/mcs와 동일 규칙)
+        assert _make_frame(mcs="5", mcs_phy="VHT", nss="2,1").nss_int == 2
+
+    def test_nss_int_unknown_cases(self):
+        """미상은 None — 0(HE NSTS의 unknown)이나 파싱 실패를 1SS로 단정하지 않는다."""
+        assert _make_frame(mcs="5", mcs_phy="VHT", nss="").nss_int is None
+        assert _make_frame(mcs="7", mcs_phy="HE", nss="0x0000").nss_int is None
+        assert _make_frame(mcs="5", mcs_phy="VHT", nss="bad").nss_int is None
+        assert _make_frame(mcs="5", mcs_phy="VHT", nss="  ").nss_int is None
+        # Legacy는 NSS 개념 자체가 없다
+        assert _make_frame(mcs="", mcs_phy="Legacy", data_rate="6").nss_int is None
+
     def test_time_short(self):
         f = _make_frame(timestamp="Jan  1, 2026 12:34:56.789000")
         assert "12:34:56" in f.time_short

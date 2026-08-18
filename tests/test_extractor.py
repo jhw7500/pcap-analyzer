@@ -170,6 +170,64 @@ class TestParseTsvLine:
         assert frame.tsf == ""
 
     def test_tshark_fields_contains_tsf_last(self):
-        """TSHARK_FIELDS 마지막 필드가 wlan.fixed.timestamp."""
+        """TSHARK_FIELDS[30]이 wlan.fixed.timestamp — 뒤에 NSS 필드가 붙어도 고정."""
         from analyzer.core.extractor import TSHARK_FIELDS
         assert TSHARK_FIELDS[30] == "wlan.fixed.timestamp"
+
+    def test_tshark_fields_nss_columns(self):
+        """NSS 필드는 기존 컬럼 인덱스를 밀지 않도록 뒤에 붙는다."""
+        from analyzer.core.extractor import TSHARK_FIELDS
+        assert TSHARK_FIELDS[31] == "wlan_radio.11ac.nss"
+        assert TSHARK_FIELDS[32] == "radiotap.he.data_6.nsts"
+        assert TSHARK_FIELDS[33] == "wlan_radio.11be.nsts"
+
+    @staticmethod
+    def _cols(**idx):
+        """34컬럼 TSV 한 줄 — idx로 개별 컬럼만 지정."""
+        cols = ["1", "1000.0", "ts", "0", "40", "802.11", "100"] + [""] * 27
+        for i, v in idx.items():
+            cols[int(i[1:])] = v  # "c21" → 21
+        return "\t".join(cols)
+
+    def test_parse_tsv_line_nss_vht(self):
+        """VHT 프레임은 cols[31](wlan_radio.11ac.nss)에서 NSS를 읽는다."""
+        frame = parse_tsv_line(self._cols(c21="5", c31="2"))
+        assert frame is not None
+        assert frame.mcs_phy == "VHT" and frame.mcs == "5"
+        assert frame.nss == "2" and frame.nss_int == 2
+
+    def test_parse_tsv_line_nss_he_hex(self):
+        """HE 프레임은 cols[32](radiotap.he.data_6.nsts) — hex 값."""
+        frame = parse_tsv_line(self._cols(c23="0x0007", c32="0x0002"))
+        assert frame is not None
+        assert frame.mcs_phy == "HE"
+        assert frame.nss == "0x0002" and frame.nss_int == 2
+
+    def test_parse_tsv_line_nss_eht(self):
+        """EHT 프레임은 cols[33](wlan_radio.11be.nsts)."""
+        frame = parse_tsv_line(self._cols(c22="3", c33="4"))
+        assert frame is not None
+        assert frame.mcs_phy == "EHT"
+        assert frame.nss == "4" and frame.nss_int == 4
+
+    def test_parse_tsv_line_nss_not_crossed_between_phys(self):
+        """다른 PHY 컬럼의 NSS를 섞어 읽지 않는다 — HE 프레임에 11ac.nss가 남아 있어도 무시."""
+        frame = parse_tsv_line(self._cols(c23="0x0007", c31="8", c32="0x0001"))
+        assert frame is not None
+        assert frame.mcs_phy == "HE" and frame.nss == "0x0001"
+
+    def test_parse_tsv_line_nss_ht_derived_without_field(self):
+        """HT는 NSS 컬럼이 없다 — MCS에서 파생되어야 한다."""
+        frame = parse_tsv_line(self._cols(c7="10"))
+        assert frame is not None
+        assert frame.mcs_phy == "HT" and frame.nss == ""
+        assert frame.nss_int == 2
+
+    def test_parse_tsv_line_nss_absent_backward_compat(self):
+        """NSS 컬럼 없는 짧은 줄(구버전 tshark 미지원 포함)도 그대로 파싱된다."""
+        cols = ["1", "1000.0", "ts", "0", "40", "802.11", "100"] + [""] * 15
+        cols[21] = "5"  # wlan_radio.11ac.mcs까지만 있고 NSS 컬럼은 없는 줄
+        frame = parse_tsv_line("\t".join(cols))
+        assert frame is not None
+        assert frame.mcs_phy == "VHT"
+        assert frame.nss == "" and frame.nss_int is None
