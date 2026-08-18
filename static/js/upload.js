@@ -51,7 +51,11 @@
     const MAX_BYTES = MAX_MB * 1024 * 1024;
     // 상한은 **조각 하나씩** 적용된다 — 서버도 파일 단위로 검사한다
     // (routes/upload.py `_save_pcap_upload`). 여러 조각을 고르면 전부 검사한다.
-    const MAX_SPLIT_PARTS = 32;
+    // 서버(routes/upload.py _MAX_SPLIT_PARTS / _MAX_WIRELESS_FILES)와 같은 값.
+    // 여기서 막는 건 실수를 업로드 전에 끊기 위함이고, 실제 방어선은 서버의
+    // 합계 용량 예산이다.
+    const MAX_SPLIT_PARTS = 128;
+    const MAX_EXTRA_WIRELESS = 7;
     function validateFiles(files) {
         if (!files || !files.length) return false;
         if (files.length > MAX_SPLIT_PARTS) {
@@ -290,8 +294,8 @@
 
         const wirelessInput = document.getElementById('wireless-files');
         if (wirelessInput && wirelessInput.files.length) {
-            if (wirelessInput.files.length > 3) {
-                alert('추가 무선 pcap은 최대 3개입니다.');
+            if (wirelessInput.files.length > MAX_EXTRA_WIRELESS) {
+                alert(`추가 무선 pcap은 최대 ${MAX_EXTRA_WIRELESS}개입니다.`);
                 return;
             }
             const maxMb = parseInt(wirelessInput.dataset.maxMb || fileInput.dataset.maxMb || '200', 10);

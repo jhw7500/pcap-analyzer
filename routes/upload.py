@@ -29,12 +29,21 @@ from routes.independent_validation import (
 
 _UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1MB
 _JOBS_MAX = 100  # 최근 N개만 유지
-_MAX_WIRELESS_FILES = 4  # 무선 **캡처(관측점)** 수: 기본(file) 1개 + wireless_files 최대 3개
-#: 한 캡처를 이루는 분할 조각 수 상한. 조각마다 max_upload_size가 따로
-#: 적용되므로 이 값은 디스크 폭주를 막는 상한이다(2시간 무선 캡처가 실측 3조각).
-_MAX_SPLIT_PARTS = 32
-#: STA 로그 세트 상한 — 호기(STA) 수 × 파일 3개. 넉넉히 잡되 무제한은 아니다.
-_MAX_STATION_LOG_FILES = 60
+#: 아래 **개수** 상한들은 리소스 방어선이 아니다 — 디스크를 실제로 지키는 건
+#: _MAX_REQUEST_TOTAL_BYTES 합계 예산(_UploadBudget)이고, 개수는 그 위에서
+#: **사용자 실수를 서버가 파일을 다 받기 전에 끊어주는** 역할만 한다(폴더를
+#: 통째로 잘못 드래그한 경우 등). 그래서 실측 대비 넉넉히 잡는다 — 정상적인
+#: 작업이 개수에 걸리면 안 되고, 걸려야 하는 건 합계 용량이다.
+#: 무선 **캡처(관측점)** 수: 기본(file) 1개 + wireless_files 최대 7개.
+#: merge_captures는 소스 태그 수에 상한이 없는 일반 구현이라(w1..wN) 알고리즘
+#: 제약은 없다. 다만 관측점마다 tshark 추출·dedup 비용이 붙는다.
+_MAX_WIRELESS_FILES = 8
+#: 한 캡처를 이루는 분할 조각 수 상한. 2시간 무선 캡처가 실측 3조각이지만,
+#: 로테이션을 100MB 단위로 잡은 스니퍼는 4시간에 30~40조각까지 나온다 —
+#: 실측의 10배가 아니라 그런 설정까지 통과하도록 잡는다.
+_MAX_SPLIT_PARTS = 128
+#: STA 로그 세트 상한 — 호기(STA) 수 × 파일 3개. 호기 60대까지 커버.
+_MAX_STATION_LOG_FILES = 200
 #: STA 로그 1개 파일 상한(bytes). 실측 wpa/kern/logger 각 0.4~0.6MB.
 _MAX_STATION_LOG_BYTES = 64 * 1024 * 1024
 #: 요청 하나가 임시 파일로 쓸 수 있는 **합계** 상한(bytes).

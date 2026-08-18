@@ -241,8 +241,10 @@ class TestUploadRoute:
         import config
         monkeypatch.setattr(config, "DATA_DIR", tmp_path)
         mock_run.side_effect = _ok_result
+        # 상한값은 상수에서 읽는다 — 상한을 조정해도 "1개 초과 시 거부" 의미가 유지된다.
+        from routes.upload import _MAX_SPLIT_PARTS
         files = [("file", (f"p{i}.pcapng", PCAP_MAGIC, "application/octet-stream"))
-                 for i in range(33)]
+                 for i in range(_MAX_SPLIT_PARTS + 1)]
         resp = client.post("/api/upload", files=files)
         assert resp.status_code == 400
         assert resp.json()["code"] == "TOO_MANY_FILES"

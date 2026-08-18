@@ -46,15 +46,32 @@ def test_wireless_files_passed_to_pipeline(mock_run, _tshark, tmp_path, monkeypa
 
 
 @patch("routes.upload.config.detect_tshark", return_value="tshark")
+def test_wireless_files_at_limit_accepted(_tshark, tmp_path, monkeypatch):
+    """관측점이 정확히 상한이면 통과 — 상한을 올렸을 때 그 값이 실제로 열리는지."""
+    import config
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    extra = upload_module._MAX_WIRELESS_FILES - 1
+    files = [("file", ("w1.pcapng", PCAP_MAGIC, "application/octet-stream"))]
+    files += [
+        ("wireless_files", (f"w{i + 2}.pcapng", PCAP_MAGIC, "application/octet-stream"))
+        for i in range(extra)
+    ]
+    with patch("routes.upload.run_analysis", side_effect=_ok_result) as mock_run:
+        resp = client.post("/api/upload", files=files)
+    assert resp.status_code == 200
+    assert len(mock_run.call_args.kwargs["wireless_paths"]) == extra
+
+
+@patch("routes.upload.config.detect_tshark", return_value="tshark")
 def test_wireless_files_over_limit_rejected(_tshark):
-    """file(1) + wireless_files(4) = 총 5개 → 상한(4) 초과로 400."""
-    resp = client.post("/api/upload", files=[
-        ("file", ("w1.pcapng", PCAP_MAGIC, "application/octet-stream")),
-        ("wireless_files", ("w2.pcapng", PCAP_MAGIC, "application/octet-stream")),
-        ("wireless_files", ("w3.pcapng", PCAP_MAGIC, "application/octet-stream")),
-        ("wireless_files", ("w4.pcapng", PCAP_MAGIC, "application/octet-stream")),
-        ("wireless_files", ("w5.pcapng", PCAP_MAGIC, "application/octet-stream")),
-    ])
+    """관측점이 상한을 1개 넘으면 400 — 상한값 자체는 상수에서 읽는다."""
+    over = upload_module._MAX_WIRELESS_FILES  # file(1) + 이만큼 = 상한 + 1
+    files = [("file", ("w1.pcapng", PCAP_MAGIC, "application/octet-stream"))]
+    files += [
+        ("wireless_files", (f"w{i + 2}.pcapng", PCAP_MAGIC, "application/octet-stream"))
+        for i in range(over)
+    ]
+    resp = client.post("/api/upload", files=files)
     assert resp.status_code == 400
     assert resp.json()["code"] == "TOO_MANY_FILES"
 
