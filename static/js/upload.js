@@ -55,6 +55,9 @@
     // 여기서 막는 건 실수를 업로드 전에 끊기 위함이고, 실제 방어선은 서버의
     // 합계 용량 예산이다.
     const MAX_SPLIT_PARTS = 128;
+    // 추가 무선 개수는 서버가 data-max-count로 내려준다(routes/upload.py 컨텍스트).
+    // 아래 값은 속성을 못 읽었을 때의 폴백일 뿐이라 서버 상한과 어긋나도
+    // 서버 검사가 최종 판정을 한다.
     const MAX_EXTRA_WIRELESS = 7;
     function validateFiles(files) {
         if (!files || !files.length) return false;
@@ -294,8 +297,9 @@
 
         const wirelessInput = document.getElementById('wireless-files');
         if (wirelessInput && wirelessInput.files.length) {
-            if (wirelessInput.files.length > MAX_EXTRA_WIRELESS) {
-                alert(`추가 무선 pcap은 최대 ${MAX_EXTRA_WIRELESS}개입니다.`);
+            const maxExtra = parseInt(wirelessInput.dataset.maxCount || '', 10) || MAX_EXTRA_WIRELESS;
+            if (wirelessInput.files.length > maxExtra) {
+                alert(`추가 무선 pcap은 최대 ${maxExtra}개입니다.`);
                 return;
             }
             const maxMb = parseInt(wirelessInput.dataset.maxMb || fileInput.dataset.maxMb || '200', 10);

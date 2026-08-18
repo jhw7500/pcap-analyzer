@@ -1,5 +1,6 @@
 """POST /api/upload의 wireless_files(다중 무선) 처리."""
 import json
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -157,3 +158,16 @@ def test_wireless_names_substituted_in_order(mock_run, _tshark, tmp_path, monkey
     names = [s["name"] for s in saved["structured"]["sources"] if s["role"] == "wireless"]
     assert names == ["primary.pcapng", "second.pcapng"]
     assert saved["pcap_names"] == ["primary.pcapng", "second.pcapng"]
+
+
+def test_wireless_limit_shown_from_server_constant():
+    """라벨·클라이언트 검사값이 서버 상한에서 나온다.
+
+    둘 중 하나라도 상수를 따로 적어두면 _MAX_WIRELESS_FILES를 바꿨을 때 화면만
+    옛 숫자를 말하게 된다 — 사용자는 서버가 받아주는 개수를 화면으로만 알 수 있다.
+    """
+    expected = upload_module._MAX_WIRELESS_FILES - 1  # 기본(file) 1개 제외
+    html = client.get("/").text
+    tag = re.search(r'<input[^>]+id="wireless-files"[^>]*>', html).group(0)
+    assert f'data-max-count="{expected}"' in tag
+    assert f"최대 {expected}대" in html

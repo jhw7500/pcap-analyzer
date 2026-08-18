@@ -81,9 +81,10 @@
                                 분할된 경우 조각을 함께 선택하면 이어붙입니다.</p>
                         </div>
                         <div>
-                            <label class="block text-sm text-gray-400 mb-1">추가 무선 스니퍼 (최대 7대)</label>
+                            <label class="block text-sm text-gray-400 mb-1">추가 무선 스니퍼 (최대 {{ max_extra_wireless_files }}대)</label>
                             <input type="file" name="wireless_files" id="wireless-files" multiple accept=".pcap,.pcapng,.cap"
                                    data-max-mb="{{ max_upload_mb }}"
+                                   data-max-count="{{ max_extra_wireless_files }}"
                                    class="w-full text-sm text-gray-300 file:mr-2 file:py-1 file:px-2 file:rounded file:border-0 file:bg-gray-700 file:text-gray-300">
                             <p class="text-gray-500 text-xs mt-1">같은 구간을 <span class="text-gray-400">다른 위치에서 동시에</span> 캡처한 파일 — TSF 정렬 후 중복 제거 통합.</p>
                         </div>

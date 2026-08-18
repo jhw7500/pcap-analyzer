@@ -216,6 +216,9 @@ def index(request: Request):
         "analyses": analyses,
         "offline_assets": config.is_offline_assets(),
         "max_upload_mb": config.max_upload_size() // (1024 * 1024),
+        # 서버 상한을 화면까지 흘려보낸다 — 라벨과 클라이언트 검사가 상수를 따로
+        # 적어두면 _MAX_WIRELESS_FILES를 바꿨을 때 조용히 어긋난다.
+        "max_extra_wireless_files": _MAX_WIRELESS_FILES - 1,  # 기본(file) 1개 제외
     })
 
 
