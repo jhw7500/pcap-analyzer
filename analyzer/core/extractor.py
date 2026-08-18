@@ -54,6 +54,12 @@ TSHARK_FIELDS = [
     "radiotap.channel.freq",      # cols[28] — 채널 주파수 MHz (채널/밴드 판별용)
     "wlan_rsna_eapol.keydes.msgnr",  # cols[29] — EAPOL 4-way 메시지 번호 1~4
     "wlan.fixed.timestamp",       # cols[30] — 비콘 TSF(µs). 캡처 간 시계 오프셋 추정 (merge.py)
+    # NSS(공간 스트림 수) — PHY별로 필드가 다르고, 11n(HT)은 전용 필드가 아예 없어
+    # MCS 인덱스에서 파생한다(Frame.nss_int). 미지원 tshark에선
+    # _filter_unsupported_fields가 자동 제외하고 빈 컬럼으로 패딩한다.
+    "wlan_radio.11ac.nss",        # cols[31] — 802.11ac (VHT)
+    "radiotap.he.data_6.nsts",    # cols[32] — 802.11ax (HE). "0x0002" 형태 hex
+    "wlan_radio.11be.nsts",       # cols[33] — 802.11be (EHT)
 ]
 
 
@@ -243,6 +249,16 @@ def parse_tsv_line(line: str) -> Optional[FrameType]:
             mcs_val, mcs_phy = he_val, "HE"
         else:
             mcs_val, mcs_phy = "", "Legacy"
+        # NSS는 MCS를 채택한 PHY의 컬럼에서만 읽는다 — 다른 PHY 컬럼을 섞어 읽으면
+        # (예: HE 프레임인데 11ac.nss) 서로 다른 PPDU 해석을 합치는 셈이 된다.
+        # HT는 필드가 없어 빈 값으로 두고 Frame.nss_int가 MCS에서 파생한다.
+        nss_val = ""
+        if mcs_phy == "VHT":
+            nss_val = cols[31] if len(cols) > 31 else ""
+        elif mcs_phy == "EHT":
+            nss_val = cols[33] if len(cols) > 33 else ""
+        elif mcs_phy == "HE":
+            nss_val = cols[32] if len(cols) > 32 else ""
         data_rate = cols[24] if len(cols) > 24 else ""
         return Frame(
             number=int(cols[0]),
@@ -266,6 +282,7 @@ def parse_tsv_line(line: str) -> Optional[FrameType]:
             seq=cols[18] if len(cols) > 18 else "",
             icmp_seq=cols[19] if len(cols) > 19 else "",
             mcs_phy=mcs_phy,
+            nss=nss_val,
             data_rate=data_rate,
             icmp_ident=cols[25] if len(cols) > 25 else "",
             reason_code=cols[26] if len(cols) > 26 else "",

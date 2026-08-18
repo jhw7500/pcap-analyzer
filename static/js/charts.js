@@ -758,9 +758,18 @@
             textinfo: 'label+percent', textposition: 'inside',
         }], { ...DARK }, { responsive: true, displayModeBar: false });
 
-        // MCS / 레거시 레이트 분포 (PHY 모드별 grouped bar)
+        // MCS / 레거시 레이트 분포 (PHY 모드별 stacked bar, NSS 있으면 스트림 수로 분할)
         const byPhy = s.mcs_by_phy || {};
+        const byMcsNss = s.mcs_nss_by_phy || {};
         const PHY_COLORS = { HT: '#facc15', VHT: '#06b6d4', HE: '#8b5cf6', EHT: '#ec4899', Legacy: '#9ca3af' };
+        // NSS별 음영 — 같은 PHY 계열 색을 스트림 수만큼 진하게. 1SS→4SS 순.
+        const PHY_NSS_SHADES = {
+            HT: ['#fde047', '#facc15', '#ca8a04', '#854d0e'],
+            VHT: ['#67e8f9', '#06b6d4', '#0e7490', '#164e63'],
+            HE: ['#c4b5fd', '#8b5cf6', '#6d28d9', '#4c1d95'],
+            EHT: ['#f9a8d4', '#ec4899', '#be185d', '#831843'],
+        };
+        const NSS_UNKNOWN_COLOR = '#4b5563';
         // 802.11 세대순: Legacy(b/g/a) → HT(11n) → VHT(11ac) → HE(11ax) → EHT(11be).
         // 데이터 없는 PHY는 아래 루프에서 자동 생략된다.
         const PHY_ORDER = ['Legacy', 'HT', 'VHT', 'HE', 'EHT'];
@@ -770,16 +779,66 @@
             if (!dist || Object.keys(dist).length === 0) continue;
             const sortedKeys = Object.keys(dist).sort((a, b) => parseFloat(a) - parseFloat(b));
             const labels = sortedKeys.map(k => phy === 'Legacy' ? `Legacy ${k}Mbps` : `${phy} MCS${k}`);
-            phyTraces.push({
-                type: 'bar',
-                name: phy,
-                x: labels,
-                y: sortedKeys.map(k => dist[k]),
-                marker: { color: PHY_COLORS[phy] },
-                text: sortedKeys.map(k => dist[k].toLocaleString()),
-                textposition: 'outside',
-                hovertemplate: '%{x}<br>프레임 %{y:,}<extra></extra>',
+            const nssMap = byMcsNss[phy] || {};
+            const nssKeys = [...new Set(sortedKeys.flatMap(k => Object.keys(nssMap[k] || {})))]
+                .sort((a, b) => parseInt(a) - parseInt(b));
+            // NSS 정보가 없는 PHY(Legacy·구버전 result·NSS 미기록 캡처)는 기존과
+            // 동일하게 PHY 하나짜리 막대로 그린다.
+            if (nssKeys.length === 0) {
+                phyTraces.push({
+                    type: 'bar',
+                    name: phy,
+                    x: labels,
+                    y: sortedKeys.map(k => dist[k]),
+                    marker: { color: PHY_COLORS[phy] },
+                    text: sortedKeys.map(k => dist[k].toLocaleString()),
+                    textposition: 'outside',
+                    hovertemplate: '%{x}<br>프레임 %{y:,}<extra></extra>',
+                });
+                continue;
+            }
+            const shades = PHY_NSS_SHADES[phy] || [PHY_COLORS[phy]];
+            const stackTraces = [];
+            for (const nss of nssKeys) {
+                const cells = sortedKeys.map(k => (nssMap[k] || {})[nss] || null);
+                if (!cells.some(c => c && c.total > 0)) continue;
+                stackTraces.push({
+                    type: 'bar',
+                    name: `${phy} ${nss}SS`,
+                    x: labels,
+                    y: cells.map(c => (c ? c.total : 0)),
+                    marker: { color: shades[Math.min(parseInt(nss), shades.length) - 1] },
+                    customdata: cells.map(c => (c ? [c.retry_pct, c.retry] : [0, 0])),
+                    hovertemplate:
+                        `%{x} · ${nss}SS<br>프레임 %{y:,}`
+                        + '<br>retry %{customdata[0]}% (%{customdata[1]:,})<extra></extra>',
+                });
+            }
+            // NSS를 못 읽은 잔여 프레임 — 스택 합이 막대 총합보다 작아지면 사용자가
+            // "프레임이 줄었다"고 오해한다. 미상분을 회색으로 정직하게 얹는다.
+            const unknown = sortedKeys.map(k => {
+                const known = Object.values(nssMap[k] || {}).reduce((a, c) => a + c.total, 0);
+                return Math.max(0, dist[k] - known);
             });
+            if (unknown.some(v => v > 0)) {
+                stackTraces.push({
+                    type: 'bar',
+                    name: `${phy} NSS 미상`,
+                    x: labels,
+                    y: unknown,
+                    marker: { color: NSS_UNKNOWN_COLOR },
+                    hovertemplate: '%{x} · NSS 미상<br>프레임 %{y:,}<extra></extra>',
+                });
+            }
+            // 스택 꼭대기 trace에만 MCS 총합 라벨 — NSS 없는 PHY 막대(text outside)와
+            // 표기를 맞춰, 스택으로 쪼개도 "이 MCS 총 몇 프레임"이 그대로 읽힌다.
+            if (stackTraces.length > 0) {
+                const top = stackTraces[stackTraces.length - 1];
+                top.text = sortedKeys.map(k => dist[k].toLocaleString());
+                top.textposition = 'outside';
+                top.cliponaxis = false;
+                phyTraces.push(...stackTraces);
+            }
         }
         // MCS별 retry% overlay (보조축 y2) — 각 PHY+MCS의 retry_pct를 마커+선으로.
         // 빈도(막대)와 retry%(점)를 함께 봐 "많이 쓴 MCS인데 retry도 높은가"를 판단.
@@ -814,9 +873,18 @@
         }
         if (phyTraces.length > 0) {
             const summary = s.phy_summary || {};
+            const nssByPhy = s.nss_by_phy || {};
             const summaryStr = PHY_ORDER
                 .filter(p => summary[p])
-                .map(p => `${p}=${summary[p].toLocaleString()}`)
+                .map(p => {
+                    const nd = nssByPhy[p];
+                    if (!nd || Object.keys(nd).length === 0) return `${p}=${summary[p].toLocaleString()}`;
+                    const parts = Object.keys(nd)
+                        .sort((a, b) => parseInt(a) - parseInt(b))
+                        .map(n => `${n}SS ${nd[n].toLocaleString()}`)
+                        .join(', ');
+                    return `${p}=${summary[p].toLocaleString()} (${parts})`;
+                })
                 .join(' / ');
             Plotly.newPlot('chart-device-mcs', phyTraces, {
                 ...DARK,
@@ -828,7 +896,9 @@
                     range: [0, Math.max(10, (retryY.length ? Math.max(...retryY) : 0) * 1.15)],
                     color: '#ef4444', showgrid: false,
                 },
-                barmode: 'group',
+                // stack: PHY끼리는 x 라벨이 겹치지 않아 그룹일 때와 총합이 같고,
+                // 같은 MCS 안의 NSS 구성만 색으로 쌓인다. 막대 높이 = 그 MCS 총 프레임.
+                barmode: 'stack',
                 showlegend: true,
                 legend: { orientation: 'h', y: 1.12 },
                 margin: { t: 50 },

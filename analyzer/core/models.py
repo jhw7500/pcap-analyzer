@@ -42,6 +42,8 @@ class Frame:
     icmp_seq: str = ""
     bssid: str = ""
     mcs_phy: str = ""  # "HT" | "VHT" | "HE" | "EHT" | "Legacy" — mcs 값 출처
+    nss: str = ""  # 공간 스트림 수 원본값. VHT/HE/EHT만 채워지고 HT는 MCS에서 파생
+    # (nss_int 참고). HE는 "0x0002" 형태 hex.
     data_rate: str = ""  # Mbps (legacy 송신 식별용)
     icmp_ident: str = ""  # ICMP echo identifier — 같은 src/dst 안의 흐름 구분용
     reason_code: str = ""  # wlan.fixed.reason_code — Deauth/Disassoc 사유 코드 (디버그 증거용)
@@ -130,6 +132,42 @@ class Frame:
             return int(first)
         except (ValueError, IndexError):
             return None
+
+    @property
+    def nss_int(self) -> Optional[int]:
+        """공간 스트림 수(NSS). 알 수 없으면 None.
+
+        PHY마다 출처가 다르다:
+        - VHT/HE/EHT: 캡처가 실어준 값(self.nss). HE는 "0x0002" 형태 hex.
+        - HT(11n): Wireshark에 NSS 필드가 없다. HT MCS 0~31은 8개 단위로 스트림
+          수가 올라가는 정의(0~7=1SS, 8~15=2SS, …)라 인덱스에서 복원한다.
+          MCS32는 HT duplicate로 1SS. MCS33 이상(unequal modulation)은 이 규칙이
+          성립하지 않아 None으로 남긴다.
+        - Legacy: 개념 자체가 없어 None.
+
+        주의: VHT/HE/EHT 필드는 엄밀히 NSTS(space-time streams)라 STBC를 쓰면
+        NSTS = 2×NSS다. 실측 캡처 대부분은 STBC 미사용이라 값이 일치한다.
+        """
+        if self.mcs_phy == "HT":
+            m = self.mcs_int
+            if m is None:
+                return None
+            if m == 32:
+                return 1
+            if 0 <= m <= 31:
+                return m // 8 + 1
+            return None
+        if not self.nss:
+            return None
+        first = self.nss.split(",")[0].strip()
+        if not first:
+            return None
+        try:
+            value = int(first, 16) if first.lower().startswith("0x") else int(first)
+        except (ValueError, IndexError):
+            return None
+        # radiotap HE NSTS의 0은 "미상"이다 — 스트림 0개가 아니라 정보 없음.
+        return value if value > 0 else None
 
     @property
     def time_short(self) -> str:

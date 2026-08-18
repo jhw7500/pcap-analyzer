@@ -758,6 +758,12 @@ def _device_entry_stats(dev_frames, is_tx, mac: str, role: str) -> Dict[str, Any
         "EHT": Counter(), "Legacy": Counter(),
     }
     phy_frame_count: "Counter[str]" = Counter()
+    # NSS(공간 스트림) 차원. HT는 MCS에서 파생, VHT/HE/EHT는 캡처 필드에서 온다
+    # (Frame.nss_int). 캡처가 NSS를 안 실어주면 비어 있고, 그때 프론트는 기존
+    # PHY×MCS 표시로 폴백한다 — 없는 값을 1SS로 단정하지 않는다.
+    nss_buckets: Dict[str, "Counter[str]"] = defaultdict(Counter)
+    mcs_nss_total: Dict[str, "Counter[Any]"] = defaultdict(Counter)
+    mcs_nss_retry: Dict[str, "Counter[Any]"] = defaultdict(Counter)
     for f in tx_frames:
         phy = getattr(f, "mcs_phy", "") or ""
         if phy in ("HT", "VHT", "HE", "EHT"):
@@ -774,6 +780,14 @@ def _device_entry_stats(dev_frames, is_tx, mac: str, role: str) -> Dict[str, Any
         phy_frame_count[phy] += 1
         if f.retry:
             phy_retry[phy][key] += 1
+        # Legacy는 NSS 개념이 없어 제외 (getattr — 구버전 Frame 호환).
+        nss = getattr(f, "nss_int", None) if phy != "Legacy" else None
+        if nss is not None:
+            nss_key = str(nss)
+            nss_buckets[phy][nss_key] += 1
+            mcs_nss_total[phy][(key, nss_key)] += 1
+            if f.retry:
+                mcs_nss_retry[phy][(key, nss_key)] += 1
     mcs_by_phy = {
         phy: dict(sorted(c.items(), key=lambda kv: float(kv[0])))
         for phy, c in phy_buckets.items() if c
@@ -791,6 +805,28 @@ def _device_entry_stats(dev_frames, is_tx, mac: str, role: str) -> Dict[str, Any
         }
         for phy in phy_buckets if phy_buckets[phy]
     }
+    # PHY별 NSS 분포 — "이 장치가 2SS를 실제로 얼마나 썼나"의 요약.
+    nss_by_phy = {
+        phy: dict(sorted(c.items(), key=lambda kv: int(kv[0])))
+        for phy, c in nss_buckets.items() if c
+    }
+    # PHY × MCS × NSS 교차 — 같은 MCS라도 1SS/2SS 중 어느 쪽이 retry가 높은지
+    # 구분한다. 값 구조는 mcs_retry_by_phy와 동일 {total, retry, retry_pct}.
+    mcs_nss_by_phy: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for phy, counts in mcs_nss_total.items():
+        if not counts:
+            continue
+        per_mcs: Dict[str, Dict[str, Any]] = {}
+        for (mcs_key, nss_key), total in sorted(
+            counts.items(), key=lambda kv: (float(kv[0][0]), int(kv[0][1]))
+        ):
+            retried = mcs_nss_retry[phy][(mcs_key, nss_key)]
+            per_mcs.setdefault(mcs_key, {})[nss_key] = {
+                "total": total,
+                "retry": retried,
+                "retry_pct": round(retried * 100 / total, 1) if total else 0,
+            }
+        mcs_nss_by_phy[phy] = per_mcs
     phy_summary = dict(phy_frame_count)
 
     rssis = [f.rssi_first for f in tx_frames if f.rssi_first is not None]
@@ -977,6 +1013,8 @@ def _device_entry_stats(dev_frames, is_tx, mac: str, role: str) -> Dict[str, Any
         "mcs_dist": mcs_named,
         "mcs_by_phy": mcs_by_phy,
         "mcs_retry_by_phy": mcs_retry_by_phy,
+        "nss_by_phy": nss_by_phy,
+        "mcs_nss_by_phy": mcs_nss_by_phy,
         "phy_summary": phy_summary,
         "rssi_stats": rssi_stats,
         "per_bucket": per_bucket if dev_frames else [],
