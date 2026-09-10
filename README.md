@@ -209,6 +209,13 @@ tests/        pytest (fixtures/ 포함)
 
 커밋 메시지는 Conventional Commits 규약을 따른다 (`.github/commitlint.config.mjs` 참조).
 
+### PR 리뷰
+
+Claude·Gemini 자동 리뷰가 필요하면 동일 저장소 브랜치의 PR에
+`review:request` 라벨을 붙이고 draft를 해제한다.
+`review:skip`이 함께 있으면 라벨 충돌을 먼저 해소한다.
+완료 여부는 현재 커밋에 대한 리뷰 결과와 실제 수행 여부로 확인한다.
+
 ## 라이선스
 
 내부 도구. 외부 배포는 별도 협의.
